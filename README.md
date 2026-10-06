@@ -1,5 +1,5 @@
 # Open Fabrica
-A Tribute to the Best Software in the World.
+A tribute to the best software in the world.
 
 ## Quick Start
 
