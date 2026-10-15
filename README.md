@@ -1,6 +1,9 @@
 # Open Fabrica
 A tribute to the best software in the world.
 
+## Where's the source?
+We will decide on that after our public preview release.
+
 ## Quick Start
 
 **Important: This is an early release which focuses on getting the core build loop as stable as possible: things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that. Many architectural decisions are not finalized.**
@@ -40,6 +43,3 @@ A tribute to the best software in the world.
 - **Roles and permissions** with wildcard-based access control.
 - **Project templates**: save any project as a template and spin up new ones in seconds.
 - **Free HTTPS** automatically, no manual actions needed.
-
-## Source
-Don't worry we will release the source code soon enough.
