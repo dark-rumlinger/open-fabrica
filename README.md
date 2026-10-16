@@ -2,7 +2,7 @@
 A tribute to the best software in the world.
 
 ## Where's the source?
-We will decide on that after our public preview release.
+We will decide on that after our initial preview release reception.
 
 ## Quick Start
 
