@@ -1,8 +1,7 @@
 # Open Fabrica
 A tribute to the best software in the world.
 
-## Where's the source?
-We will decide on that after our initial preview release reception.
+
 
 ## Quick Start
 
@@ -43,3 +42,6 @@ We will decide on that after our initial preview release reception.
 - **Roles and permissions** with wildcard-based access control.
 - **Project templates**: save any project as a template and spin up new ones in seconds.
 - **Free HTTPS** automatically, no manual actions needed.
+
+## Where's the source?
+We will decide on that after our initial preview release reception.
