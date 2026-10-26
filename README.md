@@ -6,10 +6,10 @@ A tribute to the best software in the world.
 **Important: This is an early release which focuses on getting the core build loop as stable as possible: things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that. Many architectural decisions are not finalized.**
 
 1. **Download latest binary** from [Releases](https://github.com/markdr-hue/open-fabrica/releases).
-2. **Run it.** Double-click the file, or run `./openfabrica` in your terminal.
+2. **Run it** Double-click the file, or run `./openfabrica` in your terminal.
 3. **Open** `http://localhost:5734` in your browser.
-4. **Pick an AI provider.** The setup wizard asks for an API key (Anthropic, OpenAI, Google, or any OpenAI-compatible provider). A local Ollama is auto-detected, no key needed.
-5. **Describe your idea.** Open Fabrica takes it from there.
+4. **Pick a provider** The setup wizard asks for an API key (Anthropic, OpenAI, Google, or any OpenAI-compatible provider). A local Ollama is auto-detected, no key needed.
+5. **Describe your idea** Open Fabrica takes it from there.
 
 ## Features
 
@@ -17,6 +17,7 @@ A tribute to the best software in the world.
 - **Instantly live** by eliminating the concept of hosting.
 - **Automated testing** of user flows in your projects.
 - **Unlimited projects** from a single instance.
+- **Self-destruct** delete the instance and all remove all traces via Telegram.
 - **Accounts and logins** with optional Google/GitHub social login (any OAuth2 provider works), TOTP 2FA, and passwordless magic links.
 - **Payments** via Stripe, PayPal, or Mollie; one-off, or recurring on Stripe and PayPal. Stripe reconciles itself from signed webhooks; PayPal and Mollie payments are reconciled manually.
 - **Email** (SendGrid, Mailgun, Resend, or any JSON endpoint) and **SMS** (Twilio, MessageBird, or any JSON endpoint).
