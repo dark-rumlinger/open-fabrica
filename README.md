@@ -11,7 +11,7 @@ A tribute to the best software in the world.
 4. **Pick a provider** The setup wizard asks for an API key (Anthropic, OpenAI, Google, or any OpenAI-compatible provider). A local Ollama is auto-detected, no key needed.
 5. **Describe your idea** Open Fabrica takes it from there.
 
-## Features
+## Some of its Features
 
 - **Fully self-contained** binary which runs everywhere.
 - **Instantly live** by eliminating the concept of hosting.
