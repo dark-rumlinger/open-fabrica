@@ -1,0 +1,103 @@
+Open Fabrica Freeware License
+
+Copyright (c) 2026 Dark Rumlinger (and related entities). All rights reserved.
+
+This license applies to the Open Fabrica software and the files distributed with
+it (the "Software"). The source code of the Software is not made available under
+this license.
+
+1. Definitions
+
+   "Licensor" means Dark Rumlinger (and related entities).
+
+   "Output" means the applications, websites, content, data and other material
+   you create by using the Software.
+
+   "Helpers" means the client-side and server-side support code that the Software
+   writes into Output (for example the realtime, authentication and encryption
+   helper modules), as it appears in that Output.
+
+2. Grant of use
+
+   Subject to this license, the Licensor grants you a non-exclusive, worldwide,
+   royalty-free license to download, install and run the Software, on any number
+   of machines you control, for any purpose, including commercial use.
+
+3. Your Output
+
+   You own your Output. The Licensor claims no ownership of it and no share of
+   what you earn from it.
+
+   You may use, copy, modify, host and distribute the Helpers as part of your
+   Output, including to your own users and customers, under any terms you
+   choose for the Output as a whole. This permission continues after this license
+   ends.
+
+4. Restrictions
+
+   You may not:
+
+   a. copy, redistribute, publish, sell, rent, lease or sublicense the Software
+      itself, in whole or in part, or make the Software available for others to
+      download;
+
+   b. offer the Software's own functionality to third parties as a hosted or
+      managed service (running the Software to build and operate your own
+      projects, or projects for your clients, is allowed);
+
+   c. reverse engineer, decompile or disassemble the Software, or attempt to
+      derive its source code, except to the extent applicable law allows this
+      despite this restriction;
+
+   d. remove or alter copyright, license or attribution notices in the Software;
+      or
+
+   e. use the Software in violation of applicable law.
+
+5. Source code
+
+   The Licensor has no obligation to provide source code and may decide to
+   release some or all of it later under different terms. Nothing in this license
+   gives you a right to the source code.
+
+6. Third-party components
+
+   The Software contains third-party components that are licensed to you by their
+   own authors under their own terms, listed in the file THIRD_PARTY_LICENSES.
+   Nothing in this license restricts the rights those licenses give you in those
+   components.
+
+7. Third-party services
+
+   The Software can connect to services run by others (for example AI model,
+   payment, email and hosting providers). Those services are governed by their
+   own terms and charges, which are your responsibility.
+
+8. Ownership
+
+   The Software is licensed, not sold. The Licensor keeps all rights that are not
+   expressly granted in this license.
+
+9. New versions
+
+   The Licensor may release new versions of the Software under different terms.
+   This license continues to govern the version you received it with.
+
+10. Termination
+
+    This license ends automatically if you breach it. When it ends, stop using
+    the Software and delete your copies. Section 3 and sections 11 to 12 continue
+    to apply.
+
+11. No warranty
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+12. Limitation of liability
+
+    TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE LICENSOR BE
+    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+    CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
