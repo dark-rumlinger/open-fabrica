@@ -1,7 +1,31 @@
 # Open Fabrica
-Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get a baby together, which is well trained and doesn't cry.
+Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get a omnipotent baby together which is well trained, super easy to handle and doesn't cry.
+
+In fact, it is the most user friendly software in the observable universe. In literally one click you go from an idea to a (locally) hosted product, zero config needed, no matter the complexity.
 
 And remember, you may be able to copy a product, but you can't copy a vision. Cheers.
+
+## So what can it build?
+
+- LLM-powered tools (chatbots, automated customer support, code generators etc.)
+- File sharing platforms
+- Apps for shops and businesses (like a coffee order board)
+- Web(apps/sites) (duh!)
+- 2D/3D multiplayer games
+- (Encrypted) communication apps
+- Realtime collaboration tools
+
+## Who's it for?
+It's meant for everyone. Literally. From school kids to teachers and from scientists to managers.
+
+Everyone has ideas and now there is no technical mountain to climb anymore. 
+
+So get your cheap coding plan or run a local mode and start changing the world.
+
+## Privacy first
+You control all your data, it never leaves your machine. If you want you can build fully local without any connection to the outside world.
+
+There's no one peaking at your ideas, no phone-home or shady requests in the background and there's no sales funnel to whatever crap products people make these days.
 
 ## Quick Start
 
@@ -13,37 +37,8 @@ And remember, you may be able to copy a product, but you can't copy a vision. Ch
 4. **Pick a provider** The setup wizard asks for an API key (Anthropic, OpenAI, Google, or any OpenAI-compatible provider). A local Ollama is auto-detected, no key needed.
 5. **Describe your idea** Open Fabrica takes it from there.
 
-## (Some) Features
-
-- **Fully self-contained** binary which runs everywhere.
-- **Instantly live** by eliminating the concept of hosting.
-- **Automated testing** of user flows in your projects.
-- **Unlimited projects** from a single instance.
-- **Self-destruct** delete the instance and all remove all traces via Telegram.
-- **Accounts and logins** with optional Google/GitHub social login (any OAuth2 provider works), TOTP 2FA, and passwordless magic links.
-- **Payments** via Stripe, PayPal, or Mollie; one-off, or recurring on Stripe and PayPal. Stripe reconciles itself from signed webhooks; PayPal and Mollie payments are reconciled manually.
-- **Email** (SendGrid, Mailgun, Resend, or any JSON endpoint) and **SMS** (Twilio, MessageBird, or any JSON endpoint).
-- **Notifications** in-app, plus **Web Push** with auto-managed VAPID keys.
-- **Real-time** chat rooms, live feeds, P2P calling, and file uploads, with optional end-to-end encryption.
-- **Image generation** via OpenAI or a local Stable Diffusion (Automatic1111) instance.
-- **Stock photos** from Pexels, Pixabay, and Unsplash, picked automatically.
-- **PDF generation** for invoices, receipts, tickets, and reports (needs a local Chromium based browser).
-- **CSV import/export**, **RSS/Atom feeds** served straight from a table.
-- **Keyword and semantic search** out of the box.
-- **Analytics** (visits, unique visitors, top pages, referrers, AI usage/cost), all stored locally.
-- **SEO** (Open Graph, Twitter cards, JSON-LD, sitemaps, robots.txt) handled automatically.
-- **Native PWA support** for offline and installable apps.
-- **Auto-generated APIs** with rate limiting and docs.
-- **Per-project AI assistants** with configurable personality and memory.
-- **AI agents** that plan and act over multiple steps: a hosted endpoint that reasons, calls your app's own functions and reads its data in a loop, and can spawn and manage sub-agents to break down bigger jobs. Stream progress live or run in the background, each bounded by a per-endpoint daily token budget.
-- **Server-side AI hooks** to auto-summarize, classify, or embed new rows on insert.
-- **Telegram bot** so you can plan/build projects and get push notifications from your phone.
-- **Scheduled jobs** (cron or intervals) that run SQL, send emails, hit HTTP endpoints, or invoke the AI.
-- **Event-driven actions** reacting to signups, logins, payments, and data changes.
-- **Roles and permissions** with wildcard-based access control.
-- **Project templates**: save any project as a template and spin up new ones in seconds.
-- **Free HTTPS** automatically, no manual actions needed.
-
 ## Where's the source at?
 Hold your horses, we'll get there, for now enjoy the preview release which is basically a window into the past. 
 You'll be even more amazed soon, pinky promise!
+
+
