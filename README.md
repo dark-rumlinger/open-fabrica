@@ -1,5 +1,5 @@
 # Open Fabrica
-Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get a omnipotent baby together which is well trained, super easy to handle and doesn't cry.
+Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get an omnipotent baby together which is well trained, super easy to handle and doesn't cry. It's a complete ecosystem in a single file.
 
 In fact, it is the most user friendly software in the observable universe. In literally one click you go from an idea to a product, reachable by anyone in the world. Zero config needed, no matter the complexity.
 
