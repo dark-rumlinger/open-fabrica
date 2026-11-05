@@ -1,6 +1,9 @@
 # Open Fabrica
 A tribute to the best software in the world.
 
+## What is this thing?
+Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get a baby together, which is well trained and doesn't cry.
+
 ## Quick Start
 
 **Important: This is an early release which focuses on getting the core build loop as stable as possible: things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that. Many architectural decisions are not finalized.**
@@ -11,7 +14,7 @@ A tribute to the best software in the world.
 4. **Pick a provider** The setup wizard asks for an API key (Anthropic, OpenAI, Google, or any OpenAI-compatible provider). A local Ollama is auto-detected, no key needed.
 5. **Describe your idea** Open Fabrica takes it from there.
 
-## Some of its Features
+## (Some) Features
 
 - **Fully self-contained** binary which runs everywhere.
 - **Instantly live** by eliminating the concept of hosting.
@@ -42,5 +45,6 @@ A tribute to the best software in the world.
 - **Project templates**: save any project as a template and spin up new ones in seconds.
 - **Free HTTPS** automatically, no manual actions needed.
 
-## Where's the source?
-We will decide on that after our initial preview release reception.
+## Where's the source at?
+Hold your horses, we'll get there, for now enjoy the preview release which is basically a window into the past. 
+You'll be even more amazed soon, pinky promise!
