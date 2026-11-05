@@ -24,7 +24,7 @@ It's meant for everyone. Literally. From school kids to teachers and from scient
 
 Everyone has ideas and now there is no technical mountain to climb anymore. 
 
-So get your cheap coding plan or run a local mode and start changing the world.
+So get your cheap coding plan or run a local model and start changing the world.
 
 ## Privacy first
 You control all your data, it never leaves your machine. If you want you can build fully local without any connection to the outside world.
