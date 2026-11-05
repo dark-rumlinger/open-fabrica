@@ -1,11 +1,11 @@
 # Open Fabrica
 Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get a omnipotent baby together which is well trained, super easy to handle and doesn't cry.
 
-In fact, it is the most user friendly software in the observable universe. In literally one click you go from an idea to a (locally) hosted product, zero config needed, no matter the complexity.
-
-And remember, you may be able to copy a product, but you can't copy a vision. Cheers.
+In fact, it is the most user friendly software in the observable universe. In literally one click you go from an idea to a product, reachable by anyone in the world. Zero config needed, no matter the complexity.
 
 ## So what can it build?
+
+ANYTHING which runs in a browser, just using one (!) click.
 
 - LLM-powered tools (chatbots, automated customer support, code generators etc.)
 - File sharing platforms
@@ -14,6 +14,8 @@ And remember, you may be able to copy a product, but you can't copy a vision. Ch
 - 2D/3D multiplayer games
 - (Encrypted) communication apps
 - Realtime collaboration tools
+
+We're certain you'll come up with the most amazing stuff yourself.
 
 ## Who's it for?
 It's meant for everyone. Literally. From school kids to teachers and from scientists to managers.
@@ -41,4 +43,4 @@ There's no one peaking at your ideas, no phone-home or shady requests in the bac
 Hold your horses, we'll get there, for now enjoy the preview release which is basically a window into the past. 
 You'll be even more amazed soon, pinky promise!
 
-
+And remember, you may be able to copy a product, but you can't copy a vision. Cheers.
