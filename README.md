@@ -1,7 +1,4 @@
 # Open Fabrica
-A tribute to the best software in the world.
-
-## What is this thing?
 Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get a baby together, which is well trained and doesn't cry.
 
 ## Quick Start
