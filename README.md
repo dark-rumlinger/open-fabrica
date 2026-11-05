@@ -1,6 +1,8 @@
 # Open Fabrica
 Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get a baby together, which is well trained and doesn't cry.
 
+And remember, you may be able to copy a product, but you can't copy a vision. Cheers.
+
 ## Quick Start
 
 **Important: This is an early release which focuses on getting the core build loop as stable as possible: things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that. Many architectural decisions are not finalized.**
