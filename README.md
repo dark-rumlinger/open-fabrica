@@ -3,6 +3,8 @@ Just imagine a wild party where webservers, coding agents, database engines, red
 
 In fact, it is the most user friendly software in the observable universe. In literally one click you go from an idea to a product, reachable by anyone in the world. Zero config needed, no matter the complexity.
 
+[![1 minute setup](setup.png)](https://www.youtube.com/watch?v=n17afF0SnDo)
+
 ## So what can it build?
 
 ANYTHING which runs in a browser, just using one (!) click.
