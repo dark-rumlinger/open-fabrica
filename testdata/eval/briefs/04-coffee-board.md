@@ -1,1 +1,0 @@
-A live order board for a small coffee shop. Customers order from their phone (drink, size, milk, name), a big screen behind the counter shows every order moving from Queued to Brewing to Ready without anyone refreshing, and baristas advance orders from a simple staff page, with an undo for the last tap. Staff can mark drinks as sold out for the day.

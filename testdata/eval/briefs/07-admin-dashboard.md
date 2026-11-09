@@ -1,1 +1,0 @@
-An inventory dashboard for a small bike shop. Staff sign in. They can add, edit and delete products (name, category, price, stock), search and filter the list, see which products are low on stock, and record a sale which reduces stock. Only the manager role can delete products or change prices.

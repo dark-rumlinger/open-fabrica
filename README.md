@@ -5,35 +5,32 @@
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](https://github.com/dark-rumlinger/open-fabrica/releases)
 
 
-![Setup provider](docs/assets/header.jpg)
+Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get an omnipotent baby together which is well trained, super easy to handle and doesn't cry. It's a complete ecosystem in a single file.
 
-Open Fabrica is a single binary that builds and serves your ideas to the world. AI-powered apps, (real-time) multiplayer games, websites, secure end-2-end encrypted communication apps, collaboration tools, headless APIs...anything that runs in a browser. **Everything is stored and served from your machine**. It's a portable ecosystem in which there's no need for a dedicated webserver, database engine or third party plugins to have as little friction as possible.
+In fact, it is the most user friendly software in the observable universe. In literally one click you go from an idea to a product, reachable by anyone in the world. Zero config needed, no matter the complexity.
+
 
 ## Great Ideas are Everywhere
 
-Unfortunately not everyone has the tools, time, technical know-how or finances to put them into fruition. We want to **enable anyone from all walks of life to build, own and publish their ideas for free**, regardless of skill-level and background. Ideally one day Open Fabrica will be pre-installed on computers all over the world instead of a link to AliExpress and a trial version of Fruit Ninja.
+It's meant for everyone. Literally. From school kids to teachers and from scientists to managers.
 
-If your company wants to support Open Fabrica and its goals please do reach out on X [@open_fabrica](https://x.com/open_fabrica). We are in *desperate* need of model-access and powerful local hardware so finetuning can be done faster and in parallel.
+Everyone has ideas and now there is no technical mountain to climb anymore. 
 
-In similar fashion...we do eventually want to ship with a default coding model, accessible for anyone for free. We understand it needs a paid upgrade path on *your* side for higher usage but it allows for a zero friction experience.
+So get your cheap coding plan or run a local model and start changing the world.
 
 ## What Can it Create?
 
-Anything, promised. As long as it runs in a browser. You can even fork it to modify the build loop for other platforms such as Android or iOS.
+ANYTHING which runs in a browser, just using one (!) click.
 
-![Winamp](docs/assets/winamp.jpg)
+- LLM-powered tools (chatbots, automated customer support, code generators etc.)
+- File sharing platforms
+- Apps for shops and businesses (like a coffee order board)
+- Web(apps/sites) (duh!)
+- 2D/3D multiplayer games
+- (Encrypted) communication apps
+- Realtime collaboration tools
 
-![Kanban](docs/assets/kanban.jpg)
-
-![Pong](docs/assets/pong.jpg)
-
-![Website](docs/assets/website.jpg)
-
-![Multiplayer 3D game](docs/assets/3d.jpg)
-
-## But my favorite [name app builder/cloud app builder] can do this too?
-
-Well yes and no. They will create a site for you, a tool, a game but then what? You have to go figure out how to get it online, how does hosting work, where do I host it, where do I store my databases? Then the headache starts. You're bound to buy into whatever cloud provider and go to the painful process of making the parts work together. Open Fabrica gives you everything right outside the box. No need for ANY configuration, we will even protect your domain name so your apps run HTTPS. Free of course. We promise you that you'll be amazed on how easy this is, it might even feel like magic to some.
+We're certain you'll come up with the most amazing stuff yourself.
 
 ## Free, Private and Portable
 
@@ -43,14 +40,12 @@ Well yes and no. They will create a site for you, a tool, a game but then what? 
 - **Bring your own key.** Use your own Anthropic, OpenAI, Google Gemini, OpenRouter, or Z.ai key, or run fully offline models with Ollama or llama.cpp.
 - **Portable.** Copy the binary and your `data/` folder to any Windows, macOS, or Linux box and it picks up where it left off, or use `openfabrica backup` / `openfabrica restore` for a single-file backup that works while the server runs. To remove an installation completely, send `/selfdestruct` to the Telegram bot (two confirmations); `openfabrica selfdestruct --dry-run` previews what it would erase. See [SECURITY.md](docs/SECURITY.md) for its limits.
 
-##
-
-![Build start](docs/assets/build_1.jpg)
-
 
 ## Quick Start
 
-**Important: This is a preview release which focuses on getting the core build loop as stable as possible: things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that. Many architectural decisions are not finalized.**
+**Important: This is an experimental release which focuses on getting the core build loop as stable as possible: things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that. Many architectural decisions are not finalized.**
+
+[![1 minute setup](docs/assets/setup.png)](https://www.youtube.com/watch?v=n17afF0SnDo)
 
 1. **Download latest binary** from [Releases](https://github.com/dark-rumlinger/open-fabrica/releases).
 2. **Run it.** Double-click the file, or run `./openfabrica` in your terminal.

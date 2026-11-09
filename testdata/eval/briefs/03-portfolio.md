@@ -1,1 +1,0 @@
-A portfolio site for a freelance product designer called Ines Duarte. Home page with a short intro and a grid of case studies, a page per case study with the problem, process and outcome, an About page, and a Contact page with a form that actually saves messages so I can read them later.
