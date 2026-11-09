@@ -4,21 +4,22 @@
 [![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://github.com/dark-rumlinger/open-fabrica/releases)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](https://github.com/dark-rumlinger/open-fabrica/releases)
 
+# Welcome to the era of Open Fabrica
 
 Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get an omnipotent baby together which is well trained, super easy to handle and doesn't cry. It's a complete ecosystem in a single file.
 
-In fact, it is the most user friendly software in the observable universe. In literally one click you go from an idea to a product, reachable by anyone in the world. Zero config needed, no matter the complexity.
+![Your idea](docs/assets/build_1.jpg)
+
+In fact, it is the **most powerful and user friendly ai-powered software in the observable universe**. In literally one click you go from an idea to a product, reachable by anyone in the world. Zero config needed, no matter the complexity.
 
 
 ## Great Ideas are Everywhere
 
-It's meant for everyone. Literally. From school kids to teachers and from scientists to managers.
-
-Everyone has ideas and now there is no technical mountain to climb anymore. 
+It's meant for everyone. Literally. From school kids to teachers and from scientists to managers. Everyone has ideas and now there is no technical mountain to climb anymore. 
 
 So get your cheap coding plan or run a local model and start changing the world.
 
-## What Can it Create?
+## What Can I Build?
 
 ANYTHING which runs in a browser, just using one (!) click.
 
@@ -32,6 +33,8 @@ ANYTHING which runs in a browser, just using one (!) click.
 
 We're certain you'll come up with the most amazing stuff yourself.
 
+![Build end](docs/assets/build_2.jpg)
+
 ## Free, Private and Portable
 
 - **Forever Free.** No sign-up, no subscription, no per-project fee. Download the binary and run it.
@@ -40,10 +43,11 @@ We're certain you'll come up with the most amazing stuff yourself.
 - **Bring your own key.** Use your own Anthropic, OpenAI, Google Gemini, OpenRouter, or Z.ai key, or run fully offline models with Ollama or llama.cpp.
 - **Portable.** Copy the binary and your `data/` folder to any Windows, macOS, or Linux box and it picks up where it left off, or use `openfabrica backup` / `openfabrica restore` for a single-file backup that works while the server runs. To remove an installation completely, send `/selfdestruct` to the Telegram bot (two confirmations); `openfabrica selfdestruct --dry-run` previews what it would erase. See [SECURITY.md](docs/SECURITY.md) for its limits.
 
+![Your idea](docs/assets/projects.jpg)
 
 ## Quick Start
 
-**Important: This is an experimental release which focuses on getting the core build loop as stable as possible: things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that. Many architectural decisions are not finalized.**
+**Important: This is an experimental release, things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that.**
 
 [![1 minute setup](docs/assets/setup.png)](https://www.youtube.com/watch?v=n17afF0SnDo)
 
@@ -81,18 +85,6 @@ We're certain you'll come up with the most amazing stuff yourself.
 - **Roles and permissions**: named roles with a wildcard permission catalogue; endpoints are gated by role name (`admin` passes every gate).
 - **Copy and share projects**: duplicate a project in one click, or export it as a `.of` file and import it into another instance.
 - **Free HTTPS** automatically, no manual actions needed.
-
-## Screenshots
-
-![Play a game while you wait](docs/assets/build_game.jpg)
-
-![Build end](docs/assets/build_2.jpg)
-
-![Projects page](docs/assets/projects.jpg)
-
-![Setup welcome](docs/assets/setup_1.jpg)
-
-![Setup provider](docs/assets/setup_2.jpg)
 
 
 ## Before You Go Live
@@ -222,30 +214,8 @@ Open Fabrica stands on a lot of excellent open-source work. Special thanks to [L
 Plus [google/uuid](https://github.com/google/uuid), [zap](https://github.com/uber-go/zap), and the Go team's [`golang.org/x`](https://pkg.go.dev/golang.org/x) `crypto`, `net`, and `text` packages.
 
 
-## Meet the 'Team'
+## Contact
 
-Hi I'm Mark.
-
-Be nice to others. It makes the world a much nicer place to live in!
-
-If you need me I'm on X ([@open_fabrica](https://x.com/open_fabrica))
-
-![Meet my team](docs/assets/dark.jpg)
-
-## A personal Note
-
-I don't do hype, and I believe *real* talent is hard to find. A significant portion of workplace activity is self-justifying: processes and tasks that exist to preserve roles rather than produce outcomes.
-
-The workplace fascinates me precisely because I've never figured it out. Sandboxes governed by their own rules and power dynamics, none of which ever made sense to me. But people want to belong to something. A group, a mindset, a reassurance that they're doing great things while wearing a hoodie with the company logo on it. Until a higher paying job comes along.
-
-I think there's comfort in that, in running on autopilot. Honestly, I wish I could. It would have spared me the mental toll, and everything that followed from it: the physical, the relational, the financial. That's the cost of trying to act like a machine when you aren't one.
-
-So if you want to take anything from this: you'd better hope you're a robot. Otherwise life will bring you to your knees while the world keeps moving. I've used the workplace as an example, but this applies to everything.
-
-Or maybe, just maybe, it's all just me.
-
-
-
-
+I'm Dark. If you need me checkout X ([@open_fabrica](https://x.com/open_fabrica)).
 
 
