@@ -353,6 +353,7 @@ func swapIn(stage, stagedCore, corePath string) error {
 				if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 					return err
 				}
+				// #nosec G122 -- src is inside the staging dir this restore just extracted and validated (zip-slip checked); nothing else writes there.
 				if err := os.Rename(src, dst); err != nil {
 					return fmt.Errorf("restore: moving %s: %w", rel, err)
 				}
@@ -360,6 +361,7 @@ func swapIn(stage, stagedCore, corePath string) error {
 			}
 			return os.MkdirAll(dst, 0o750)
 		}
+		// #nosec G122 -- src is inside the staging dir this restore just extracted and validated (zip-slip checked); nothing else writes there.
 		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("restore: moving %s: %w", rel, err)
 		}

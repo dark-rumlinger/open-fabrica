@@ -598,6 +598,7 @@ func endpointPrompts(d *sql.DB) string {
 			}
 			fmt.Fprintf(&b, "/api/%s%s system prompt:\n%s\n\n", strings.Trim(path, "/"), suffix, clipSource(prompt, 2_000))
 		}
+		_ = rows.Err() // a partial listing only trims the optional prompt context
 	}
 	emit(`SELECT path, COALESCE(system_prompt,'') FROM of_llm_endpoints ORDER BY path`, "/chat and /complete")
 	emit(`SELECT path, COALESCE(system_prompt,'') FROM of_agent_endpoints ORDER BY path`, "/run")

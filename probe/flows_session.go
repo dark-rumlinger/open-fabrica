@@ -3,10 +3,11 @@ package probe
 import (
 	"context"
 	"fmt"
-	"openfabrica/internal/replayid"
-	"openfabrica/store"
 	"strings"
 	"time"
+
+	"openfabrica/internal/replayid"
+	"openfabrica/store"
 
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"

@@ -30,9 +30,9 @@ const (
 
 // EndpointRef is a single endpoint entry in the project snapshot.
 type EndpointRef struct {
-	Path     string
-	Methods  string // e.g. "GET,POST"
-	Auth     bool
+	Path    string
+	Methods string // e.g. "GET,POST"
+	Auth    bool
 	// PublicWrite reports a REST endpoint that allows anonymous writes even while Auth
 	// is set (the public-submission shape: anyone may POST, reads stay gated). Only
 	// meaningful for authKindAPI; false elsewhere.

@@ -80,6 +80,7 @@ func plan() (map[string][]byte, error) {
 		if err != nil {
 			return err
 		}
+		// #nosec G122 -- build-time tool walking the repo's own admin source tree, not untrusted input.
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", path, err)

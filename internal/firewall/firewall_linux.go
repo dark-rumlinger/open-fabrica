@@ -3,11 +3,12 @@ package firewall
 import (
 	"context"
 	"fmt"
-	"openfabrica/internal/msgcat"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"openfabrica/internal/msgcat"
 )
 
 type linuxManager struct{}

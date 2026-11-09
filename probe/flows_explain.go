@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"openfabrica/internal/stringutil"
 	"slices"
 	"strings"
 	"time"
+
+	"openfabrica/internal/stringutil"
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
