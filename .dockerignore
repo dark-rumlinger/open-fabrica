@@ -1,0 +1,41 @@
+# Keep the build context lean and never copy secrets or artifacts into the image.
+# Mirrors the sensitive/artifact rules in .gitignore.
+
+# Runtime data: projects, keys, SQLite databases.
+data/
+.security/
+*.key
+*.db
+*.db-wal
+*.db-shm
+
+# Local config (the container is configured via env vars).
+config.json
+
+# Build artifacts / binaries.
+*.exe
+/openfabrica
+bin/
+release/
+resource.syso
+*.test
+*.out
+*.prof
+coverage.*
+
+# Editor / IDE / OS cruft.
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs and local junk.
+*.log
+tmp/
+
+# VCS and tooling metadata not needed for the build.
+.git/
+.github/
+.claude/

@@ -1,0 +1,1 @@
+import*as s from"./toast.js";import{humanizeError as o}from"./errors.js";const t=new WeakSet;async function n(r,{success:e,onDone:a,errorPrefix:l}={}){if(t.has(r))return!1;t.add(r);try{if(await r()===!1)return!1;e&&s.success(e),a&&a()}catch(i){return s.error((l||"")+o(i)),!1}finally{t.delete(r)}}export{n as runAction};

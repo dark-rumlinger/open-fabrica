@@ -1,0 +1,379 @@
+/* ---------- Layout ---------- */
+.app-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* The scrolling content column. Height is whatever is left under the top bar,
+   so min-height:0 rather than a 100vh that no longer fits: the project detail
+   chains flex:1/min-height:0 all the way down to the chat feed, and a wrong
+   definite height here collapses that chain. */
+.main-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Transparent so the brand watermark (base.css body::before) shows through;
+     body already paints --bg-primary. */
+  background: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+/* The column stays full width (scrollbar at the window edge); its content is
+   capped and centred. Each view appends its own roots, so cap the direct
+   children rather than a wrapper. */
+.main-content > * {
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin-inline: auto;
+}
+
+.main-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.main-content::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+.main-content::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius-full);
+}
+
+.main-content::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
+}
+
+/* The brand mark: the auth bar, and (resized) the project switcher chip. */
+.brand-mark {
+  width: 53px;
+  height: 53px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+/* Dark theme: invert the black logo to white so a single source file works
+   in both themes. Keeps us on one openfabrica_logo.svg instead of duplicating assets. */
+[data-theme="dark"] .brand-mark {
+  filter: invert(1);
+}
+
+/* Pending-question count, on a nav row or a menu button. */
+.nav-badge {
+  margin-inline-start: auto;
+  background: var(--danger);
+  color: var(--text-inverse);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: var(--radius-full);
+  line-height: 1.4;
+}
+
+
+/* ---------- About: 90s/2000s "keygen" panel ----------
+   Deliberately disconnected from the rest of the admin UI (warez-BBS styling).
+   The surrounding modal chrome is neutralized so the panel fills it edge to
+   edge - only the header X and footer Close button survive, re-themed. */
+
+.modal:has(.about-keygen) {
+  background: #0a0a30;
+  border: 2px solid #4f6fff;
+  box-shadow: 0 0 0 2px #0a0a30, 0 0 0 4px #2036b0, 0 24px 70px rgba(0, 0, 0, 0.7);
+  max-width: 560px;
+  overflow: hidden;
+}
+/* Float the header (just the X) over the panel instead of reserving a bar. */
+.modal:has(.about-keygen) .modal__header {
+  position: absolute;
+  top: 0;
+  inset-inline-end: 0;
+  z-index: 3;
+  padding: 8px;
+  border-bottom: 0;
+}
+.modal:has(.about-keygen) .modal__header .btn--icon {
+  color: #cfe0ff;
+  background: rgba(10, 10, 48, 0.6);
+  border: 1px solid #4f6fff;
+}
+.modal:has(.about-keygen) .modal__header .btn--icon:hover {
+  color: #fff;
+  background: #2036b0;
+}
+.modal:has(.about-keygen) .modal__body {
+  padding: 0;
+  overflow: hidden;
+}
+.modal:has(.about-keygen) .modal__footer {
+  justify-content: center;
+  background: #0a0a30;
+  border-top: 2px solid #2036b0;
+}
+.modal:has(.about-keygen) .modal__footer .btn {
+  font-family: "Courier New", monospace;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #0a0a30;
+  background: #ffd23f;
+  border: 0;
+  box-shadow: 2px 2px 0 #b17f00;
+}
+.modal:has(.about-keygen) .modal__footer .btn:hover {
+  background: #ffe27a;
+}
+
+.about-keygen {
+  position: relative;
+  font-family: "Courier New", monospace;
+  background: #0a0a30;
+}
+.afk__stars {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.afk {
+  position: relative;
+  z-index: 1;
+  margin: 16px;
+  border: 2px solid #4f6fff;
+  box-shadow: 0 0 0 2px #0a0a30, 0 0 0 4px #2036b0, inset 0 0 40px rgba(30, 60, 220, 0.4);
+  background: linear-gradient(180deg, rgba(16, 26, 90, 0.92), rgba(10, 10, 48, 0.92));
+}
+.afk__titlebar {
+  padding: 6px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 6px;
+  color: #fff;
+  text-shadow: 1px 1px 0 #000;
+  background: repeating-linear-gradient(90deg, #3a5bff 0 2px, #2036b0 2px 4px);
+}
+.afk__copper {
+  height: 8px;
+  background: linear-gradient(90deg, #ff5bd0, #ffd23f, #4f6fff, #39ffb0, #ff5bd0);
+  background-size: 300% 100%;
+  animation: afkCopper 6s linear infinite;
+}
+@keyframes afkCopper {
+  to { background-position: 300% 0; }
+}
+.afk__body {
+  display: flex;
+  gap: 22px;
+  align-items: center;
+  padding: 20px;
+}
+.afk__face {
+  position: relative;
+  flex: 0 0 auto;
+  width: 128px;
+  aspect-ratio: 1 / 1;
+}
+/* Spinning copper ring behind the photo: a conic gradient in the copper-bar
+   palette, rotated by animating the --afkAngle custom property. The photo sits
+   4px inside it, so the ring reads as an animated frame. On hover the ring
+   speeds up and its glow intensifies. */
+@property --afkAngle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+.afk__frame {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: conic-gradient(from var(--afkAngle),
+    #ff5bd0, #ffd23f, #4f6fff, #39ffb0, #ff5bd0);
+  box-shadow: 0 0 14px rgba(79, 111, 255, 0.6);
+  animation: afkSpin 5s linear infinite;
+  transition: box-shadow 0.25s ease;
+}
+@keyframes afkSpin {
+  to { --afkAngle: 360deg; }
+}
+.afk__face:hover .afk__frame {
+  animation-duration: 1.4s;
+  box-shadow: 0 0 26px rgba(255, 210, 63, 0.9);
+}
+.afk__photo {
+  position: absolute;
+  inset: 4px;
+  z-index: 2;
+  overflow: hidden;
+  background: #05051c;
+}
+.afk__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  image-rendering: pixelated;
+  display: block;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.afk__photo--ready .afk__img { opacity: 1; }
+/* Loading state: a blinking "LOADING…" label under a sweeping "decode" scanline,
+   so the slot is never a bare empty box before the photo resolves. */
+.afk__photo--loading::after {
+  content: "LOADING…";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #7fa0ff;
+  animation: afkPhotoBlink 1s steps(1) infinite;
+}
+.afk__photo--loading::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  inset-inline-end: 0;
+  top: -35%;
+  height: 35%;
+  background: linear-gradient(180deg, transparent, rgba(127, 160, 255, 0.28), transparent);
+  animation: afkPhotoScan 1.2s linear infinite;
+}
+@keyframes afkPhotoBlink { 50% { opacity: 0.4; } }
+@keyframes afkPhotoScan { to { top: 100%; } }
+.afk__photo--empty::after {
+  content: "[ face ]";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #6a7fd0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .afk__photo--loading::before { animation: none; }
+}
+/* Respect reduced-motion: hold the ring still (a static copper frame) rather
+   than spinning it. */
+@media (prefers-reduced-motion: reduce) {
+  .afk__frame { animation: none; }
+}
+.afk__col {
+  flex: 1;
+  min-width: 0;
+}
+.afk__bigname {
+  margin-bottom: 6px;
+  font: 900 34px/1 "Arial Black", Impact, sans-serif;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #cfe0ff;
+  text-shadow: 2px 2px 0 #2036b0, 4px 4px 0 #000;
+}
+.afk__slogan {
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: #ffd23f;
+  text-shadow: 1px 1px 0 #000;
+}
+.afk__rows {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.9;
+  color: #9fb4ff;
+}
+.afk__rows b { color: #fff; }
+.afk__lbl {
+  display: inline-block;
+  width: 84px;
+  color: #ffd23f;
+  text-transform: uppercase;
+}
+/* Links row flows like VERSION/AUTHOR: the label reserves the same 84px, then
+   the links sit inline right after it, so their left edge lines up with the
+   values above. Spacing between the two links only, never before the first. */
+.afk__link {
+  color: #ffd23f;
+  text-decoration: none;
+}
+.afk__link + .afk__link { margin-inline-start: 14px; }
+.afk__link:hover { color: #fff; text-decoration: underline; }
+.afk__note {
+  margin-top: 12px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #6a7fd0;
+}
+/* Classic crack-scene readme warning, blinking amber above the patch button. */
+.afk__warn {
+  padding: 9px 16px;
+  border-top: 1px dashed #ffae2b;
+  background: rgba(60, 30, 0, 0.5);
+  color: #ffb638;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-shadow: 0 0 6px rgba(255, 150, 20, 0.6);
+  animation: afkWarn 1.1s steps(1) infinite;
+}
+@keyframes afkWarn { 50% { opacity: 0.45; } }
+/* Reward state after the patch has been applied: the warning turns into a calm
+   green "registered" banner (no blink). */
+.afk__warn--done {
+  border-top-color: #37e07a;
+  background: rgba(0, 40, 15, 0.5);
+  color: #4dff92;
+  text-shadow: 0 0 6px rgba(30, 255, 120, 0.6);
+  animation: none;
+}
+/* Generated serial shown in the info rows once registered. */
+.afk__serial {
+  color: #b6ffcb;
+  letter-spacing: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .afk__warn { animation: none; }
+}
+@media (max-width: 520px) {
+  .afk__body { flex-direction: column; text-align: center; }
+  .afk__bigname { font-size: 28px; }
+}
+
+/* Skip link: off screen until a keyboard user tabs to it, then it sits at the
+   top left above everything. */
+.skip-link {
+  position: fixed;
+  top: var(--space-2);
+  inset-inline-start: var(--space-2);
+  z-index: var(--z-overlay);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* The main region takes focus from the skip link; the outline would be a box
+   around the whole page. */
+.main-content:focus {
+  outline: none;
+}

@@ -1,0 +1,575 @@
+/* ==========================================================================
+   Pre-auth screens: setup, login, connection error.
+
+   Built from the signed-in chrome rather than beside it: the bar is a
+   .topbar, and the card borrows the modal surface (modal.css groups
+   .auth-card into the .modal rule) and its .modal__header / __body / __footer
+   parts. Only what those screens need on top of that lives here.
+   ========================================================================== */
+
+/* ---------- Frame ---------- */
+.auth-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+}
+
+.auth-bar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* Overrides .brand-mark's 53px; inherits its dark-theme invert. */
+.auth-bar__mark {
+  width: 28px;
+  height: 28px;
+}
+
+.auth-bar__name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+/* The scrolling column under the bar. `safe center` keeps a card taller than
+   the viewport scrollable from its top (see .home for the same reasoning). */
+.auth-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  justify-content: safe center;
+  gap: var(--space-6);
+  padding: var(--space-7) var(--space-4);
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+/* In flow under the card, so it can never overlap it on a short screen. */
+.auth-tagline {
+  margin: 0;
+  text-align: center;
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+}
+
+/* ---------- Card ---------- */
+.auth-card {
+  width: 100%;
+  max-width: 520px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  animation: authCardIn 0.4s ease;
+}
+
+.auth-card--compact {
+  max-width: 400px;
+}
+
+/* A screen title, so it matches the page titles (--text-xl serif) rather than
+   a dialog's. typography.css supplies the face. */
+.auth-card .modal__title {
+  font-size: var(--text-xl);
+  line-height: 1.3;
+}
+
+.auth-card__lede {
+  margin-bottom: var(--space-5);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.auth-card__lede:last-child {
+  margin-bottom: 0;
+}
+
+.auth-card__lede + .form-hint--info {
+  display: flex;
+  margin-top: calc(-1 * var(--space-2));
+  margin-bottom: var(--space-5);
+}
+
+/* Placeholder while a step fetches what it needs. */
+.auth-card__loading {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-7) 0;
+}
+
+/* Back on the left, the forward action on the right. */
+.modal__footer--split {
+  justify-content: space-between;
+}
+
+.modal__footer:empty {
+  display: none;
+}
+
+/* Same accent shift on the focused field's label on every pre-auth form. */
+.auth-card .form-group label {
+  transition: color var(--transition-fast);
+}
+.auth-card .form-group:focus-within label {
+  color: var(--accent-text);
+}
+
+@keyframes authCardIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ---------- Splash hand-off ----------
+   Held invisible and motionless under the splash until the logo lands in the
+   bar, then the card blooms in as one unit. */
+.auth-card--preboot { opacity: 0; animation: none !important; }
+.auth-card--preboot .setup-step,
+.auth-card--preboot .setup-step__field,
+.auth-card--preboot .auth-card__field { animation: none !important; opacity: 1; }
+
+.auth-card--revealing { animation: cardBloom 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes cardBloom {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ---------- Setup progress ----------
+   The header's rule doubles as the progress track. */
+.auth-card--stepped .modal__header {
+  border-bottom: 0;
+}
+
+.auth-card__count {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.auth-card__progress {
+  position: relative;
+  height: 2px;
+  flex-shrink: 0;
+  background: var(--border);
+}
+
+.auth-card__progress-fill {
+  position: absolute;
+  inset-block: 0;
+  inset-inline: 0 auto;
+  width: 0;
+  background: var(--accent);
+  transition: width var(--transition-slow);
+}
+
+/* ---------- Step transitions ----------
+   Only the body moves; the header and footer stay put like a modal's. */
+.setup-step {
+  animation: stepIn 0.28s ease both;
+}
+.setup-step.is-leaving {
+  animation: stepOut 0.18s ease both;
+}
+.setup-step.is-back {
+  animation: stepInBack 0.28s ease both;
+}
+.setup-step.is-leaving.is-back {
+  animation: stepOutBack 0.18s ease both;
+}
+
+@keyframes stepIn {
+  from { opacity: 0; transform: translateX(calc(16px * var(--dir-sign, 1))); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes stepOut {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(calc(-16px * var(--dir-sign, 1))); }
+}
+@keyframes stepInBack {
+  from { opacity: 0; transform: translateX(calc(-16px * var(--dir-sign, 1))); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes stepOutBack {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(calc(16px * var(--dir-sign, 1))); }
+}
+
+/* Cascading reveal for the fields inside a step (setup/index.js tags them and
+   sets --i) and on the login form. */
+.setup-step__field,
+.auth-card__field {
+  animation: stepFieldIn 0.32s ease both;
+  animation-delay: calc(var(--i, 0) * 55ms + 80ms);
+}
+@keyframes stepFieldIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Header/body/footer padding follows the modal's own mobile rules
+   (responsive.css). */
+@media (max-width: 520px) {
+  .auth-main {
+    padding: var(--space-5) var(--space-3);
+  }
+
+  .auth-card .modal__title {
+    font-size: var(--text-lg);
+  }
+}
+
+/* ---------- Setup step components ---------- */
+
+/* Password strength meter */
+.password-strength {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.password-strength__bar {
+  flex: 1;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--bg-tertiary);
+  transition: background var(--transition-fast);
+}
+
+.password-strength__bar.filled { background: var(--danger); }
+.password-strength__bar.medium { background: var(--warning); }
+.password-strength__bar.strong { background: var(--success); }
+
+/* Launch animation */
+.launch-checklist {
+  text-align: start;
+}
+
+.launch-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  transition: color var(--transition-normal);
+}
+
+.launch-item.active {
+  color: var(--text-primary);
+}
+
+.launch-item.done {
+  color: var(--success);
+}
+
+.launch-item__icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* Password toggle button */
+.password-wrapper {
+  position: relative;
+}
+
+.password-wrapper .input {
+  padding-inline-end: 44px;
+}
+
+.password-toggle {
+  position: absolute;
+  inset-inline-end: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+}
+
+.password-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.password-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Interactive password requirements checklist */
+.password-reqs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.password-req {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  transition: color var(--transition-fast);
+  padding-block: 2px;
+  padding-inline: 4px 8px;
+  border-radius: var(--radius-full);
+  background: var(--bg-tertiary);
+}
+
+.password-req.met {
+  color: var(--success);
+  background: var(--success-muted);
+}
+
+.password-req__icon {
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.password-req__icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Provider badge */
+.provider-badge {
+  display: inline-block;
+  font-size: 0.625rem;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  margin-inline-start: 6px;
+}
+
+.provider-badge--cloud {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.provider-badge--local {
+  background: var(--success-muted);
+  color: var(--success);
+}
+
+.provider-badge--coding {
+  background: var(--warning-muted);
+  color: var(--warning);
+}
+
+/* Launch celebration */
+/* Reverent finale: the mark settles back in with a single blue bloom. */
+.launch-finale {
+  text-align: center;
+  padding: 16px 0;
+}
+
+.launch-finale__mark {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.launch-finale__mark::before {
+  content: '';
+  position: absolute;
+  inset: -26px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 35%, transparent) 0%, transparent 70%);
+  opacity: 0;
+  animation: finaleGlow 2s ease 0.45s 1;
+}
+
+.launch-finale__logo {
+  width: 72px;
+  height: 72px;
+  display: block;
+  opacity: 0;
+  animation: finaleSettle 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+
+/* Match the splash/card logo treatment so the bookend reads as the same mark. */
+[data-theme="dark"] .launch-finale__logo { filter: invert(1); }
+
+.launch-finale__sub {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  /* 4px here put the body copy hard against the heading. The mark sits 18px
+     above it; the prose needs comparable room or the block reads as one mass. */
+  margin-top: 12px;
+  /* Matches .auth-card__lede, which every other setup screen uses. */
+  line-height: 1.55;
+  /* Left unbounded the paragraph spans the card body corner to corner; 28em
+     (364px) pulls it into a column. Anything under ~26em costs an extra line
+     without buying measure. */
+  max-width: 28em;
+  margin-inline-start: auto;
+  margin-inline-end: auto;
+  text-wrap: pretty;
+}
+
+/* "Redirecting you now..." is status, not prose. It shared __sub's styling and
+   its 4px gap, so it read as one more sentence of the paragraph above it. */
+.launch-finale__status {
+  margin-top: 20px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+@keyframes finaleSettle {
+  from { opacity: 0; transform: scale(1.18); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes finaleGlow {
+  0%   { opacity: 0; }
+  40%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ---------- Language step ----------
+   A big greeting that cycles through the languages, then one large tappable
+   row per language, like a phone's first-run screen. */
+.lang-hero {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 72px;
+  margin-bottom: var(--space-3, 12px);
+}
+
+.lang-hero__word {
+  font-size: clamp(1.75rem, 8vw, 2.25rem);
+  line-height: 1.15;
+  text-align: center;
+  font-weight: 300;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  transition: opacity 0.26s ease, transform 0.26s ease;
+}
+.lang-hero__word.is-out {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.lang-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+@media (max-width: 380px) {
+  .lang-list { grid-template-columns: minmax(0, 1fr); }
+}
+
+.lang-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  font-family: inherit;
+  text-align: start;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
+}
+.lang-option:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-secondary);
+}
+.lang-option:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+}
+.lang-option.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.lang-option__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.lang-option__name {
+  font-size: var(--text-lg);
+  font-weight: 500;
+}
+.lang-option__sub {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.lang-option__check {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  color: var(--on-accent);
+  background: var(--accent);
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+.lang-option__check svg { width: 14px; height: 14px; }
+.lang-option.is-selected .lang-option__check {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lang-hero__word,
+  .lang-option__check { transition: none; }
+}
+
+/* The language step has no title, count or progress rule. */
+.auth-card--intro .modal__header,
+.auth-card--intro .auth-card__progress { display: none; }
+
+/* While the card eases between step heights, nothing may scroll or spill. */
+.auth-card.is-resizing,
+.auth-card.is-resizing .modal__body { overflow: hidden; }

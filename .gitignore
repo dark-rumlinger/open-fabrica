@@ -1,0 +1,46 @@
+*.exe
+/openfabrica
+
+# Root-anchored: the top-level data dir holds secrets + user DBs. Anchored with a
+# leading slash so it does NOT also match source packages named "data" (e.g.
+# tools/data/, tools/content/data/).
+/data/
+
+/config.json
+
+# Defense-in-depth: never commit keys or SQLite databases, even if one is ever
+# generated outside data/ (a custom OPENFABRICA_DATA_DIR, a stray root-level key,
+# a hand-run export). The data/ rule above is the primary guard; these are belt-
+# and-suspenders so a single mistaken path can't leak the crown jewels.
+*.key
+*.db
+*.db-wal
+*.db-shm
+.security/
+
+.claude/
+
+/bin/
+/release/
+resource.syso
+
+# Go build / test artifacts
+*.test
+*.out
+*.prof
+coverage.*
+
+# Editor / IDE
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs and local junk
+*.log
+tmp/
+
+# openfabrica eval output
+eval-results/

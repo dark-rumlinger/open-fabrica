@@ -1,0 +1,24 @@
+=== request 2 ===
+model: fake-model
+max_tokens: 8192
+cache_system: true
+prompt_cache_key: plan:9e7a3ead
+temperature: 0
+thinking: false
+response_schema: {"Name":"brief_features","Schema":{"type":"object","additionalProperties":false,"required":["features"],"properties":{"features":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","behaviours"],"properties":{"name":{"type":"string"},"behaviours":{"type":"array","items":{"type":"string"}}}}}}},"Strict":false}
+--- system (709 bytes) ---
+You list the features a project brief asks for, so a plan can be checked for covering every one.
+
+A feature is one user-facing capability: a screen or view, a tool, an interaction loop, a data the user manages, a background behaviour the user relies on. Name it the way the brief does, and give it the specific behaviours the brief describes for it, each a short phrase ("undo the last move", "sold-out items cannot be ordered").
+
+List every feature the brief names, in the brief's order. Do not invent features, and do not list visual style, tone, colours, fonts, or technology. Merge two mentions of the same thing into one feature.
+
+Reply with JSON only: {"features":[{"name":"...","behaviours":["..."]}]}.
+--- tools (0) ---
+--- messages (1) ---
+[0] user cacheable=false
+Project brief:
+
+A polished one-page tip calculator with bill input, percentage presets, and split-by-people.
+
+List its features.

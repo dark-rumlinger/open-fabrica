@@ -1,0 +1,64 @@
+/* ==========================================================================
+   Cross-cutting type policy.
+
+   Loaded LAST in index.html on purpose. Everything here has to win over the
+   component files that set their own font-weight or font-family, and media
+   queries carry no extra specificity - the same load-order argument the top
+   of responsive.css makes. Keeping the policy in one file means the answer to
+   "where does the serif appear?" is readable in one place instead of being
+   reconstructed from six component stylesheets.
+   ========================================================================== */
+
+/* ---------- Display face ----------
+   The serif is a tone-setter, not a heading style. It appears only on the
+   handful of lines that open a screen, and never on a card, panel, section or
+   table heading - those stay sans so the hierarchy still reads as hierarchy.
+   Weight is pinned to 600 because that is the only bold cut we self-host;
+   anything heavier would be synthesised into a smeared fake bold. */
+.home-hero__title,
+.modal__title,
+.empty-state__title,
+.context-panel__title--page {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* The hero is the one place the serif gets room to be a display face. */
+.home-hero__title {
+  font-size: var(--text-3xl);
+  line-height: 1.15;
+  text-wrap: balance;
+}
+
+/* ---------- Lining figures ----------
+   Anywhere a digit sits in a column or updates live. Proportional numerals
+   make a counter jitter sideways every time a token count ticks over, which
+   is the sort of thing that reads as cheap without being nameable. */
+.stat-card__value,
+.stat-card__sub,
+.table td,
+.message__time,
+.nav-badge,
+.bottom-nav__badge,
+.build-progress__count,
+.build-pill__tokens,
+.golive__tile-count,
+.question-group__progress,
+.question-group__submit-progress {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Native control tint ----------
+   Checkboxes, radios and range inputs are painted by the platform. Without
+   this they render in the OS accent (Windows blue, macOS whatever the user
+   picked) next to our ultramarine. */
+:root {
+  accent-color: var(--accent);
+}
+
+/* Plex Mono runs a touch wide next to Plex Sans at the same nominal size, so
+   inline code is nudged down rather than left to bulge inside a sentence. */
+code {
+  font-size: 0.875em;
+}

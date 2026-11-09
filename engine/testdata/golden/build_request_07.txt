@@ -1,0 +1,66 @@
+=== request 7 ===
+model: fake-model
+max_tokens: 16384
+cache_system: true
+prompt_cache_key: review:196f2a47
+thinking: false
+response_schema: {"Name":"spec_audit","Schema":{"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","verdict","evidence","gaps"],"properties":{"id":{"type":"string","description":"The checklist item id, exactly as given."},"verdict":{"type":"string","enum":["met","partial","missing"]},"evidence":{"type":"string","description":"Where the item is implemented (file and function), or what is absent."},"gaps":{"type":"array","items":{"type":"string"},"description":"Empty when met."},"new_gaps":{"type":"boolean","description":"Re-check only: a gap here is a different problem from every gap the last audit named."}}}}}},"Strict":false}
+--- system (2781 bytes) ---
+You review a finished web project against what it was supposed to do. You get the brief, the build checklist (each item's intent and "done when"), the project's state (pages, tables, endpoints, modules) and its source code.
+
+For each checklist item decide whether the code actually delivers it:
+- met: every behaviour its intent and "done when" name is implemented and reachable by a user (from a page control, or from the API for a headless item).
+- partial: some named behaviour is missing, stubbed, faked with canned data, or wired to nothing a user can reach.
+- missing: the item's core behaviour is absent.
+
+Behaviour the platform serves from configuration (the sources marked "platform configuration": page head tags, robots.txt, the live sitemap, the schema's constraints and indexes, endpoint routes) is delivered when it is listed there; never ask for it to be hand-written. A page calls an endpoint at the route listed under "endpoint routes", never at the bare endpoint path.
+
+Judge only from the code you are shown, and look before you judge: a behaviour is implemented when you can point at the code that does it and the control or route that reaches it. Report a gap only when you can name the specific missing behaviour and the file or page it belongs in. Never report styling preferences, refactors, missing tests, or anything the brief and the item never asked for.
+
+Some items carry the builder's own claim of where each clause is implemented. Check each claim in the code; it is a pointer, never proof.
+
+On a re-check after a repair, an item lists the gaps the last audit named. Set new_gaps true only when a gap you name now is a different problem from every one of those (a defect the repair introduced, or a missing behaviour nobody named), never for the same gap reworded or a part of it still open; otherwise leave it false.
+
+Also check the brief's features: when a "Brief features" list is given, each feature's behaviours must be delivered by the items that build it, and a gap there belongs to those items; otherwise, a feature the brief names that no item delivers is a gap on the item it is closest to. A feature marked OUT OF SCOPE is not a gap.
+
+Each gap is one sentence a developer can act on: what is missing, and where. At most 3 gaps per item, the most important first. Every item that is partial or missing MUST carry at least one gap, and every item carries evidence (the file and function that implement it, or what is absent): a verdict without them cannot be acted on and is discarded. Also look across pages: the same header, navigation, headings, spacing and component classes should come from shared styles; report a page that restyles them with its own inline or local rules as a gap on that page's item. Reply with the JSON object only.
+--- tools (0) ---
+--- messages (1) ---
+[0] user cacheable=false
+## Brief
+
+A polished one-page tip calculator with bill input, percentage presets, and split-by-people.
+
+## Checklist items to review
+
+- `home-page` Home page
+  Intent: Build the tip calculator page at /
+  Done when: / renders the calculator
+  Owns: /
+
+## Project state
+
+## Current Project State (project_state)
+
+### Pages (1)
+- `/`
+
+
+## Source
+
+=== / (page) ===
+<h1>Tip calculator</h1>
+
+=== /robots.txt and /sitemap.xml (platform configuration) ===
+/robots.txt serves:
+User-agent: *
+Allow: /
+Sitemap: /sitemap.xml (platform default)
+/sitemap.xml is generated live from the published pages on every request.
+
+=== page head tags (platform configuration) ===
+The renderer writes these into every page's <head> (an empty title falls back to the project name; og:description falls back to the description):
+/: <title>="" description="" og:title="" og:image=""
+
+
+Review every checklist item above and reply with the JSON object.

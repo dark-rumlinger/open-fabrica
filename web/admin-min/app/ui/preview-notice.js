@@ -1,0 +1,1 @@
+import{t as e}from"../core/i18n.js";const t=e("preview.title"),i=e("preview.lede"),o=[e("preview.point1"),e("preview.point2"),e("preview.point3")];function n(r){return r?e("preview.summaryVersion",{version:r}):e("preview.summary")}export{i as PREVIEW_LEDE,o as PREVIEW_POINTS,t as PREVIEW_TITLE,n as previewSummary};

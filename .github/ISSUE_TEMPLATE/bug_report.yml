@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a defect in Open Fabrica itself (the binary/engine, not an app it generated)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not paste secrets**: no API keys, no `config.json`,
+        and nothing from `data/` or `data/.security/` (those decrypt every stored secret).
+        Found a **security vulnerability**? Use the [Security Policy](https://github.com/dark-rumlinger/open-fabrica/blob/main/docs/SECURITY.md) instead of a public issue.
+  - type: input
+    id: version
+    attributes:
+      label: Open Fabrica version
+      description: Shown in the startup banner.
+      placeholder: "0.2.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: LLM provider & model
+      description: Which provider/model was selected. Generated-app quality depends heavily on this, so it matters for triage.
+      placeholder: "Anthropic claude-…, OpenAI gpt-…, local Ollama qwen2.5-coder, etc."
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Re-run with `OPENFABRICA_LOG_LEVEL=debug` if you can. Redact any secrets before pasting.
+      render: text
+    validations:
+      required: false

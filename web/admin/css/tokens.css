@@ -1,0 +1,268 @@
+/* ==========================================================================
+   Open Fabrica Admin - Design Tokens & Styles
+   Cool-grey light theme with an ultramarine accent, dark theme opt-in.
+   Both themes share the accent hue, so only the ground flips between them.
+   Light is the default: an un-attributed document renders light, so a blocked
+   localStorage or a failed pre-paint hook degrades to the right look rather
+   than to a flash of the wrong one.
+   ========================================================================== */
+
+/* ---------- Design Tokens (Light - Default) ---------- */
+:root {
+  /* Native controls (select popups, date pickers, scrollbars, autofill) follow
+     the in-app theme, not the OS preference the meta tag falls back to. */
+  color-scheme: light;
+
+  /* Backgrounds, cool grey. Carries a slight blue bias so the greys read as
+     chosen next to the accent rather than as flat neutral. */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f7f8fa;
+  --bg-tertiary: #eef0f4;
+  --bg-elevated: #ffffff;
+  --bg-hover: #e6e9ef;
+
+  /* Text */
+  --text-primary: #14171f;
+  --text-secondary: #575e70;
+  /* One perceptual step below secondary, and as light as that step can go:
+     --text-tertiary styles .form-hint and .golive__signin-note, which are real
+     text, so it has to hold 4.5:1 on --bg-tertiary (4.66:1 here). */
+  --text-tertiary: #656b7d;
+  /* Label on a filled semantic surface (danger, success). Pairs with the
+     light-mode fill in light and the pastel fill in dark. */
+  --text-inverse: #ffffff;
+
+  /* Accent, ultramarine. The one saturated colour in the light theme. */
+  --accent: #2547c8;
+  --accent-hover: #1b36a4;
+  --accent-muted: rgba(37, 71, 200, 0.09);
+  --accent-text: #2547c8;
+  /* Label on a filled accent surface. */
+  --on-accent: #ffffff;
+
+  /* Semantic, only these carry color */
+  --danger: #c62828;
+  --danger-hover: #a21e1e;
+  --danger-muted: rgba(198, 40, 40, 0.08);
+  --success: #1f7a46;
+  --success-muted: rgba(31, 122, 70, 0.08);
+  --warning: #a16207;
+  --warning-muted: rgba(161, 98, 7, 0.08);
+  --info: #575e70;
+  --info-muted: rgba(87, 94, 112, 0.06);
+
+  /* Second identity hue, brass. The only colour besides the accent that is
+     not semantic: it marks data surfaces that used to borrow a stray purple
+     from an older palette, and gives the UI two colours instead of one. */
+  --accent-warm: #8a5a17;
+  --accent-warm-muted: rgba(138, 90, 23, 0.10);
+
+  /* Top-edge highlight for surfaces that sit above the page (cards, modals,
+     popovers). A 1px inner light line is what makes a raised surface read as
+     raised; the shadow alone only says "detached". */
+  --elevate-edge: inset 0 1px 0 #ffffff;
+
+  /* Panel surface: the secondary background fading to a faint accent wash, so the
+     page shows through toward the far corner. Shared by cards, stat cards and the
+     other in-flow panels; popovers and menus stay opaque. */
+  --panel-bg: linear-gradient(135deg, var(--bg-secondary) 0%, color-mix(in srgb, var(--accent) 3%, transparent) 100%);
+  /* The same fade one step darker, for things that sit inside a panel (tool calls, chat bubbles). */
+  --panel-bg-inset: linear-gradient(135deg, var(--bg-tertiary) 0%, color-mix(in srgb, var(--accent) 3%, transparent) 100%);
+
+  /* Horizontal hairlines that fade to transparent at the sides. --fade-line is for a
+     full-width separator (used as a border-image); the start/end pair is for the two
+     lines on either side of a label, which fade on their outer ends. */
+  --fade-line: linear-gradient(90deg, transparent 0%, var(--border) 14%, var(--border) 86%, transparent 100%);
+  --fade-line-start: linear-gradient(90deg, transparent 0%, var(--border) 70%);
+  --fade-line-end: linear-gradient(90deg, var(--border) 30%, transparent 100%);
+
+  /* Borders */
+  --border: #e2e5ea;
+  --border-hover: #cdd2db;
+  --border-focus: #2547c8;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.12);
+
+  --scrollbar-thumb: #cdd2db;
+
+  /* Loom-weave intro threads + satin sheen (light) */
+  --weave-thread: #cdd2db;
+  --weave-sheen: rgba(255, 255, 255, 0.7);
+  --weave-sheen-blend: soft-light;
+
+  /* Brand watermark behind every page (base.css body::before). Painted through
+     a mask, so the colour follows the theme without an invert filter. */
+  --watermark-color: var(--text-primary);
+  --watermark-opacity: 0.03;
+
+  /* ---------- Theme-independent below this line ---------- */
+
+  /* Radius, by role: sm for things inside a surface, md for controls, lg for
+     surfaces, xl for what floats above the page. */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 9999px;
+
+  /* Transitions */
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+  --transition-slow: 300ms ease;
+  /* Easing curves for entrances (decelerate) and popovers. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-pop: cubic-bezier(0.34, 1.3, 0.64, 1);
+
+  /* Shell. */
+  --topbar-height: 57px;
+  --content-max-width: 1400px;
+
+  /* Font. One superfamily in three roles, self-hosted in css/fonts.css: the
+     sans carries the interface, the serif is reserved for the few display
+     lines that set the tone (hero, login, modal and empty-state titles), and
+     the mono finally matches both instead of being whatever the OS ships. */
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'IBM Plex Serif', Georgia, 'Times New Roman', serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Consolas', monospace;
+
+  /* Font sizes */
+  --text-nano: 0.6rem;
+  --text-xxs: 0.65rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.125rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+
+  /* Spacing scale, use these instead of hardcoded px. */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+
+  /* Stacking order. Layers, lowest to highest; use these instead of bare
+     numbers so two things never tie at the same value. */
+  --z-topbar: 100;
+  --z-dropdown: 200;
+  --z-popover: 300;
+  --z-banner: 900;
+  --z-modal: 1000;
+  --z-palette: 1500;
+  --z-toast: 2000;
+  --z-overlay: 3000;
+
+  /* Scrollbar */
+  --scrollbar-size: 6px;
+  --scrollbar-track: transparent;
+
+  /* Mobile */
+  --bottom-nav-height: 56px;
+}
+
+/* ---------- Dark Theme Overrides (same ultramarine, cool dark ground) ---------- */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Backgrounds, cool near-black carrying the same blue bias as the light
+     greys. Not pure #000: a lifted ground keeps the borders visible. */
+  --bg-primary: #0b0e14;
+  --bg-secondary: #12161f;
+  --bg-tertiary: #191e29;
+  --bg-elevated: #212736;
+  --bg-hover: #262d3d;
+
+  /* Text */
+  --text-primary: #e5e8ef;
+  --text-secondary: #9aa1b3;
+  --text-tertiary: #848b9e;
+  /* Dark here, because every filled surface below is a pastel. */
+  --text-inverse: #0b0e14;
+
+  /* Accent, the light-mode ultramarine lifted to carry on a dark ground */
+  --accent: #8aa2ff;
+  --accent-hover: #a6b8ff;
+  --accent-muted: rgba(138, 162, 255, 0.14);
+  --accent-text: #8aa2ff;
+  --on-accent: #0b0e14;
+
+  /* Semantic */
+  --danger: #f4796d;
+  --danger-hover: #f9a49b;
+  --danger-muted: rgba(244, 121, 109, 0.12);
+  --success: #5ed39a;
+  --success-muted: rgba(94, 211, 154, 0.12);
+  --warning: #f0b429;
+  --warning-muted: rgba(240, 180, 41, 0.12);
+  --info: #9aa1b3;
+  --info-muted: rgba(154, 161, 179, 0.10);
+
+  /* Second identity hue, brass lifted to carry on a dark ground. */
+  --accent-warm: #dfb069;
+  --accent-warm-muted: rgba(223, 176, 105, 0.14);
+
+  --elevate-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  /* Borders */
+  --border: #242a37;
+  --border-hover: #333b4b;
+  --border-focus: #8aa2ff;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.6);
+
+  --scrollbar-thumb: #333b4b;
+
+  /* Loom-weave intro threads + satin sheen (dark) */
+  --weave-thread: #333b4b;
+  --weave-sheen: rgba(255, 255, 255, 0.5);
+  --weave-sheen-blend: screen;
+
+  /* A light mark on a dark ground reads fainter than the reverse. */
+  --watermark-opacity: 0.04;
+}
+
+/* IBM Plex ships no CJK glyphs, so Chinese falls back to the system CJK faces
+   in each role instead of whatever the browser picks per glyph. Keyed on the
+   document language set by core/i18n.js. */
+html:lang(zh) {
+  --font-sans: 'IBM Plex Sans', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'IBM Plex Serif', 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', SimSun, Georgia, serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Consolas', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans Mono CJK SC', monospace;
+}
+
+/* Japanese: same approach as Chinese, with the Japanese system faces. */
+html:lang(ja) {
+  --font-sans: 'IBM Plex Sans', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', 'Yu Gothic', 'Meiryo', 'Noto Sans CJK JP', 'Source Han Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'IBM Plex Serif', 'Hiragino Mincho ProN', 'Yu Mincho', 'Noto Serif CJK JP', 'Source Han Serif JP', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Consolas', 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', 'Noto Sans Mono CJK JP', monospace;
+}
+
+/* Hindi: Plex Sans Devanagari is shipped for the sans (css/fonts.css). The serif
+   and mono faces have no Devanagari, so name system fallbacks for them. */
+html:lang(hi) {
+  --font-display: 'IBM Plex Serif', 'Kohinoor Devanagari', 'Nirmala UI', 'Mangal', 'Noto Serif Devanagari', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Consolas', 'Kohinoor Devanagari', 'Nirmala UI', 'Mangal', monospace;
+}
+
+/* Arabic: Plex Sans Arabic is shipped for the sans (css/fonts.css). The serif and
+   mono faces have no Arabic, so name system fallbacks for them. */
+html:lang(ar) {
+  --font-display: 'IBM Plex Serif', 'Geeza Pro', 'Segoe UI', 'Noto Naskh Arabic', 'Noto Serif Arabic', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Consolas', 'Geeza Pro', 'Segoe UI', monospace;
+}
+

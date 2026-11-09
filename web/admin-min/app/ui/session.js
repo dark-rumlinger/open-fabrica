@@ -1,0 +1,1 @@
+import{post as o,TOKEN_KEY as t}from"../core/http.js";async function e(){try{await o("/admin/api/auth/logout")}catch{}localStorage.removeItem(t),localStorage.removeItem("of_user"),window.location.href="/login"}export{e as logout};

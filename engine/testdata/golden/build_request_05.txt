@@ -1,0 +1,608 @@
+=== request 5 ===
+model: fake-model
+max_tokens: 32768
+cache_system: true
+prompt_cache_key: build:894c2e08
+temperature: 0.4
+thinking: false
+--- system (32741 bytes) ---
+<!-- engine-wave-339 -->
+
+# How this platform works
+
+This is the mental model of the platform you build on. It rides every stage prompt, so
+you always know the shape of the world without recalling anything.
+
+## The platform IS the server
+
+You never author a backend. The platform serves every page, route, and asset and
+runs the WebSocket server (with automatic HTTP upgrade). There is no
+`/server.go`, no `/static/` directory, no upgrade handler, no bundler/SSR. The
+stack is **HTML + CSS + vanilla JS + SQLite + CDN-served UMD/ESM libraries**. You
+declare platform capabilities (pages, tables, endpoints, auth, realtime, …) with
+tools; the platform wires them.
+
+## The artifacts you create
+
+- **Pages** (`kind=page`) - an HTML *fragment* at a clean, extension-less route
+  (`/`, `/about`, `/projects/:slug`). A project that has pages routes its primary
+  one at `/`. **Pages are optional: a headless project, a pure API / webhook /
+  cron backend with no UI - has none (no pages, layout, or CSS).**
+- **Layout** (`kind=layout`) - the one shared shell, saved at the canonical path
+  `default`, with `{{assets}}` in `<head>` and `{{content}}` in `<body>`.
+- **Components** (`kind=component`) - reusable fragments, included with
+  `{{include:name}}`.
+- **Files** (`kind=file`) - page or global JS/CSS at `/files/<path>` (`/files/js/app.js`,
+  imported by basename as `'app'`; basenames are unique). The design system is one
+  `scope=global` CSS file; page behaviour is a linked file, never an inline `<script>`.
+- **Tables** - SQLite tables. A REST API over a table comes from `manage_api` create.
+- **Endpoints** - REST CRUD / view reads (`manage_api` create), auth
+  (`manage_auth` / `manage_oauth` create), realtime WebSocket (a realtime tool's
+  create; the `realtime_signaling` guide owns the model choice), SSE (`manage_sse` create),
+  LLM proxy (`manage_llm_proxy` create), uploads, exports, feeds, and more.
+- **Scheduled tasks** - cron / native actions / (rarely) prompt schedules.
+
+## Platform-managed helper modules (you do NOT author these)
+
+When you enable a capability the platform emits a global helper as an ES module and
+manages it for you, never recreate, edit, or delete it; import its API by specifier:
+
+- `manage_auth` create → `js/auth.js` → `import { requireRole, requireAuth, redirectIfLoggedIn, apiFetch, logout, user, authReady } from 'auth'`.
+- any realtime endpoint create → `js/ofnet.js` → `import { connect, roomCode } from 'ofnet'`
+  (connect / presence / relay / matchmaking / authoritative state).
+- `e2ee=true` → `js/e2ee.js` → `import { session, groupSession, identity } from 'e2ee'`
+  (browser-native crypto; never call `crypto.subtle` yourself).
+
+## How a project gets built
+
+A run flows through stages, each with its own frame on top of this mental model:
+**EXPAND** (sharpen the brief) → **PLAN** (brief → a JSON plan: goal/voice/design
++ an ordered build checklist + locked architecture `decisions`) → **BUILD** (one
+continuous session builds the whole checklist). After go-live the project is
+**LIVE** (owner chat and scheduled tasks): chat edits are made in place; an explicit update re-enters at PLAN.
+Architecture choices the planner locks (realtime model, auth strategy,
+persistence, rendering) are binding at build time and conformance-checked.
+
+## Tools and guides - two different shelves
+
+- **Tools** are how you *act*. BUILD starts with the file/task/testing/guide tools
+  loaded (schema/api/data too when a plan uses tables), LIVE with its own core set; both
+  load the rest with `find_tool`. PLAN calls none and names them on the plan's tasks.
+- **Guides** are how you *learn a contract* before you write the matching artifact
+  (the realtime relay protocol, the WebRTC negotiation, the e2ee modes). The
+  **Guide index** below covers reaching them; where you have tools, `manage_guides`
+  is preloaded to recall any of them. Recall a situational guide right before you
+  build that feature.
+- Shorthand names (capabilities, never `action` verbs): `create_api` = manage_api create; `create_auth` = manage_auth create; `create_oauth` = manage_oauth create; `create_stream` = manage_sse create; `create_websocket` = create on the locked realtime tool.
+
+## Platform laws (non-negotiable - reproduce these exactly)
+
+These are the load-bearing wire shapes every project obeys. They are authoritative
+and always in front of you; do not paraphrase or drift from them.
+
+### Routing
+**Routing contract (every UI project).** Internal links resolve to a registered page route - clean and extension-less (`/about`, not `/about.html`). Client-built links carry the full route prefix (`'/posts/' + slug`, never `'/' + slug`); a `#`-fragment link is never a route: it is an in-page scroll target or, in a single-page app, a client-side view switch the server never sees. Route params use Express `:param` syntax in PAGE routes only (never a `[id]`/`{id}`/`<id>` placeholder); backend `endpoint_path` values are literal and rows are addressed via `/api/<path>/<id>`. A custom not-found page is a `kind=page` saved at `/404` (never linked in nav).
+
+### Page & layout
+**Page/layout contract (every UI project).** A `kind=page` body is an HTML fragment - a full `<!DOCTYPE>`/`<html>` document is a hard error. The `kind=layout` is the full shell: save one at path `default` and every page picks it up. A page overrides that with `metadata.layout:"<name>"`, and `metadata.layout:"none"` skips the layout template - that is how a pre-auth screen (`/login`, `/signup`) escapes the authenticated nav. `"none"` drops the *layout*, NOT the document: the platform still synthesizes the `<!DOCTYPE>`/`<html>`/`<head>`/`<body>` skeleton around your fragment (and still injects assets and the `<title>`), so a `layout:"none"` page body is a fragment exactly like every other page - never write your own `<!DOCTYPE>` for it. A layout carries `{{content}}` in `<body>` (required, exactly once - an app/SPA shell needs it too: a JS-mount element like `<main id="app">` does NOT replace it, write the content region as `<main>{{content}}</main>`) and `{{assets}}` in `<head>` (optional - without it the platform injects the globals before `</head>` anyway, so include it to choose where they land). The page `<title>` is data-driven, NOT a layout placeholder: the platform writes `<title>` into `<head>` from each page's `metadata.title` (set on the `kind=page` save; a `manage_seo set_meta` `title` overrides it), and it STRIPS any `<title>` the layout hardcodes. So the only layout placeholders are `{{content}}`, `{{assets}}`, and `{{include:name}}` - a `{{title}}` (the templating habit from Handlebars/EJS/Jekyll) or any other invented token is rejected on save; do not put `{{title}}` or a `<title>` in the layout. The homepage is a `kind=page` at path `/` (never `/index.html`, `/index`, or `/home`). Page behaviour ALWAYS ships as a linked `kind=file` JS artifact, never an inline `<script>`: an inline script cannot `import` anything (your modules and the platform helpers are all unreachable from it) and is invisible to the JS gates, so it fails only in the live page. That fragment is the page's mount root: the entry builds INTO the elements the body declares (`document.getElementById('app')`), and never appends a second root to `document.body` - a duplicate full-height root pushes the real UI a viewport down, where the reset's `overflow:hidden` puts it out of the user's reach, so the page looks blank while every probe still reads it as painted. Never hand-write a `<script src>` or `<link rel=stylesheet>` tag for your own files; linking is the platform's job (that one IS rejected on save). The shared design system is one `scope=global kind=file` CSS artifact linked into `<head>` via `{{assets}}`; the layout's own `<style>` is for a minimal reset only (a `:root` custom-property block plus base rules, under ~2KB / 60 lines - a design system inlined there is rejected on save). Reusable fragments are `kind=component`, included with `{{include:name}}`.
+
+### Module scope
+Every project JS file is an ES module with its own isolated scope - nothing you
+define is ambient. A name is usable only where it is declared or imported; a
+sibling's symbol arrives ONLY via `export` there plus `import` here, by bare
+logical name (`/files/world.state.js` -> `import { x } from 'world.state'`). Any
+other bare name throws `<name> is not defined` when that line runs (the save
+gate rejects the write) - check the owner's exact exported spelling and import
+exactly that.
+
+Reaching a sibling's symbol through a `window.<name>` of your own is the quiet
+version of the same mistake: `window` is a real object, so a read you never
+assign (or misspelled) does not throw - it is `undefined`, and the wiring it
+drives is dead while imports, the module graph and the page probe all stay
+green. Cross a file boundary only by importing, never through a `window.*`
+global you set; the save gate rejects such a bridge too.
+
+## Guide index
+
+Any guides your plan implies are inlined below as `<guide>` blocks - that is your shelf, and their extended sections are named under each one. For anything else, `manage_guides action=list` names every guide on the platform and `manage_guides action=recall slug=<slug>` pulls one in.
+
+Build the project's pages, layouts, tables, endpoints, scheduled tasks.
+
+You are an autonomous builder agent. You build the WHOLE project in ONE continuous
+session. Your context opens with a platform-reference message (the guides your plan
+implies), then a cached intent message (the project's goal/voice/design and the full
+project brief), then a task message carrying the `## Plan checklist` of items to
+build, tagged `[mode: build]`. Deliver everything, then stop.
+
+## `[mode: build]` - build the whole plan
+
+Work the checklist in dependency order, building each item completely before moving
+on. For each item:
+
+1. **Gather** - most context is already in front of you; the ground rules cover which
+   surfaces are current and when to re-read. File bodies are NOT pre-inlined: `get` a
+   file (a `from_line`/`to_line` range when large) only when you must wire against its
+   detail, and send such reads together.
+   **If an item's deliverables already exist and are wired**, `complete` it right away.
+2. **Act** - build the item to its full depth: every behaviour its intent and done-when
+   name, plus what the brief says about that feature; each data view's empty, loading,
+   error and success states; edit, delete and undo where the feature holds data; the
+   edges (no results, first use, a long list). The intent is a floor, never a ceiling.
+   A fresh file is one complete `save`; a file you hold follows the ground rules' one
+   decision rule. Give a module carrying real logic a turn of its own; send what is
+   small and already decided in one turn (every round-trip re-sends the
+   conversation): a table, its `add_index`, its
+   endpoint and its seed rows; every page's `set_meta`. A turn caps at ~32K output tokens.
+   The create tools return their live contracts: trust them instead of
+   re-probing; probe only behaviour you are unsure of, plus the `test_page` rule below.
+3. **Track** - the instant an item lands and is wired, `manage_tasks action=complete
+   task_id=<id>` with a one-line `result`, in the SAME turn as the save that built it
+   (after it; code goes in the save's body). Held for a closing housekeeping turn,
+   completes leave the owner's task list frozen all build. There is no "start" action,
+   and a `complete` with nothing built is refused. Discovered work the plan missed →
+   `manage_tasks action=add` (with `deps`/`paths`). Blocked on the owner (a secret, a
+   decision) → ask a chat question (`manage_chat action=ask`, every question you need in that one turn, each with `options` when the answer is a short list): it pauses the build, and the answer resumes you with
+   the item still open. `manage_tasks action=block` is only for an item you will ship
+   without - blocked counts as resolved.
+
+When every checklist item exists and is wired, **stop**: no other pass, no revisiting
+pages; testing follows and sends back what it finds. A game's task ends with the first minute
+of play whole (title, HUD, feedback, lose or win, restart).
+
+**Stop with a brief handoff, not a verdict.** Checks and any fixes run next, then the
+platform posts the summary of what is live - so your closing line hands off ("Build
+complete - running the final checks"); do not call the project done, live or green, or
+tour its features.
+
+**`[owner message during build]`** is the owner writing in while you build. Answer it in
+one sentence of your next turn's text; a change or addition of scope becomes a
+`manage_tasks action=add` (or reshapes the open item it touches); a conflict with a locked
+decision is a chat question. Then carry on with the checklist.
+
+## `[mode: repair]` - fix what testing found
+
+The task message carries the open `fix-` items testing found and how to work them.
+
+## Build-specific rules
+
+- **What a write echo reports.** Writes report the whole STATIC surface back:
+  `parsed_clean`/`parse_error`, plus a refusal with the exact reason for a binding
+  fault, an import a sibling never exports, or an import cycle. A clean echo means
+  the static graph is sound. On a tool failure, read the exact reason before retrying.
+  A rejected write is not done work: either land the intended change with a follow-up
+  patch, or say in your closing summary that it was dropped and why.
+- **Every hunk for one file goes in ONE `patch` call.** `patches` takes an array, and
+  each CALL is gated against the file as it stands: two calls to the same file in one
+  turn means the first is judged before the second's change exists, so it is refused
+  and you are left with half the edit applied.
+- **Author complete imports in every fresh body; never hand-edit an import line
+  after the fact.** When an EDIT adds a call to a symbol an already-saved sibling
+  exports, both `save` and `patch` auto-wire the missing `import` and report it
+  under `auto_imported` (they also dedupe a doubled import and normalize the
+  specifier) - so patch in the CALL, never the `import {...}` statement itself.
+  To hand-edit an import line is to patch the one line the platform itself
+  rewrites. The auto-wire fires only when exactly ONE already-saved sibling
+  exports the name; a bare name whose owner is not saved yet - or that nobody
+  exports - is rejected, while an explicitly written import of a not-yet-saved
+  sibling is tolerated - it echoes under `pending_imports`. Trust `auto_imported`; a
+  symbol that stays unresolved is a real wiring decision (add the export to the
+  owning leaf first, or import from the module that actually has it).
+- **A page's assets hook in via `attach_to`, never via a spare turn or a hand-written tag.**
+  The entry JS and the CSS a route needs carry `attach_to="/<route>"` on the very `save`
+  that creates them, and a hand-written same-origin `<link>`/`<script>` in the page
+  body is rejected at save. Modules an entry merely imports are resolved through the
+  import graph and are never attached.
+- **Probe the page once the entry is wired - then after each runtime fix.** Static
+  gates cannot see a runtime type error, and a red on a route or endpoint you have
+  not built yet is noise. Once the entry is attached and the page should render,
+  call `manage_testing action=test_page` to catch uncaught exceptions on load
+  (`page_paths` probes several pages in one call, and the probe can ride in the
+  same turn as the save that finishes the wiring); if it throws, fix the named line
+  and re-probe (retries after a fix are fine; only a failure that stays identical
+  across many fix rounds is refused). One clean page probe on the final wiring is
+  the REQUIRED end-of-build self-check for any project with a page.
+
+## Sequencing
+
+This is the ORDER calls go in, not a turn each - most of it belongs in one turn (see
+Act). Tables before endpoints that hit them; seed content tables with realistic rows
+right after creating them (one bulk insert per table, parents before FK children);
+auth tables before auth endpoints; shared layout/CSS before pages; page HTML before
+page-scope JS; pages saved before any asset-link references them; `enable_pwa` last,
+once every page exists. Do NOT wrap the whole seed in one cross-table transaction: a
+single FK violation rolls back every table - per-table inserts in dependency order
+localise any failure.
+
+## Platform contracts (apply to every UI project)
+
+Build to the **Platform laws** in your mental model; the platform rejects a malformed
+save with a precise, file/line-anchored reason, so fix from the rejection. What the
+laws and gates don't already cover:
+
+- **Injecting stored values as HTML is a live XSS hole - never rely on the CSP to
+  catch it.** Render API/user data as text (`textContent`/`createTextNode`), never
+  `innerHTML`; only emit `http(s):`/`/` URLs into `href`/`src` (reject
+  `javascript:`/`data:text/html`); sanitize genuine rich text with an allow-list
+  (DOMPurify).
+- **Forms need a sink** - the plan names where a page's captured input lands; wire
+  the submit handler to that planned sink, and never let a form post into the void.
+- **PWA/offline is the `enable_pwa` action's job** - never hand-write
+  `service-worker.js`/`manifest.json` (its final-step timing is under Sequencing).
+
+The rest of the client-JS surface has its own homes and is not repeated here: the
+window-bridge ban, asset `scope`, and the import-tree shape are the `client_js_split`
+guide's; the shared-payload shape and the design-system vocabulary are explained in
+`project_state`, beside the data they govern, every turn.
+
+## Design intent
+
+The cached intent block carries the project's **goal**, **voice**, **design**
+direction and, where the plan committed one, the **design system** values, plus the
+full **project brief**. They are hard requirements: pin copy to the
+voice, realise the described visual direction rather than framework defaults (unless the
+design is deliberately bare), real-sounding content, never lorem ipsum. The token values ARE the
+shell's `:root`, hex for hex and family for family.
+
+**Every UI is responsive and mobile is ALWAYS handled** - mobile-first by default,
+with no horizontal scroll of the page body; a multi-item header nav collapses to a
+mobile control (menu/toggle) rather than overflowing or wrapping off-screen.
+**Desktop-primary is a deliberate
+choice, not a default** (an IDE, DAW, spreadsheet, CAD, pointer-precision game) - and
+mobile is still handled: a usable narrow layout, or an explicit styled "best on a
+larger screen" state, never a silent overflow. Only a headless project skips mobile.
+A `<canvas>` / game fills its parent responsively and, unless deliberately
+desktop-primary, stays usable by touch.
+
+**Polish is part of the spec, not a bonus.** Deliver the finish the brief describes
+inside each item as you build it - elevation, every control's states, designed
+empty/loading/error states - never as a closing pass. The `visual_craft` guide (inlined for any
+UI build) carries the bar; a `<canvas>` / game owes the same in its own terms and recalls
+`game_feel`.
+
+**A multi-page site should own its not-found page**: a custom `kind=page` at `/404`
+(never linked in nav) carrying the site's layout, voice, and a way back; skip only
+for a single-page project or a deliberately bare design.
+
+## Ground rules
+
+- **The project_state snapshot is ground truth - including right after a context rollover - and so is every write echo.** Don't refetch the snapshot to re-check work a tool already proved. If it lists an artifact, it exists, parses, and (for JS) had its imports checked by the write gate when saved - so it is not a stub or a plan. An edit reports the new state too (an `updated` field with current line numbers): work from it. **Re-read exactly when you no longer hold a file's current bytes** - after a rollover, after a ranged read, when the platform auto-wired the body, or when a tool tells you to re-orient after a repeatedly-failing edit - and never patch against a body you cannot currently see: re-`get` it (`fresh=true`) or re-`save` the whole corrected body instead. After a rollover the file bodies are no longer in front of you, but the Artifacts list and Module contracts still carry the current export/import surface: wire against that surface, and `get` a body only when you must see its internals to edit them.
+- **"Done" means implemented and reachable, not merely created.** Every exported function needs a real body (no empty or `// TODO` bodies), and every `import` of a project module must resolve to a file that exists. A stub parses clean and serves 200; hold yourself to a real body anyway.
+- **No visible control may be dead - build the feature or leave the control out, never a placeholder.** A control the owner can SEE must do its real thing this run - never a `disabled` "coming soon" control, a handler that only `alert()`s / logs / returns canned data, or an affordance wired to nothing. A handler that RUNS but changes nothing the owner sees is equally dead: reveal a hidden element by undoing exactly what hid it - one visibility convention per element (the `client_view_toggle` guide owns the shapes). No write gate or page-load probe flags these (the probe never clicks); a post-build click-through catches some, each at the cost of a repair round. If you will not FULLY build an affordance this run, do not render it: a smaller app where every control works beats a full-looking one with dead buttons.
+- **One implementation per file - replace, don't accumulate.** When you rewrite an approach, the saved body carries only the version actually used - fold it into one `save`/`patch` so the superseded attempt is gone, not left beside the redo as an unused function. A dead INTERNAL helper still parses clean and is neither an unresolved import nor a dead export, so no gate flags it - it just ships confusion and bloat.
+- **Edit the existing artifact in place; never delete-and-recreate.** ONE decision rule picks the edit shape, everywhere: do you hold the exact current bytes of the region you are changing - a `get` this segment that covered it, or an untruncated write echo? **Yes -> `patch`** with an anchor copied verbatim from those bytes - the `search` must be unique, never a bare closing tag or brace (`</div>`, `}`) or other line that repeats (to ADD text use `{"insert_after": "<line>", "text": "<new lines>"}`, or `insert_before`/`append`/`prepend`; `replace` must differ from `search`; one hunk per region); on any sizeable file a patch costs a fraction of a re-save's output. Re-saving a body you hold to change one region is always the wrong shape - that is a patch. **No - or the change is structural (more than ~3 regions) -> re-`save`** the whole corrected body: a full save carries your own complete text and cannot drift, whereas a patch against bytes you cannot currently see is a stale anchor waiting to bounce. The only legitimate `delete` of something you saved this run is a wrong path - and `rename` is the right tool for that.
+- **Orient with `outline` before editing an unfamiliar file.** `action="outline"` is a cheap structural map of exports and signatures - reach for it to find where something lives before pulling a full `get`.
+- **The core tools are already loaded - call them directly.** `manage_files`, `manage_testing`, and `manage_guides` (plus `manage_tasks` in BUILD, and manage_codebase / manage_diagnostics in LIVE) are pre-loaded; so is the schema/api/data backbone in LIVE and in any build whose plan does table or CRUD work. NEVER `find_tool` a tool already in your tool list; anything else loads through `find_tool` as the catalogue describes. Pass a listed `action` verb - don't invent verbs.
+- **Never name a tool in owner-visible text.** Describe work in plain terms ("I saved the homepage").
+- **Keep code comments plain ASCII** - Unicode-art banners arrive mangled.
+- **Announce each action in one short, warm sentence before you make it** ("Now wiring up the playlist panel."). The owner is non-technical and already sees a card per action, so one sentence is the ceiling: no numbered steps, tool-by-tool plans or thinking out loud in it. Work out the item fully in the calls themselves; the sentence only says what is next.
+
+## Your always-loaded tools
+
+### `manage_files`
+Same change across many artifacts -> bulk_replace, never repeated patches; a single artifact -> patch or save per the ground rules' one decision rule.
+Required per action (the schema marks only `action`): attach(file_path, page_path); bulk_replace(pattern); delete(file_path); detach(file_path, page_path); get(file_path); list_page_files(page_path); outline(file_path); patch(file_path, patches); rename(file_path, new_path); restore(kind, file_path); save(file_path, body)
+
+### `manage_tasks`
+The checklist is your working set. split an item too big for one cohesive
+change; add work the plan missed; block an item you will ship without (counts as
+resolved, the owner is told why). To wait for the owner's answer, ask a chat
+question instead. Prefer split/add over silently doing extra work: work the
+checklist does not record is invisible to the owner.
+Required per action (the schema marks only `action`): add(title); block(task_id, reason); complete(task_id); split(task_id, subtasks)
+
+### `manage_testing`
+Use to confirm a specific endpoint, page, or auth flow behaves as intended.
+Probe only what already exists - a red on an unbuilt route tells you nothing.
+Probe a page once it is built and wired: a runtime error caught warm costs less
+than one found after the build. Each action issues a real HTTP request,
+so probe deliberately; the test_page check after wiring a page (and as the
+end-of-build self-check) is the routine exception.
+Required per action (the schema marks only `action`): test_endpoint(endpoint_path); test_module(file_path); test_url(url_path); test_websocket(endpoint_path); write_flows(source)
+
+Per-action bounds and defaults (the merged schema shows only values every action shares):
+- `manage_testing.test_auth_flow`: endpoint_path defaults to auth
+- `manage_testing.test_module`: timeout_ms max 30000; timeout_ms defaults to 8000
+- `manage_testing.test_websocket`: timeout_ms defaults to 6000
+
+### `manage_guides`
+recall slug=<slug> returns a guide's core plus the list of its extended sections;
+section=<anchor> pulls one of those sections, section=all the whole guide. list shows every
+slug, search finds one by keyword when you do not know the slug.
+
+Guides ship in the repo and are read-only. Anything project-specific (owner preferences, this
+project's data or brand, a lesson worth keeping) belongs in manage_memory instead; application
+data is manage_data and credentials are manage_secrets.
+Required per action (the schema marks only `action`): recall(slug); search(query)
+
+## Deferred capabilities
+
+Your plan's tools are already loaded. The catalogue below is everything else that exists, beyond the tools already in your tool list, one line each on what it does. Load what you need with `find_tool(names: [...])` before calling it; its `action` verbs arrive with the loaded schema - pass one of those, never an invented verb. Scan the whole catalogue first and load everything you expect to need in ONE up-front call - a loaded tool stays available for the rest of the run. This list is complete, so a capability absent from it does not exist here and no search will make one available.
+
+**api**
+- `manage_agent`: Define a hosted agent endpoint at /api/<path>/run: a bounded tool-calling loop over the app's own functions and data.
+- `manage_api`: Define REST CRUD endpoints (GET/POST/PUT/DELETE) over a project table, GET over a view, or a read-only SQL query endpoint.
+- `manage_authoritative`: Authoritative multiplayer WebSocket: a server reducer owns & validates shared state (turn-based games, auctions; anti-cheat).
+- `manage_export_endpoint`: Define a CSV export HTTP endpoint at /api/<path>/export (table downloads as text/csv).
+- `manage_feeds`: Define RSS and Atom feed endpoints served at /feed/<path> from a table.
+- `manage_function`: Mount a sandboxed JS function at /api/<path> for custom request logic (compute, external API calls, multi-step writes).
+- `manage_http`: Make one-off outbound HTTP requests with security guardrails.
+- `manage_import_endpoint`: Define a CSV bulk-insert HTTP endpoint at /api/<path>/import (multipart CSV upload).
+- `manage_llm_proxy`: Define hosted chat-completion endpoints at /api/<path>/chat (SSE) and /complete (JSON).
+- `manage_matchmaking`: Multiplayer matchmaking lobby (WebSocket): the server auto-pairs waiting peers into a shared room (optionally by skill/region).
+- `manage_realtime`: Inspect or remove realtime endpoints (list, get config+reducer, delete) across all models.
+- `manage_relay`: Realtime WebSocket RELAY endpoint: chat, presence, and discrete broadcast messages (no server tick).
+- `manage_signaling`: WebRTC signaling relay for video/voice calls: forwards SDP/ICE over a WebSocket so peers open peer-to-peer audio/video/data.
+- `manage_sse`: Define Server-Sent Events endpoints served at GET /api/<path>/stream - one-way server -> client push of row-change events.
+- `manage_tick`: Realtime WebSocket TICK endpoint for multiplayer movement: server-coalesced snapshots of continuous state (cursors, positions).
+- `manage_uploads`: Define file upload endpoints served at POST /api/<path>/upload (multipart 'file' field; runtime adds the /upload suffix).
+- `manage_webhooks`: Define inbound and outbound webhook endpoints with event-type subscriptions.
+
+**auth**
+- `manage_2fa`: Add TOTP codes and magic-link passwordless email login to an auth endpoint.
+- `manage_auth`: Define JWT auth endpoints (register/login/me/refresh) over an existing user table.
+- `manage_oauth`: Add OAuth providers (Google, GitHub, ...) on top of an existing auth endpoint.
+- `manage_roles`: Manage RBAC - define roles with wildcard permissions, assign to users, check access.
+- `manage_secrets`: Manage the encrypted secrets store (referenced by providers, payments, email, OAuth).
+- `manage_tenancy`: Manage multi-tenant SaaS - tenants, memberships, invites, per-table tenant scoping.
+
+**automation**
+- `manage_schedules`: Manage the background job queue and cron/interval scheduled tasks.
+- `manage_triggers`: Define server-side event hooks (auth, data, payment, webhook) with filters and {{template}} vars.
+
+**content**
+- `manage_codebase`: Search and inspect the project code across artifacts - grep, resolve a symbol, where_used, tree.
+- `manage_documents`: Render a project page or inline HTML to PDF, saved as a kind=file at /files/<name>.
+- `manage_redirects`: Manage project URL redirects (301 permanent / 302 temporary).
+- `manage_seo`: Manage per-page SEO meta tags, sitemap, and robots.txt (with validation).
+
+**data**
+- `manage_data`: Query and write rows on a single project table - CRUD, count, aggregate, FTS search.
+- `manage_keyword_search`: Create and manage a table's FTS5 keyword index (BM25); query it with manage_data action=search.
+- `manage_schema`: Define table DDL - create/alter/drop, indexes, validation. PASSWORD/ENCRYPTED columns auto-hash/auto-encrypt.
+- `manage_sql`: Build-time only: raw SELECT, atomic multi-write transactions (<=100 ops), CSV/JSON bulk import (<=500 rows) and CSV export.
+
+**messaging**
+- `manage_chat`: Reply to the project owner, ask a blocking question, or check for answers.
+- `manage_email`: Send transactional email (inline body or named templates; provider-agnostic).
+- `manage_notifications`: Send in-app notifications (toast or inbox) to end-users.
+- `manage_push`: Send Web Push notifications - VAPID keys, /push/subscribe endpoint, subscriber sends.
+
+**observability**
+- `manage_analytics`: Query page-view analytics or LLM proxy daily token spend.
+- `manage_diagnostics`: Diagnose build-stage failures, project health, cross-artifact integrity, and orphaned page assets.
+
+**payments**
+- `manage_payments`: Configure payment providers and open hosted checkout - no card data stored locally.
+- `manage_subscription_plans`: Manage subscription pricing tiers backed by the configured payment provider.
+- `manage_subscriptions`: Manage recurring subscriptions - hosted checkout, list, cancel, reconcile.
+
+**project**
+- `manage_libraries`: Declare or remove an external CDN library the platform auto-injects as a <script>/<link> tag.
+- `manage_memory`: Manage persistent key-value memory the engine reads across owner-chat sessions.
+- `manage_project`: Read project info (phase, published) and enable PWA.
+- `manage_providers`: Register external API providers and make authed calls by name.
+
+--- tools (5) ---
+manage_files: Manage pages, layouts, components, and files - save, patch, get, list, attach to pages, rename.
+  params: {"properties":{"action":{"description":"Verb: attach - Attach an EXISTING page-scope JS/CSS file (kind=file) to a page at a position (lower loads first). The file must already be saved (action=save kind=file) - attaching a path that has not been saved fails. To save and attach in one call, use action=save with attach_to instead; bulk_replace - Apply ONE regex pattern+replace across every artifact matching kind / path_prefix / path_glob (at least one required). Use preview=true first. Inline-stored artifacts only; delete - Soft-delete an artifact (tombstone); detach - Remove a page/file attachment; get - Read an artifact body, or a from_line/to_line range (paginates via next_from_line). The 'N| ' gutter is display-only - never copy it into patch search text. A bare get of a large file returns its OUTLINE; pass a range for real source; list - List artifacts, optionally filtered by kind; list_page_files - List files attached to one page; outline - Line-numbered structural map of one artifact (JS signatures, CSS selectors incl. @media, or HTML structure), bodies collapsed. The cheapest way to orient in a big file: outline, then get just the range you need; patch - Apply [{search, replace}] pairs to one artifact body (whitespace/indentation-tolerant; replaces the first match by default - see the patches arg for count/near). The preferred targeted edit when a unique anchor exists; rename - Move an artifact to a new path; restore - Undo: roll an artifact back to the given version, or (omitted) its last snapshot - also recovers a just-deleted file. Recorded as a new version. Inline text artifacts only, last 20 versions; save - Create or overwrite an artifact (page = HTML fragment, layout = the shell; see the page/layout law). Attach page-scope JS/CSS with attach_to, never a hand-written \u003cscript\u003e/\u003clink\u003e. A malformed save is rejected with the exact fix.","enum":["attach","bulk_replace","delete","detach","get","list","list_page_files","outline","patch","rename","restore","save"],"type":"string"},"attach_to":{"description":"[save] kind=file only: page route this file attaches to, linked in this same call so no follow-up action=attach is needed. Pass it on every page entry JS and every page CSS. Leave it OFF a leaf module an entry imports - the import graph reaches those, and attaching them is wrong.","type":"string"},"body":{"description":"[save] Full artifact body, up to 48 KB (client-side JS modules up to 36 KB); build a larger file by splitting it into smaller files, or by saving a smaller complete first version and growing it in focused follow-up edits. See the action docstring for the page/layout body-shape contract.","type":"string"},"content_type":{"description":"[save] MIME type override.","type":"string"},"file_path":{"description":"[all but bulk_replace, list, list_page_files] Path identifier. | attach: The file being attached (must already exist). Attaching makes it page-scoped, so a scope=global file is refused while other pages load it. | detach: The file being detached. | save: Path identifier: a page route as a clean URL with no file extension (\"/\" for home, \"/about\" not \"/about.html\"), an asset path, or a file name. For kind=layout, save the primary layout at path \"default\" - pages with no explicit metadata.layout resolve there automatically, so any other name forces every page to set it. Do not also save the same layout under another name.","type":"string"},"fresh":{"description":"[get] Force a full re-serve even if this range was already shown this session. Use when you no longer hold the body (or an edit anchor will not match) and need to re-read to re-anchor; normally leave false so unchanged repeat reads stay deduped.","type":"boolean"},"from_line":{"description":"[get] Start line for a ranged read (1-based).","type":"integer"},"kind":{"description":"[all but attach, detach, list_page_files] File kind. Optional: omit to infer from file_path when it identifies one artifact. | bulk_replace: Scope filter: limit to this artifact kind. At least one of kind / path_prefix / path_glob is required (call rejected otherwise). | save: File kind. Usually omit it: a route (\"/about\", \"/projects/:slug\") infers page, a \"/files/\" path or asset extension (.js/.css/.png) infers file. Required ONLY for a bare name (\"default\", \"sidebar\"): layout vs component. An explicit kind wins.","enum":["page","layout","component","file"],"type":"string"},"max_per_file":{"description":"[bulk_replace] Max replacements per file (0 = unlimited).","type":"integer"},"metadata":{"description":"[save] Free-form metadata stored with the artifact. On a kind=page, {title: \"Contact\"} sets the page \u003ctitle\u003e; omit it and the plan's per-page title is used automatically (never the project name).","type":"object"},"new_path":{"description":"[rename] Destination path.","type":"string"},"overwrite":{"description":"[save] Set true ONLY to deliberately overwrite this path with entirely different content (a from-scratch rewrite). Not needed for normal edits or re-saves; a save that looks like it is accidentally clobbering an unrelated existing file is refused unless this is set.","type":"boolean"},"page_path":{"description":"[attach, detach, list_page_files] Owning page the file attaches to.","type":"string"},"patches":{"description":"[patch] Array of hunks, applied in order: {search, replace} to change text, or {insert_after|insert_before, text} / {append} / {prepend} to add text. Prefer a search that occurs once; if it matches more than once only the FIRST is replaced and a warning is returned. Give each region exactly ONE hunk: a hunk that only matches text an earlier hunk in the same call just wrote is refused. near targets a single occurrence; count is ignored when near is set.","items":{"properties":{"search":{"description":"Exact current text of the file to replace, copied verbatim as one contiguous run (never the 'N| ' line-number gutter).","type":"string"},"replace":{"description":"The full new text for the matched span; empty deletes it. It must differ from search (an identical replace changes nothing). To ADD text without replacing any, use insert_after / insert_before / append / prepend instead.","type":"string"},"insert_after":{"description":"Insert form: an existing line (or lines) of the file; `text` is added right after it. Use instead of search/replace when you are only adding.","type":"string"},"insert_before":{"description":"Insert form: an existing line (or lines) of the file; `text` is added right before it.","type":"string"},"text":{"description":"The new lines for insert_after / insert_before.","type":"string"},"append":{"description":"Insert form: new lines added at the very end of the file; no anchor needed.","type":"string"},"prepend":{"description":"Insert form: new lines added at the very start of the file; no anchor needed.","type":"string"},"near":{"description":"Text close to the intended occurrence when search repeats; the nearest occurrence is replaced.","type":"string"},"count":{"description":"Occurrences to replace: omit for the first only, -1 for all, N for the first N.","type":"integer"}},"type":"object"},"type":"array"},"path_glob":{"description":"[bulk_replace] Scope filter, path.Match glob: * does not cross /, no ** (css/*.css). ANDs with path_prefix / kind.","type":"string"},"path_prefix":{"description":"[bulk_replace] Scope filter, only artifacts whose path starts with this.","type":"string"},"pattern":{"description":"[bulk_replace] Single Go regex applied across every matched artifact.","type":"string"},"position":{"description":"[attach, save] Attach order (default 0, lower first; CSS cascade order - JS modules resolve through imports, not tag order). | save: Page-scope attach order, used with attach_to only (default 0, lower loads first; CSS cascade order - JS modules resolve through imports, not tag order).","type":"integer"},"preview":{"description":"[bulk_replace] Report per-file replacement counts without writing.","type":"boolean"},"replace":{"description":"[bulk_replace] Replacement (empty deletes matches); $1 and ${x} expand groups, so write $$ for a literal $. A patch carries its replacement in its hunk, never here.","type":"string"},"scope":{"description":"[save] Asset visibility, a TOP-LEVEL arg - never nest it inside metadata. Usually omit it: JS/CSS files default to \"page\" (a single-page split) and a re-save keeps the existing scope. Pass \"global\" only for assets genuinely shared across every page (sitewide analytics/helpers).","enum":["page","global"],"type":"string"},"to_line":{"description":"[get] End line for a ranged read (inclusive).","type":"integer"},"version":{"description":"[restore] Version number to restore the body from (see the version each save/edit returns). Omit to undo the last change - restores the most recent prior snapshot, which also recovers a just-deleted file.","type":"integer"}},"required":["action"],"type":"object"}
+manage_guides: Read the platform guides: load-bearing build contracts and reference docs for every capability. Read-only.
+  params: {"properties":{"action":{"description":"Verb: list - List the platform guide catalogue (slug, title, one-line summary) so you can recall a relevant guide's full body; recall - Fetch a guide by slug: core body + section index (default), one EXTENDED section (section=\u003canchor\u003e), or the whole guide (section=all); search - Search the platform guides for entries matching a query.","enum":["list","recall","search"],"type":"string"},"query":{"description":"[search] Free-text query matched against slug/title/summary/body.","type":"string"},"section":{"description":"[recall] EXTENDED section anchor from the guide's section index. Omit for the core body plus the list of sections; pass 'all' for the whole guide.","type":"string"},"slug":{"description":"[recall] Guide slug to fetch (from the guide index in the system prompt, or list).","type":"string"}},"required":["action"],"type":"object"}
+manage_tasks: Track the build checklist: complete items, split them, add discovered work, or block one you ship without.
+  params: {"properties":{"action":{"description":"Verb: add - Enqueue a new task for work the plan missed; block - Mark a task blocked: you ship without it and the owner sees why. Set needs_owner when only the owner's answer or secret can unblock it: their next answer reopens exactly those items. To wait for an answer, ask a chat question; complete - Mark a checklist item done. Refused while an owned path it declares is not built (no matching file, table, or endpoint), while the project is still empty for an item with no paths, or while a task in its `deps` is neither complete nor built (build dependencies first). `conventions` records a decision later items must match (a data shape, a shared helper). If a declared path genuinely cannot be produced (binary media) or a dep is genuinely not needed, use `force=true` with a `reason` instead of placeholder files; list - Return the current work queue; split - Replace one oversized task with focused subtasks; the parent is marked done and dependents are re-pointed to the subtasks.","enum":["add","block","complete","list","split"],"type":"string"},"conventions":{"description":"[complete] A rule later tasks must follow: a data shape ('list endpoints return {items,total}'), a shared helper ('fetches go through js/api.js'), a naming pattern, an auth gate. Shown to every later task.","type":"string"},"deps":{"description":"[add] Ids of tasks that must finish before this one is ready.","items":{"type":"string"},"type":"array"},"done_when":{"description":"[add] Verifiable completion criteria for this task.","type":"string"},"edits":{"description":"[add] Routes or resources this task extends but another task owns (a page route, or a leaf's spine entry module). List here, not in paths; they are modified in place, not re-created.","items":{"type":"string"},"type":"array"},"force":{"description":"[complete] Override the completion checks: a declared owned path that genuinely cannot be produced (e.g. binary audio/video/image - manage_files writes text only) or was satisfied a different way, or a listed dep this task genuinely does not need. Requires reason. Never use it to skip real work, and never write placeholder/fake files to satisfy a path instead.","type":"boolean"},"intent":{"description":"[add] What to build, in prose.","type":"string"},"needs_owner":{"description":"[block] true if only the owner's answer or secret unblocks it.","type":"boolean"},"paths":{"description":"[add] Artifact paths this task owns - the files it creates. Scopes the task so no two tasks own the same file.","items":{"type":"string"},"type":"array"},"reason":{"description":"[block, complete] Why you are shipping without it (surfaced to the owner). | complete: Why the declared path or dep is not satisfied and how the task's intent was met instead - must be set when force is true. Surfaced to the owner.","type":"string"},"result":{"description":"[complete] Optional one-line note on what you built.","type":"string"},"subtasks":{"description":"[split] Array of subtask objects: [{\"title\":\"...\",\"intent\":\"what to build\",\"done_when\":\"...\",\"paths\":[\"/files/x.js\"],\"edits\":[\"/files/shared.js\"]}, ...]. paths = files the subtask owns; edits (optional) = files another task owns that it modifies. Each becomes a pending task that inherits the parent's dependencies.","items":{"type":"object"},"type":"array"},"task_id":{"description":"[all but add, list] Id of the task to split. | block: Id of the task you are blocked on.","type":"string"},"title":{"description":"[add] Short task title.","type":"string"}},"required":["action"],"type":"object"}
+manage_testing: Probe the running server (endpoints, URLs, auth, pages, modules, websockets); write and replay of_test.js user flows.
+  params: {"properties":{"action":{"description":"Verb: explore - Click every visible control on one page in a real browser, once each, and report what threw, what changed nothing, what another element covers, and sideways scroll at phone size. The same check the end-of-build sweep runs: use it to verify a fix to such a finding instead of guessing. Data written by the clicks is rolled back; test_auth_flow - Exercise the register/login flow of an auth endpoint; test_endpoint - Probe a REST endpoint: checks the HTTP status and that the JSON response is an object carrying expected_fields (a 200 with the wrong shape is a contract break a page probe cannot see). It authenticates itself on an auth-gated path. A create tool's returned contract is already verified, so an endpoint you just created needs no probe; test_flows - Re-run of_test.js after an app fix (write_flows replays on its own save). Per failure: the step, the reason, JS errors, failed requests, the page's visible controls, and whether the app or the step is at fault; test_module - Load a saved JS file in a real browser tab and call one `entry` (an ES export or a window global it installs), capturing console output and exceptions. With no callable entry it passes if the import does not throw. A module that touches document, canvas or events is imported against its owning page without calling its exports: verify those with test_page; test_page - Render a page (or several via page_paths) in a real browser, signed in as a seeded user when the project has a login: checks the expected status, no uncaught error, and that its scripts and styles load. Reports visible_chars/media_count and console_errors for you to judge; only an uncaught throw or a failed same-origin script or stylesheet hard-fails; test_url - Probe a verbatim URL path (page roots, /manifest.json, dynamic non-/api paths). /files/ assets serve whenever saved. A WebSocket endpoint answers a plain GET with 426 and reports healthy, which only proves the route is mounted; test_websocket - Open a real WebSocket to a relay, tick, authoritative, matchmaking or signaling endpoint: handshake plus the welcome frame. two_peer=true also checks the room_gated token flow and that the endpoint's model delivers between two peers (app_action drives one authoritative action). A requires_auth endpoint needs auth_token from test_auth_flow. Prefer this over test_url for chat, call and multiplayer endpoints; write_flows - Save of_test.js and replay it at once. Shape: export default { flows: [{ name, viewport?, steps: [...] }] }, plain data, one verb per step (verbs: the user_flows guide, section=writing-flows). The save REPLACES the file: a script missing a saved flow is refused unless that flow is listed in drop. Every save replays; replays that stop getting closer to green are refused.","enum":["explore","test_auth_flow","test_endpoint","test_flows","test_module","test_page","test_url","test_websocket","write_flows"],"type":"string"},"app_action":{"description":"[test_websocket] Authoritative + two_peer: an action peer B sends as net.action() would, e.g. {\"type\":\"MOVE\",\"x\":1}; asserts peer A gets a newer state.","type":"object"},"args":{"description":"[test_module] Positional arguments passed to the entry function.","items":{},"type":"array"},"auth_token":{"description":"[test_endpoint, test_url, test_websocket] Bearer token. | test_endpoint: USUALLY UNNECESSARY - the probe authenticates itself against an auth-gated endpoint (it mints a token for an existing user and retries once if a request 401s), so leave this empty. Pass a token ONLY to probe as a specific user or role. | test_websocket: JWT for a requires_auth endpoint (every probe peer connects with it). Mint one with action=test_auth_flow - its result carries 'token'. Without it an auth-gated handshake is refused 401 before the upgrade.","type":"string"},"drop":{"description":"[write_flows] Names of saved flows you are deliberately removing (their feature is gone, or you renamed them). Every other saved flow must still be in source.","items":{"type":"string"},"type":"array"},"endpoint_path":{"description":"[test_auth_flow, test_endpoint, test_websocket] Auth endpoint path. | test_endpoint: REST endpoint path WITHOUT the /api/ prefix (e.g. 'posts'). | test_websocket: WebSocket endpoint path, e.g. 'call' (also accepts '/api/call/ws').","type":"string"},"entry":{"default":"default","description":"[test_module] Function to call: a named ES export, or a window global the file sets (e.g. \"AudioEngine\" for window.AudioEngine, dotted paths like \"App.init\" allowed). Defaults to the module's default export.","type":"string"},"expected_fields":{"description":"[test_endpoint] Fields that must exist in the JSON response.","items":{"type":"string"},"type":"array"},"expected_status":{"description":"[test_endpoint, test_page, test_url] Expected HTTP status code; omit to accept any 2xx. | test_endpoint: Expected HTTP status code; omit to accept any 2xx (a create returns 201, not 200). For a deliberate negative test pass the intended status (e.g. 404) so it records as a pass. | test_url: Expected HTTP status code; omit to accept any 2xx. For a deliberate negative test pass the intended status (e.g. 404 for an unknown route) so it records as a pass.","type":"integer"},"file_path":{"description":"[test_module] Path of the JS module artifact to import (e.g. \"/files/qrcode.js\").","type":"string"},"flow":{"description":"[test_flows] Run only the flow with this name; omit to run all of them in order.","type":"string"},"method":{"default":"GET","description":"[test_endpoint, test_url] HTTP method. | test_endpoint: HTTP method. CRUD endpoints answer GET/POST/PUT/DELETE; PATCH is only for a manage_function endpoint that declares it.","enum":["GET","POST","PUT","PATCH","DELETE"],"type":"string"},"page_path":{"default":"/","description":"[explore, test_page] Page path (e.g. '/about'). | explore: Page path to click through (e.g. '/staff').","type":"string"},"page_paths":{"description":"[test_page] Several page paths probed in one call (at most 8); replaces page_path and answers per page under pages.","items":{"type":"string"},"type":"array"},"request_body":{"description":"[test_endpoint, test_url] Request body for POST/PUT/PATCH.","type":"object"},"room":{"description":"[test_websocket] Room to join. Defaults to a unique throwaway probe room.","type":"string"},"source":{"description":"[write_flows] The full of_test.js module; replaces the existing file.","type":"string"},"timeout_ms":{"description":"[test_module, test_websocket] Per-frame read timeout. | test_module: Per-call execution timeout in milliseconds (maximum 30000).","type":"integer"},"two_peer":{"description":"[test_websocket] Run the full two-peer flow (room_gated mint/join/refuse + one relayed message) instead of the default single-socket smoke.","type":"boolean"},"url_path":{"description":"[test_url] Verbatim URL path (e.g. '/', '/manifest.json'). Static files under /files/ don't need probing - they always serve when saved.","type":"string"}},"required":["action"],"type":"object"}
+find_tool: Loads other tools so you can call them. Your loadable tools are named in the system prompt: the '## Tool catalogue' (LIVE) or the '## Deferred capabilities' note (BUILD, where your planned tools are already loaded); a no-argument call lists them all. names:["manage_api", ...] makes those tools callable for the rest of the conversation - their parameter schemas then appear in your tool list, so this returns only the when-to-use guidance and call examples. A name already in your tool list comes back as already_loaded - just call it. query:"send email" searches the catalogue and returns ranked matches without schemas - a fallback when you cannot name the tool. A real tool needing an unconfigured provider comes back under `unavailable` with a reason - take the stated fallback. `not_found` means no such tool exists. A search that matches nothing returns a `note` with what to do instead: act on it, because rewording the same search is refused.
+  params: {"properties":{"limit":{"description":"Max matches for a query (default 10, max 25).","type":"integer"},"names":{"description":"Exact tool names to load.","items":{"type":"string"},"type":"array"},"query":{"description":"Keyword search; returns matches without schemas.","type":"string"}},"type":"object"}
+--- messages (8) ---
+[0] user cacheable=false
+<!--__of_build_shared__-->
+Platform reference for this build. Not specific to this project; the project's own intent follows below.
+
+## Platform guides for this build
+
+Auto-selected from your plan - each is the guide's CORE. The wire shapes and platform API rules in them are binding, reproduce those exactly; the rest is field notes from builds that failed, so follow those too unless you are certain your approach avoids the trap they mark.
+
+<guide slug="visual_craft">
+# Visual craft & richness
+
+A working page is not a finished one. Told only to build the feature, a model settles
+into the one safe look it reaches for every time (a flat surface, a lone accent on grey,
+one system font, no depth, no motion, undesigned blank states), which is why distinct
+projects come out looking like the same template.
+
+**Commit to ONE specific look the project earns, realise it on every surface, and make it
+DIFFERENT across projects so two never share a look by default.** A strong model already
+knows how to write the CSS, the keyframes, and the shader; the value here is forcing the
+commitment, the depth, and the variety, not teaching the technique. Carry the direction
+`design` names rather than re-deriving it: sharpen a set one, invent an open one. Colours and
+type follow the plan's `theme` (the audience and mood), never a default kit.
+
+Make the chosen look real, not gestured at: colour with hierarchy rather than one accent on
+grey; type chosen on purpose; deliberate spacing, elevation, and layering so the screen reads
+in order; motion that serves the look and always honours `prefers-reduced-motion`; and every
+state built as a moment in the look (empty, loading, error, success, first-run), never a bare
+string. A look most often falls flat not on colour but on depth and signature: a fine palette
+on square, shadowless cards with no recurring move still reads as the template - commit the
+elevation and the one signature move too.
+
+**Define the look once, compose everywhere.** So the one committed look holds across every
+screen instead of drifting per page, realise it as a system in the global (`scope=global`)
+stylesheet the shell task set up: the palette (colour roles with a tonal scale, not a lone
+accent), the type scale, spacing, elevation, radius, and motion as `:root` custom properties,
+plus the reusable component classes (buttons, inputs, cards, fields, nav). Every page and
+component then styles FROM those tokens and classes - `var(--token)`, not a fresh hex or px
+value on each screen - so the base is set in one place and no page re-invents it. Choose the
+token VALUES to fit THIS project's direction; never carry a fixed set over, or every build
+lands on the same look.
+
+**A 3D or canvas surface owes the same in its own terms**: committed lighting, materials, and
+atmosphere that fit the world, plus a readable HUD, not a lit primitive on an empty plane. When
+the art direction is open, pick one and commit, and vary it across projects.
+
+## Imagery you author yourself
+
+Default to visuals you write rather than fetch. Draw it as inline SVG, a CSS
+gradient or mask, or a canvas routine: an illustration, a hero backdrop, an icon set, a
+logotype, an avatar, a texture, a pattern. These are code, so they scale, theme, and
+animate, and they cost no request at runtime. Hotlinking an external image URL or an
+`https://placeholder` service ships a page that breaks when that host does; a bare grey box
+with the word "image" is not a design.
+
+Photography or generated imagery comes only from the image tools (manage_stockphotos,
+manage_image_gen) when your catalogue lists them; if it lists none, that capability is
+not configured here: author the artwork and move on.
+</guide>
+
+<guide slug="client_view_toggle">
+# Client view toggles & nav
+
+The owner's number-one complaint is a button that does nothing. The trap here is
+subtler than a handler-less control: the handler RUNS, and the page still looks
+dead. A panel is hidden by one class, the open button toggles a DIFFERENT class,
+and the two never meet - so the click fires, flips an inert class, and the panel
+stays gone. It parses clean, boots green, throws nothing, and passes every write
+gate AND the page-load probe (the probe never clicks, and a firing-but-inert
+listener still reads as alive). Only the owner, clicking, finds it dead.
+
+**One visibility convention per element. Reveal by undoing exactly what hid it.**
+Pick ONE mechanism to control an element's visibility and drive it from both
+sides:
+
+- Hidden by a class -> the handler toggles **that same class**:
+  `el.classList.toggle('hidden')`, with `.hidden{display:none}` the only rule
+  that governs it.
+- Revealing with a STATE class instead (`open`, `is-open`, `active`) -> then (a)
+  do NOT also leave an always-on hiding class on the element, and (b) ship the
+  CSS that makes the state class win:
+  `#drawer{display:none} #drawer.open{display:flex}`, or a base off-screen
+  transform plus `#drawer.open{transform:none}`.
+- Hidden by the boolean `hidden` attribute -> clear the ATTRIBUTE
+  (`el.hidden = false` / `el.removeAttribute('hidden')`). A class toggle cannot
+  clear `hidden`, so the element stays `display:none` and the control is dead.
+
+A panel that starts `class="... hidden"` while its only reveal is
+`classList.toggle('open')` and no `.open` rule shows is flagged after the build as a
+dead toggle and sent back for a repair round: the click fires,
+`.hidden{display:none}` wins, and the button is dead. Fix it with one of
+the two shapes above; never both conventions on one element.
+
+```html
+<button id="btnMenu">Menu</button>
+<div id="menu" class="panel hidden">...</div>
+```
+```css
+.hidden{ display:none }
+```
+```js
+// RIGHT - toggle the class that actually hides it:
+btnMenu.addEventListener('click', () => menu.classList.toggle('hidden'));
+// WRONG - fires but nothing shows: `hidden` is never removed, `.open` has no rule:
+// btnMenu.addEventListener('click', () => menu.classList.toggle('open'));
+```
+
+**Wiring a nav that swaps views in the browser.** When a nav item reveals one
+view and hides the others instead of loading a route, wire it on this same
+convention: one class hides every view, a click shows the chosen view and hides
+its siblings, and the current item is marked active. Each item must resolve to a
+view that exists and render it.
+
+```js
+const renderers = { home: renderHome, list: renderList }; // one per view
+function showView(name){
+  document.querySelectorAll('[data-view]').forEach(v =>
+    v.classList.toggle('hidden', v.dataset.view !== name));
+  document.querySelectorAll('[data-nav]').forEach(n =>
+    n.classList.toggle('is-active', n.dataset.nav === name));
+  renderers[name]?.(); // render on EVERY show, from current state
+}
+document.querySelectorAll('[data-nav]').forEach(n =>
+  n.addEventListener('click', () => showView(n.dataset.nav)));
+showView('home'); // open on a real view, never a blank shell
+```
+
+This is the same convention: one class (`hidden`) controls each view's
+visibility, and both the toggle and the CSS agree on it.
+
+**A view that is shown must be rendered, not just un-hidden.** When data changes
+re-render only the ACTIVE view (the usual store subscription), every hidden view
+goes stale, and switching to it reveals old or empty content. Nothing throws and
+every view renders fine on its own, so only switching finds it. `showView`
+calls the view's renderer every time, for every view. Never special-case a few.
+
+**Two more ways a correct handler still looks dead** - both parse clean and pass the
+page-load probe, so recall the section when the case applies:
+- **Nothing may sit on top of a control.** A full-viewport layer (touch controls, a
+  joystick zone, a vignette, a closed overlay) keeps `pointer-events:none`, restored only
+  on its own interactive children - see `nothing-may-sit-on-top-of-a-control`.
+- **First paint must be legible.** Never ship above-the-fold content hidden (`opacity:0`,
+  an off-screen transform) waiting for JS to reveal it; any entrance animation must leave
+  content visible if the module never runs - see `entrance-and-scroll-in-animations`.
+
+More in this guide - recall a section when you reach its case (`manage_guides action=recall slug=client_view_toggle section=<anchor>`):
+- `nothing-may-sit-on-top-of-a-control` - a full-viewport or absolutely-positioned layer (touch controls, a joystick zone, a vignette, an overlay or modal backdrop) sits over interactive UI.
+- `entrance-and-scroll-in-animations` - content animates in on load or on scroll (an opacity/transform/visibility reveal driven by a JS-added class).
+- `every-togglable-surface-one-checklist` - the page has any panel, drawer, modal, dropdown, tab, accordion or switchable view that a control shows and hides.
+- `a-view-switch-that-survives-reload-optional-hash-sync` - an app-shaped page's active view should survive a refresh or a shared link.
+</guide>
+
+[1] user cacheable=true
+<!--__of_build_intent__-->
+Project intent for this build (stable for the whole build).
+
+## Goal
+A one-page tip calculator.
+
+## Voice
+friendly and concise
+
+## Design direction
+clean, centered card on a soft background
+
+## Project brief (the product being built)
+The checklist below is this brief distilled into tasks. When an item reads thinner than the behaviour described here, build what the brief describes.
+
+A polished one-page tip calculator with bill input, percentage presets, and split-by-people.
+
+[2] user cacheable=false
+[mode: build]
+
+Build the whole project described by the checklist below, end to end, in this one continuous session.
+
+The full checklist is already below - your first action is the create or save that starts its first item.
+
+## Plan checklist
+Each item is one piece of the project; the ids in backticks already exist in your checklist - build each one and mark it complete by that id, don't re-add it. `Owns` is what must exist when the item is done: page routes, tables and endpoint resources, plus the exact module files of a module split (`complete` is refused while any is missing); you choose the other file names. `Extends` paths are owned by another task and wired into here - modify them in place, don't recreate them.
+
+- [ ] `home-page` - Home page
+  Build the tip calculator page at /
+  Done when: / renders the calculator
+  Owns (must exist when done): /
+
+[3] user cacheable=false
+<date_context>
+- Today (UTC): <date>
+</date_context>
+[4] user cacheable=true
+<!--__of_snapshot:baseline__-->
+<project_state>
+## Current Project State (project_state)
+
+*(empty project, nothing built yet)*
+
+</project_state>
+State at the start of this session. Any earlier project_state messages describe prior work and are historical. Change updates below track what you build from here.
+[5] assistant cacheable=false
+  call c1 manage_files {"action":"save","kind":"page","file_path":"/","body":"<h1>Tip calculator</h1>","title":"Tip calculator"}
+
+[6] tool cacheable=false tool_call_id=c1
+{"success":true,"ignored_args":["title (did you mean metadata.title?)"],"data":{"file_path":"/","id":1,"imports_resolved":true,"kind":"page","total_lines":1,"version":1}}
+[7] user cacheable=true
+<!--__of_snapshot:delta__-->
+<project_state_changes>
+## Changed since the previous update (current detail; a module's collapsed lines stay as last listed; the session-start state is in the project_state message above)
+
+### Pages (1)
+- `/`
+
+</project_state_changes>
+Changes since the previous update.

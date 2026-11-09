@@ -1,0 +1,117 @@
+# golangci-lint configuration (v2 schema).
+# Run with `make lint` (or `golangci-lint run`).
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    # default set (errcheck, govet, ineffassign, staticcheck, unused) is on
+    # implicitly; the entries below are the additions.
+    - misspell      # catches typos in comments/strings
+    - unconvert     # redundant type conversions
+    - bodyclose     # unclosed HTTP response bodies (this codebase makes many)
+    - rowserrcheck  # unchecked sql.Rows.Err()
+    - forbidigo     # bans debug prints (fmt.Print*, print/println, spew.Dump)
+    - revive        # ONLY the argument-limit rule (see settings) - caps positional params
+    # nilerr was trialed and retired: its findings were reviewed, the few real
+    # bugs fixed, and the rest are designed patterns the linter
+    # cannot see past - tool handlers return failures as Result DATA for the
+    # LLM with a nil Go error (tools.Fail / Success:false), SSE readers
+    # parse-and-skip malformed events, optional lookups degrade gracefully.
+  settings:
+    errcheck:
+      # Conventional ignores: Close/Rollback in defer-style cleanup and
+      # ResponseWriter/Fprint writes, where the error is meaningless or
+      # unactionable. Genuine write-path errors (Exec, ExecWrite, Unmarshal,
+      # SendMessage, os.Remove, ...) stay checked.
+      exclude-functions:
+        - (*database/sql.Rows).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Conn).Close
+        - (*database/sql.Tx).Rollback
+        - (io.ReadCloser).Close
+        # Files opened for reading and sockets: a failed Close loses nothing. A file
+        # that is WRITTEN checks its Close explicitly where the data matters.
+        - (*os.File).Close
+        - (net.Conn).Close
+        - (net.PacketConn).Close
+        - (net/http.ResponseWriter).Write
+        - (*github.com/coder/websocket.Conn).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    misspell:
+      ignore-rules:
+        - DOUB # SQLite type-affinity substring match for DOUBLE, not a typo
+    revive:
+      # Run ONLY the argument-limit rule (specifying rules disables revive's
+      # default rule set, so this stays in keeping with the lean-linter policy
+      # above - it does NOT pull in revive's dozens of style checks). 
+      rules:
+        - name: argument-limit
+          arguments: [9]
+    forbidigo:
+      # Keep debug output from creeping back in. The codebase logs exclusively
+      # through log/slog (see docs/CONVENTIONS.md), so a bare fmt.Print*/print/println
+      # or a leftover spew.Dump is always either debug scaffolding or a logging
+      # mistake. Deliberate console output (the startup banner, the "already
+      # running" notice) uses fmt.Fprint*(os.Stdout|os.Stderr, …), which these
+      # patterns intentionally do NOT match.
+      forbid:
+        - pattern: '^fmt\.Print(ln|f)?$'
+          msg: 'log via log/slog, not fmt.Print*; deliberate console output uses fmt.Fprint*(os.Stdout, …)'
+        - pattern: '^(print|println)$'
+          msg: 'the builtin print/println is debug output; use log/slog'
+        - pattern: '^spew\.(ConfigState\.)?Dump$'
+          msg: 'remove debug spew.Dump before committing'
+    staticcheck:
+      # ST1000 (package comment) and ST1003 (naming) would be noisy on the
+      # existing tree. ST1005 (error-string style) conflicts with the repo's
+      # LLM-facing validator messages, which are deliberately full sentences
+      # with punctuation and newlines - message quality wins over style here.
+      # ST1020/ST1022 reject group-documenting comments that read better than
+      # per-symbol boilerplate. QF* are gopls quick-fix suggestions, not
+      # correctness issues - left to the editor.
+      checks:
+        - all
+        - "-ST1000"
+        - "-ST1003"
+        - "-ST1005"
+        - "-ST1020"
+        - "-ST1022"
+        - "-QF*"
+  exclusions:
+    generated: lax
+    rules:
+      # Tests may legitimately ignore errors and reuse fixtures.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+      # coder/websocket documents that Dial's resp.Body never needs closing;
+      # the library owns it. Covers direct dials and the wsDial helper.
+      - linters:
+          - bodyclose
+        source: '(websocket\.Dial|wsDial)\('
+      # The delivery probe reaches the same Dial through an injected dialFunc
+      # (probe/runtime_ws_delivery.go), so the source regex above cannot see it.
+      - path: probe/runtime_ws_delivery\.go
+        linters:
+          - bodyclose
+        source: '\bdial\('
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - openfabrica
+
+issues:
+  # Don't cap results, we want the full picture in CI.
+  max-issues-per-linter: 0
+  max-same-issues: 0

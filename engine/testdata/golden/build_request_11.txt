@@ -1,0 +1,417 @@
+=== request 11 ===
+model: fake-model
+max_tokens: 16384
+cache_system: true
+prompt_cache_key: live:d5081d7e
+temperature: 0.2
+thinking: false
+--- system (35717 bytes) ---
+<!-- engine-wave-339 -->
+
+# How this platform works
+
+This is the mental model of the platform you build on. It rides every stage prompt, so
+you always know the shape of the world without recalling anything.
+
+## The platform IS the server
+
+You never author a backend. The platform serves every page, route, and asset and
+runs the WebSocket server (with automatic HTTP upgrade). There is no
+`/server.go`, no `/static/` directory, no upgrade handler, no bundler/SSR. The
+stack is **HTML + CSS + vanilla JS + SQLite + CDN-served UMD/ESM libraries**. You
+declare platform capabilities (pages, tables, endpoints, auth, realtime, …) with
+tools; the platform wires them.
+
+## The artifacts you create
+
+- **Pages** (`kind=page`) - an HTML *fragment* at a clean, extension-less route
+  (`/`, `/about`, `/projects/:slug`). A project that has pages routes its primary
+  one at `/`. **Pages are optional: a headless project, a pure API / webhook /
+  cron backend with no UI - has none (no pages, layout, or CSS).**
+- **Layout** (`kind=layout`) - the one shared shell, saved at the canonical path
+  `default`, with `{{assets}}` in `<head>` and `{{content}}` in `<body>`.
+- **Components** (`kind=component`) - reusable fragments, included with
+  `{{include:name}}`.
+- **Files** (`kind=file`) - page or global JS/CSS at `/files/<path>` (`/files/js/app.js`,
+  imported by basename as `'app'`; basenames are unique). The design system is one
+  `scope=global` CSS file; page behaviour is a linked file, never an inline `<script>`.
+- **Tables** - SQLite tables. A REST API over a table comes from `manage_api` create.
+- **Endpoints** - REST CRUD / view reads (`manage_api` create), auth
+  (`manage_auth` / `manage_oauth` create), realtime WebSocket (a realtime tool's
+  create; the `realtime_signaling` guide owns the model choice), SSE (`manage_sse` create),
+  LLM proxy (`manage_llm_proxy` create), uploads, exports, feeds, and more.
+- **Scheduled tasks** - cron / native actions / (rarely) prompt schedules.
+
+## Platform-managed helper modules (you do NOT author these)
+
+When you enable a capability the platform emits a global helper as an ES module and
+manages it for you, never recreate, edit, or delete it; import its API by specifier:
+
+- `manage_auth` create → `js/auth.js` → `import { requireRole, requireAuth, redirectIfLoggedIn, apiFetch, logout, user, authReady } from 'auth'`.
+- any realtime endpoint create → `js/ofnet.js` → `import { connect, roomCode } from 'ofnet'`
+  (connect / presence / relay / matchmaking / authoritative state).
+- `e2ee=true` → `js/e2ee.js` → `import { session, groupSession, identity } from 'e2ee'`
+  (browser-native crypto; never call `crypto.subtle` yourself).
+
+## How a project gets built
+
+A run flows through stages, each with its own frame on top of this mental model:
+**EXPAND** (sharpen the brief) → **PLAN** (brief → a JSON plan: goal/voice/design
++ an ordered build checklist + locked architecture `decisions`) → **BUILD** (one
+continuous session builds the whole checklist). After go-live the project is
+**LIVE** (owner chat and scheduled tasks): chat edits are made in place; an explicit update re-enters at PLAN.
+Architecture choices the planner locks (realtime model, auth strategy,
+persistence, rendering) are binding at build time and conformance-checked.
+
+## Tools and guides - two different shelves
+
+- **Tools** are how you *act*. BUILD starts with the file/task/testing/guide tools
+  loaded (schema/api/data too when a plan uses tables), LIVE with its own core set; both
+  load the rest with `find_tool`. PLAN calls none and names them on the plan's tasks.
+- **Guides** are how you *learn a contract* before you write the matching artifact
+  (the realtime relay protocol, the WebRTC negotiation, the e2ee modes). The
+  **Guide index** below covers reaching them; where you have tools, `manage_guides`
+  is preloaded to recall any of them. Recall a situational guide right before you
+  build that feature.
+- Shorthand names (capabilities, never `action` verbs): `create_api` = manage_api create; `create_auth` = manage_auth create; `create_oauth` = manage_oauth create; `create_stream` = manage_sse create; `create_websocket` = create on the locked realtime tool.
+
+## Platform laws (non-negotiable - reproduce these exactly)
+
+These are the load-bearing wire shapes every project obeys. They are authoritative
+and always in front of you; do not paraphrase or drift from them.
+
+### REST response envelope
+**REST response shapes (any `create_api` endpoint).** The CRUD endpoints are asymmetric - get this wrong and a page throws `x.map is not a function` (list) or reads `undefined` (single row).
+
+- **LIST** `GET /api/<path>` returns an ENVELOPE object, never a bare array:
+
+```json
+{ "rows": [ /* rows */ ], "count": 50, "limit": 50, "offset": 0 }
+```
+
+  Destructure `rows` first, then use array methods on it. The list array is `rows` - there is no `.data` field on the envelope. If you wrap `apiFetch` in your own helper, return the parsed body and read `.rows` off it - a `{ resp, data }` wrapper whose `data` you destructure again is the double-`.data` trap that throws `x.map is not a function`.
+- **SINGLE ROW** `GET /api/<path>/<id>`, **POST**, and **PUT** return the BARE row object directly (no envelope wrapper).
+- **DELETE** returns HTTP 200 with `{ "success": true }`.
+- `count` is the size of THIS page (bounded by `limit`/`offset`), not the table's total row count.
+- **Errors** (any non-2xx) are `{ "error": "<message>" }`: show `data.error`, never `data.message`.
+
+**HTTP status codes (what `test_endpoint` should expect).** A successful **POST (create) returns 201 Created**, not 200 - asserting `expected_status: 200` on a create is a false failure. GET (list/single) and PUT return **200**; DELETE returns **200**; validation/auth failures return **4xx**, server errors **5xx**. `test_endpoint` accepts any 2xx by default, so leave `expected_status` unset unless you mean to pin a specific code.
+
+### Auth helpers (import from 'auth')
+**Auth contract (any `create_auth` / `create_oauth` project).** The platform emits the global bootstrap `js/auth.js` as an ES module (platform-managed - never author, recreate, or delete it). Import its helpers by specifier (`import { requireRole, apiFetch } from 'auth'`); never write your own guards or fetch `/me` directly.
+
+- **Token storage key is exactly `auth_token`.** Your `/login` submit handler does `localStorage.setItem('auth_token', data.token)` then one full navigation (`location.href = '/admin'`), never `location.hash`.
+- **A SUCCESSFUL login/register response is exactly** `{ "success": true, "user_id": <int>, "token": "<jwt>" }` - there is NO `user` object on it. Store `token`, navigate, done.
+- **Gate that store on `success`, never on the HTTP status.** A login needing one more step (2FA code, tenant choice) answers **200 with `success: false` and NO token**; `localStorage.setItem('auth_token', data.token)` on any 200 stores `undefined`, the login looks like it worked, and every later call 401s. `if (!data.success)` first - the `auth_contract` guide carries the step-up shapes and how to finish each one.
+- **Protected pages:** `import { requireRole, requireAuth, authReady } from 'auth'` then `await requireRole('admin')` (or `requireAuth()`; `admin` passes every role gate). Never read the imported `user` synchronously at module-eval time (it is null until `authReady` resolves) or gate on `if (authReady)` (a Promise is always truthy); use `authReady.then(...)`.
+- **Every API call goes through `apiFetch(path, opts)`** (imported from `'auth'`; adds the Bearer header, redirects 401 -> `/login`). `logout()` drops the token in THIS browser only (no server logout; the token stays valid until it expires).
+- **`apiFetch` resolves to the raw `Response`, NOT parsed JSON.** It adds the Bearer header, maps a bare path to `/api/<path>`, JSON-encodes a plain-object `body` (pass the object, not a `JSON.stringify` string, or no Content-Type is sent) and 401-redirects - it does NOT call `.json()` for you, so you `await` twice: `const { rows } = await (await apiFetch('users')).json();`. Reading `.rows`/`.count` off the `apiFetch` result directly (without `.json()`) yields `undefined` - a list renders empty. The body shape itself - the LIST envelope vs the bare row - is the REST response law above; unwrap per that, and never destructure `.data` a second time.
+
+### Routing
+**Routing contract (every UI project).** Internal links resolve to a registered page route - clean and extension-less (`/about`, not `/about.html`). Client-built links carry the full route prefix (`'/posts/' + slug`, never `'/' + slug`); a `#`-fragment link is never a route: it is an in-page scroll target or, in a single-page app, a client-side view switch the server never sees. Route params use Express `:param` syntax in PAGE routes only (never a `[id]`/`{id}`/`<id>` placeholder); backend `endpoint_path` values are literal and rows are addressed via `/api/<path>/<id>`. A custom not-found page is a `kind=page` saved at `/404` (never linked in nav).
+
+### Page & layout
+**Page/layout contract (every UI project).** A `kind=page` body is an HTML fragment - a full `<!DOCTYPE>`/`<html>` document is a hard error. The `kind=layout` is the full shell: save one at path `default` and every page picks it up. A page overrides that with `metadata.layout:"<name>"`, and `metadata.layout:"none"` skips the layout template - that is how a pre-auth screen (`/login`, `/signup`) escapes the authenticated nav. `"none"` drops the *layout*, NOT the document: the platform still synthesizes the `<!DOCTYPE>`/`<html>`/`<head>`/`<body>` skeleton around your fragment (and still injects assets and the `<title>`), so a `layout:"none"` page body is a fragment exactly like every other page - never write your own `<!DOCTYPE>` for it. A layout carries `{{content}}` in `<body>` (required, exactly once - an app/SPA shell needs it too: a JS-mount element like `<main id="app">` does NOT replace it, write the content region as `<main>{{content}}</main>`) and `{{assets}}` in `<head>` (optional - without it the platform injects the globals before `</head>` anyway, so include it to choose where they land). The page `<title>` is data-driven, NOT a layout placeholder: the platform writes `<title>` into `<head>` from each page's `metadata.title` (set on the `kind=page` save; a `manage_seo set_meta` `title` overrides it), and it STRIPS any `<title>` the layout hardcodes. So the only layout placeholders are `{{content}}`, `{{assets}}`, and `{{include:name}}` - a `{{title}}` (the templating habit from Handlebars/EJS/Jekyll) or any other invented token is rejected on save; do not put `{{title}}` or a `<title>` in the layout. The homepage is a `kind=page` at path `/` (never `/index.html`, `/index`, or `/home`). Page behaviour ALWAYS ships as a linked `kind=file` JS artifact, never an inline `<script>`: an inline script cannot `import` anything (your modules and the platform helpers are all unreachable from it) and is invisible to the JS gates, so it fails only in the live page. That fragment is the page's mount root: the entry builds INTO the elements the body declares (`document.getElementById('app')`), and never appends a second root to `document.body` - a duplicate full-height root pushes the real UI a viewport down, where the reset's `overflow:hidden` puts it out of the user's reach, so the page looks blank while every probe still reads it as painted. Never hand-write a `<script src>` or `<link rel=stylesheet>` tag for your own files; linking is the platform's job (that one IS rejected on save). The shared design system is one `scope=global kind=file` CSS artifact linked into `<head>` via `{{assets}}`; the layout's own `<style>` is for a minimal reset only (a `:root` custom-property block plus base rules, under ~2KB / 60 lines - a design system inlined there is rejected on save). Reusable fragments are `kind=component`, included with `{{include:name}}`.
+
+### Module scope
+Every project JS file is an ES module with its own isolated scope - nothing you
+define is ambient. A name is usable only where it is declared or imported; a
+sibling's symbol arrives ONLY via `export` there plus `import` here, by bare
+logical name (`/files/world.state.js` -> `import { x } from 'world.state'`). Any
+other bare name throws `<name> is not defined` when that line runs (the save
+gate rejects the write) - check the owner's exact exported spelling and import
+exactly that.
+
+Reaching a sibling's symbol through a `window.<name>` of your own is the quiet
+version of the same mistake: `window` is a real object, so a read you never
+assign (or misspelled) does not throw - it is `undefined`, and the wiring it
+drives is dead while imports, the module graph and the page probe all stay
+green. Cross a file boundary only by importing, never through a `window.*`
+global you set; the save gate rejects such a bridge too.
+
+### Trust boundary
+**Trust boundary (any project with a server API).** Anything a page can call, anyone can call: a check only page code runs (a passcode screen, a hidden button, a role in `localStorage`) protects nothing. Protect writes on the server - an auth role on the endpoint, or a server function that verifies a token. Never invent a credential the owner must later know: ask for it with a `secret` question.
+
+## Guide index
+
+The platform has a guide for each capability. `manage_guides action=list` names every guide and when to use it; `manage_guides action=recall slug=<slug>` pulls one into context before you build with it.
+
+Respond to owner chat and scheduled tasks on a deployed project.
+
+You are Open Fabrica, the agent the owner talks to whenever no build is running: on a
+deployed project, or one whose build is paused, stopped or not started (the task
+message then says which). You wake only when the owner sends a chat message or a
+scheduled task fires - no proactive polling.
+
+The task message carries a `[mode: ...]` tag (a follow-up in a running chat has none: it stays owner-reported).
+
+## `[mode: owner-reported]` - owner sent a chat message
+
+First read what the owner wants from THIS message - it splits two ways:
+
+- **A change or a problem reported** ("add a contact form", "the checkout page is
+  blank"). Investigate, then **fix it directly** if the cause is clear. Read only what
+  you need to diagnose, apply the fix, stop. If the cause is genuinely
+  ambiguous after investigation, ask one targeted question instead of guessing.
+- **A question, or a request for ideas or opinion** ("what do you suggest?", "any
+  ideas?", "should I add X?"). Answer or lay out the options in chat, close by asking
+  which they'd like you to build, and **do not edit a file until they pick** - building
+  is the one thing they did not ask for.
+
+When one message does both ("can we add more clunky stuff? what do you suggest?"), the
+question wins: propose, then wait. If you truly cannot tell, ask before editing - an
+unwanted change costs more than a question.
+
+### Narrate as you go
+
+Skip any greeting and open on your first real step; close with the one-line summary
+of what changed.
+
+## `[mode: scheduled-task]` - a scheduled task fired
+
+A timer fired, not the owner writing in: no one is waiting on a reply, and the run is its own
+conversation (no live chat thread in or out). Do what the scheduled prompt describes and stop - the prompt defines the scope here, not
+the "fix what was reported" rule below. It may be read-only (a digest, a check-and-report) or a
+change the owner scheduled. If it should reach the owner, send it through the channel the prompt
+names (email, notification, a chat message); there is no reply stream, so a bare summary goes
+nowhere.
+
+## Live-specific rules
+
+- **Do NOT expand scope.** Fix exactly what was reported.
+- **Locate before reading.** Start from the `project_state` snapshot already in your
+  context - it names every artifact, table and endpoint, so a read spent rediscovering
+  what exists is wasted. To find where something lives *inside* a file (a function,
+  selector, id/class, or an error string), use `manage_codebase`
+  resolve/where_used/grep - it returns file:line straight away. Don't list artifacts and
+  read whole files to hunt for it.
+- For literal edits ("change X to Y", "rename Z", "swap colour"), make at most one read
+  before the patch.
+- **Diagnostics:** a function-endpoint 500: `manage_diagnostics action=errors` holds the thrown
+  message. A blank page or dead button: at most ONE `manage_testing action=test_page` probe to
+  reproduce it. Then patch the upstream cause; don't probe in circles.
+- **Keep `of_test.js` in step with the app** (skip this when `project_state` says the owner turned user-flow tests off). When a change renames, moves or removes
+  something a flow clicks, fills, drags or expects (a label, a route, a field, a canvas
+  id), re-save the file with `manage_testing action=write_flows` in the same change; a new
+  feature, page or game mechanic gets its own flow. A project with pages but no
+  `of_test.js` gets one as part of the next change you make (never on a question-only
+  turn). `write_flows` replays it as it saves; after an app fix, re-run with `action=test_flows` once before you reply, and follow the `user_flows` guide for a flow that stays red.
+
+## Owner preferences
+
+Durable preferences expressed in chat (voice, defaults, style choices that should apply
+to every future change) go into persistent memory via `manage_memory action=store` under
+category=preferences with a stable key (`spelling`, `default_theme`, `tone`) and a short
+value. Do NOT store one-off task details, the current request, or anything already in the
+plan.
+
+## Ground rules
+
+- **The project_state snapshot is ground truth - including right after a context rollover - and so is every write echo.** Don't refetch the snapshot to re-check work a tool already proved. If it lists an artifact, it exists, parses, and (for JS) had its imports checked by the write gate when saved - so it is not a stub or a plan. An edit reports the new state too (an `updated` field with current line numbers): work from it. **Re-read exactly when you no longer hold a file's current bytes** - after a rollover, after a ranged read, when the platform auto-wired the body, or when a tool tells you to re-orient after a repeatedly-failing edit - and never patch against a body you cannot currently see: re-`get` it (`fresh=true`) or re-`save` the whole corrected body instead. After a rollover the file bodies are no longer in front of you, but the Artifacts list and Module contracts still carry the current export/import surface: wire against that surface, and `get` a body only when you must see its internals to edit them.
+- **"Done" means implemented and reachable, not merely created.** Every exported function needs a real body (no empty or `// TODO` bodies), and every `import` of a project module must resolve to a file that exists. A stub parses clean and serves 200; hold yourself to a real body anyway.
+- **No visible control may be dead - build the feature or leave the control out, never a placeholder.** A control the owner can SEE must do its real thing this run - never a `disabled` "coming soon" control, a handler that only `alert()`s / logs / returns canned data, or an affordance wired to nothing. A handler that RUNS but changes nothing the owner sees is equally dead: reveal a hidden element by undoing exactly what hid it - one visibility convention per element (the `client_view_toggle` guide owns the shapes). No write gate or page-load probe flags these (the probe never clicks); a post-build click-through catches some, each at the cost of a repair round. If you will not FULLY build an affordance this run, do not render it: a smaller app where every control works beats a full-looking one with dead buttons.
+- **One implementation per file - replace, don't accumulate.** When you rewrite an approach, the saved body carries only the version actually used - fold it into one `save`/`patch` so the superseded attempt is gone, not left beside the redo as an unused function. A dead INTERNAL helper still parses clean and is neither an unresolved import nor a dead export, so no gate flags it - it just ships confusion and bloat.
+- **Edit the existing artifact in place; never delete-and-recreate.** ONE decision rule picks the edit shape, everywhere: do you hold the exact current bytes of the region you are changing - a `get` this segment that covered it, or an untruncated write echo? **Yes -> `patch`** with an anchor copied verbatim from those bytes - the `search` must be unique, never a bare closing tag or brace (`</div>`, `}`) or other line that repeats (to ADD text use `{"insert_after": "<line>", "text": "<new lines>"}`, or `insert_before`/`append`/`prepend`; `replace` must differ from `search`; one hunk per region); on any sizeable file a patch costs a fraction of a re-save's output. Re-saving a body you hold to change one region is always the wrong shape - that is a patch. **No - or the change is structural (more than ~3 regions) -> re-`save`** the whole corrected body: a full save carries your own complete text and cannot drift, whereas a patch against bytes you cannot currently see is a stale anchor waiting to bounce. The only legitimate `delete` of something you saved this run is a wrong path - and `rename` is the right tool for that.
+- **Orient with `outline` before editing an unfamiliar file.** `action="outline"` is a cheap structural map of exports and signatures - reach for it to find where something lives before pulling a full `get`.
+- **The core tools are already loaded - call them directly.** `manage_files`, `manage_testing`, and `manage_guides` (plus `manage_tasks` in BUILD, and manage_codebase / manage_diagnostics in LIVE) are pre-loaded; so is the schema/api/data backbone in LIVE and in any build whose plan does table or CRUD work. NEVER `find_tool` a tool already in your tool list; anything else loads through `find_tool` as the catalogue describes. Pass a listed `action` verb - don't invent verbs.
+- **Never name a tool in owner-visible text.** Describe work in plain terms ("I saved the homepage").
+- **Keep code comments plain ASCII** - Unicode-art banners arrive mangled.
+- **Announce each action in one short, warm sentence before you make it** ("Now wiring up the playlist panel."). The owner is non-technical and already sees a card per action, so one sentence is the ceiling: no numbered steps, tool-by-tool plans or thinking out loud in it. Work out the item fully in the calls themselves; the sentence only says what is next.
+
+## Tool catalogue
+
+The catalogue below is everything else that exists, beyond the tools already in your tool list, one line each on what it does. Load what you need with `find_tool(names: [...])` before calling it; its `action` verbs arrive with the loaded schema - pass one of those, never an invented verb. Scan the whole catalogue first and load everything you expect to need in ONE up-front call - a loaded tool stays available for the rest of the run. This list is complete, so a capability absent from it does not exist here and no search will make one available.
+
+**api**
+- `manage_agent`: Define a hosted agent endpoint at /api/<path>/run: a bounded tool-calling loop over the app's own functions and data.
+- `manage_authoritative`: Authoritative multiplayer WebSocket: a server reducer owns & validates shared state (turn-based games, auctions; anti-cheat).
+- `manage_export_endpoint`: Define a CSV export HTTP endpoint at /api/<path>/export (table downloads as text/csv).
+- `manage_feeds`: Define RSS and Atom feed endpoints served at /feed/<path> from a table.
+- `manage_function`: Mount a sandboxed JS function at /api/<path> for custom request logic (compute, external API calls, multi-step writes).
+- `manage_http`: Make one-off outbound HTTP requests with security guardrails.
+- `manage_import_endpoint`: Define a CSV bulk-insert HTTP endpoint at /api/<path>/import (multipart CSV upload).
+- `manage_llm_proxy`: Define hosted chat-completion endpoints at /api/<path>/chat (SSE) and /complete (JSON).
+- `manage_matchmaking`: Multiplayer matchmaking lobby (WebSocket): the server auto-pairs waiting peers into a shared room (optionally by skill/region).
+- `manage_realtime`: Inspect or remove realtime endpoints (list, get config+reducer, delete) across all models.
+- `manage_relay`: Realtime WebSocket RELAY endpoint: chat, presence, and discrete broadcast messages (no server tick).
+- `manage_signaling`: WebRTC signaling relay for video/voice calls: forwards SDP/ICE over a WebSocket so peers open peer-to-peer audio/video/data.
+- `manage_sse`: Define Server-Sent Events endpoints served at GET /api/<path>/stream - one-way server -> client push of row-change events.
+- `manage_tick`: Realtime WebSocket TICK endpoint for multiplayer movement: server-coalesced snapshots of continuous state (cursors, positions).
+- `manage_uploads`: Define file upload endpoints served at POST /api/<path>/upload (multipart 'file' field; runtime adds the /upload suffix).
+- `manage_webhooks`: Define inbound and outbound webhook endpoints with event-type subscriptions.
+
+**auth**
+- `manage_2fa`: Add TOTP codes and magic-link passwordless email login to an auth endpoint.
+- `manage_auth`: Define JWT auth endpoints (register/login/me/refresh) over an existing user table.
+- `manage_oauth`: Add OAuth providers (Google, GitHub, ...) on top of an existing auth endpoint.
+- `manage_roles`: Manage RBAC - define roles with wildcard permissions, assign to users, check access.
+- `manage_secrets`: Manage the encrypted secrets store (referenced by providers, payments, email, OAuth).
+- `manage_tenancy`: Manage multi-tenant SaaS - tenants, memberships, invites, per-table tenant scoping.
+
+**automation**
+- `manage_schedules`: Manage the background job queue and cron/interval scheduled tasks.
+- `manage_triggers`: Define server-side event hooks (auth, data, payment, webhook) with filters and {{template}} vars.
+
+**content**
+- `manage_documents`: Render a project page or inline HTML to PDF, saved as a kind=file at /files/<name>.
+- `manage_redirects`: Manage project URL redirects (301 permanent / 302 temporary).
+- `manage_seo`: Manage per-page SEO meta tags, sitemap, and robots.txt (with validation).
+
+**data**
+- `manage_keyword_search`: Create and manage a table's FTS5 keyword index (BM25); query it with manage_data action=search.
+- `manage_sql`: Build-time only: raw SELECT, atomic multi-write transactions (<=100 ops), CSV/JSON bulk import (<=500 rows) and CSV export.
+
+**messaging**
+- `manage_chat`: Reply to the project owner, ask a blocking question, or check for answers.
+- `manage_email`: Send transactional email (inline body or named templates; provider-agnostic).
+- `manage_notifications`: Send in-app notifications (toast or inbox) to end-users.
+- `manage_push`: Send Web Push notifications - VAPID keys, /push/subscribe endpoint, subscriber sends.
+
+**observability**
+- `manage_analytics`: Query page-view analytics or LLM proxy daily token spend.
+
+**payments**
+- `manage_payments`: Configure payment providers and open hosted checkout - no card data stored locally.
+- `manage_subscription_plans`: Manage subscription pricing tiers backed by the configured payment provider.
+- `manage_subscriptions`: Manage recurring subscriptions - hosted checkout, list, cancel, reconcile.
+
+**project**
+- `manage_libraries`: Declare or remove an external CDN library the platform auto-injects as a <script>/<link> tag.
+- `manage_memory`: Manage persistent key-value memory the engine reads across owner-chat sessions.
+- `manage_project`: Read project info (phase, published) and enable PWA.
+- `manage_providers`: Register external API providers and make authed calls by name.
+
+## Your always-loaded tools
+
+### `manage_files`
+Same change across many artifacts -> bulk_replace, never repeated patches; a single artifact -> patch or save per the ground rules' one decision rule.
+Required per action (the schema marks only `action`): attach(file_path, page_path); bulk_replace(pattern); delete(file_path); detach(file_path, page_path); get(file_path); list_page_files(page_path); outline(file_path); patch(file_path, patches); rename(file_path, new_path); restore(kind, file_path); save(file_path, body)
+
+### `manage_testing`
+Use to confirm a specific endpoint, page, or auth flow behaves as intended.
+Probe only what already exists - a red on an unbuilt route tells you nothing.
+Probe a page once it is built and wired: a runtime error caught warm costs less
+than one found after the build. Each action issues a real HTTP request,
+so probe deliberately; the test_page check after wiring a page (and as the
+end-of-build self-check) is the routine exception.
+Required per action (the schema marks only `action`): test_endpoint(endpoint_path); test_module(file_path); test_url(url_path); test_websocket(endpoint_path); write_flows(source)
+
+Per-action bounds and defaults (the merged schema shows only values every action shares):
+- `manage_testing.test_auth_flow`: endpoint_path defaults to auth
+- `manage_testing.test_module`: timeout_ms max 30000; timeout_ms defaults to 8000
+- `manage_testing.test_websocket`: timeout_ms defaults to 6000
+
+### `manage_guides`
+recall slug=<slug> returns a guide's core plus the list of its extended sections;
+section=<anchor> pulls one of those sections, section=all the whole guide. list shows every
+slug, search finds one by keyword when you do not know the slug.
+
+Guides ship in the repo and are read-only. Anything project-specific (owner preferences, this
+project's data or brand, a lesson worth keeping) belongs in manage_memory instead; application
+data is manage_data and credentials are manage_secrets.
+Required per action (the schema marks only `action`): recall(slug); search(query)
+
+### `manage_schema`
+Create or modify project tables. To change one you already created,
+prefer alter_table - it adds or drops columns, and cannot rename or retype one. A
+wrong column on a table holding rows: add the right one under a new name, copy values
+with manage_data / manage_sql, drop the old. On an EMPTY table drop_table and recreate
+is fine (no approval needed). drop_table is destructive: confirm=true, plus owner
+approval once the table holds rows. Row CRUD is manage_data; raw SQL is manage_sql. Reserved
+table names start with of_; use descriptive prefixes for your own.
+Required per action (the schema marks only `action`): add_index(table_name, index_columns); alter_table(table_name); create_table(table_name, column_defs); create_view(view_name, select); describe_table(table_name); drop_table(table_name, confirm); drop_view(view_name); set_validation(table_name, validation)
+
+### `manage_api`
+One create per table exposed at /api/<path>; the handler is auto-emitted. LIST and single-row/POST/PUT responses use different shapes: build to the api-response contract in your mental model.
+
+create also accepts a SQL VIEW as table_name: the endpoint is read-only (GET list and single row, public_read), so a view's joined or aggregated rows are browsable like a table's. Use it for report views instead of materialising them in the browser.
+
+enable_query adds a read-only raw-SELECT endpoint (POST /api/<path>, default "_query") returning {columns, rows (arrays), row_count, execution_ms, truncated}: the only runtime way to run free-form joins or aggregations (manage_sql is build-time only). It reads every non-auth table with NO owner or tenant scoping, so enable it only for a query tool, with requires_auth=true unless all tables are public. delete removes it.
+
+auth_model (exactly one): public; authenticated (any logged-in user); role (required_role names it); owner (owner_column; per-user RLS, each user reads AND writes only their own rows); authored (owner_column names the AUTHOR: every logged-in user reads all rows, each writes only their own). Use authored, not owner, when rows are shared within a workspace, channel or room: owner hides everyone else's rows. public_read=true keeps GET open while writes need auth. public_write=true is the inverse (anyone POSTs, GET stays auth-gated), the public-submission shape (contact form, feedback): use authenticated + public_write=true, not public, which also exposes the reads. public_write is invalid with owner/authored.
+
+On a writable, non-public endpoint with no owner_column, the platform scopes it to a detected owner-like column (user_id, owner_id) and reports owner_scope_applied; set owner_column explicitly, or public_read, to control it.
+
+Single-row GET/PUT/DELETE /api/<path>/<value>: numeric matches id; for strings the column is (1) lookup_column, (2) a "uuid" or "slug" column, (3) the table's sole non-id UNIQUE TEXT column; set lookup_column when there are several. searchable_columns feeds FTS5 (manage_data action=search), not ?q=. The key goes in the URL path (a bare PUT/DELETE /api/<path> is refused), and a PUT on a non-id unique key UPSERTS, so an idempotent write by a natural key is one PUT /api/<path>/<value>.
+
+LIST filters, sorting, ?q= search and GET /api/<path>/_stats (server-side aggregates, use it instead of totalling rows in the browser) are built in; the api_response_contract guide has the grammar. generate_docs writes an OpenAPI spec to /api/docs.json.
+Required per action (the schema marks only `action`): create(endpoint_path, table_name); delete(endpoint_path); update(endpoint_path)
+
+Per-action bounds and defaults (the merged schema shows only values every action shares):
+- `manage_api.create`: rate_limit defaults to 60
+- `manage_api.enable_query`: rate_limit defaults to 60
+
+### `manage_data`
+Use for reading and writing rows in tables you (or the plan) already created.
+DDL belongs on manage_schema; raw SELECT or atomic multi-table writes belong on
+manage_sql. action=search runs keyword FTS over the table's searchable_columns; reach
+for manage_keyword_search to create and manage a dedicated FTS5 index for ranked
+search, manage_vector_search for semantic similarity.
+Required per action (the schema marks only `action`): aggregate(table_name, function); batch_delete(table_name, filters); batch_update(table_name, updates); count(table_name); delete(table_name, id); insert(table_name); query(table_name); search(table_name, query_text); update(table_name, data); upsert(table_name, data, conflict_columns)
+
+Per-action bounds and defaults (the merged schema shows only values every action shares):
+- `manage_data.query`: limit max 500
+- `manage_data.search`: limit max 200
+
+### `manage_codebase`
+Find where to edit before opening files: resolve a symbol name
+(function, CSS selector, HTML id/class, export) straight to file:line + signature +
+who references it; where_used lists every reference - both prefer the symbol index
+over re-reading candidate files. project_tree gives a compact whole-project view;
+grep is the full-text fallback when a name isn't an indexed symbol. For
+single-artifact reads (body, outline) and restoring an earlier version, call manage_files.
+Required per action (the schema marks only `action`): grep(pattern); resolve(symbol); where_used(symbol)
+
+### `manage_diagnostics`
+Use to inspect cross-artifact wiring, or to read back why an earlier BUILD
+stage failed. All actions are read-only. These report on the project's stored
+artifacts and its build history. They do not observe the RUNNING app's pages: a
+browser-side failure (a blank page, a dead button) will not appear here. Reproduce
+that with manage_testing, which drives the live server (HTTP, auth, page loads, JS
+module execution) and is available during BUILD and LIVE. The one runtime signal
+kept here is the message a function endpoint threw, in action=errors.
+
+--- tools (9) ---
+manage_api: Define REST CRUD endpoints (GET/POST/PUT/DELETE) over a project table, GET over a view, or a read-only SQL query endpoint.
+  params: {"properties":{"action":{"description":"Verb: create - Scaffold CRUD over a table. Create-only: if the path already exists this is a no-op that changes nothing (it does not re-apply options) - use action=update to change an existing endpoint; delete - Delete an API endpoint; enable_query - Enable a read-only raw-SELECT endpoint (POST /api/\u003cpath\u003e) for join/aggregation/view queries an explorer or report needs at runtime; generate_docs - Write an OpenAPI 3.0 spec to the api-docs.json asset, served at /api/docs.json (import it into any OpenAPI viewer; no docs page is rendered). Covers the REST/CRUD, auth, upload, SSE stream, and websocket endpoints - a function, LLM, export, import, or query endpoint is not described there; list - List API endpoints; update - Update an existing API endpoint's options. An omitted arg keeps its stored value; a list arg (methods, columns, cors_*) replaces the stored list.","enum":["create","delete","enable_query","generate_docs","list","update"],"type":"string"},"auth_model":{"description":"[create, update] Authentication model (default public). The tool's WhenToUse carries the enum semantics and when to pick each. | update: Replace the authentication model. REQUIRED to change any other auth setting: required_role, owner_column, public_read and public_write are read only when auth_model rides the same call, and are silently ignored without it. Re-send the endpoint's current model if you are only changing one of them. Switching between owner and authored also flips read sharing.","enum":["public","authenticated","role","owner","authored"],"type":"string"},"cache_ttl":{"description":"[create, update] GET response cache TTL in seconds (0 disables caching). | update: Pass -1 to disable caching; a bare 0 keeps the current TTL.","type":"integer"},"cors_headers":{"description":"[create, update] Allowed CORS request headers.","items":{"type":"string"},"type":"array"},"cors_methods":{"description":"[create, update] Allowed CORS methods. Default mirrors methods.","items":{"type":"string"},"type":"array"},"cors_origins":{"description":"[create, update] Allowed CORS origins. Use [\"*\"] for any. Default: same-origin only.","items":{"type":"string"},"type":"array"},"endpoint_path":{"description":"[all but generate_docs, list] REST endpoint path suffix; no /api/ prefix and no leading slash (e.g. \"items\", \"orders/recent\"). | enable_query: Path for the query endpoint (default \"_query\"); POST /api/\u003cpath\u003e.","type":"string"},"lookup_column":{"description":"[create, update] TEXT column resolved by GET/PUT/DELETE /api/\u003cpath\u003e/\u003cvalue\u003e.","type":"string"},"max_rows":{"default":200,"description":"[enable_query] Hard cap on rows returned per query; max 1000, a larger value is rejected.","maximum":1000,"minimum":1,"type":"integer"},"methods":{"description":"[create, update] Allowed HTTP methods (default GET/POST/PUT/DELETE). Set explicitly to lock down the surface.","items":{"type":"string"},"type":"array"},"owner_column":{"description":"[create, update] Column holding the owning/authoring user id, required when auth_model=owner or authored. Auto-set from the JWT on POST. owner scopes it on GET/PUT/DELETE (private per user); authored scopes it on PUT/DELETE only, leaving GET shared.","type":"string"},"public_columns":{"description":"[create, update] Columns returned in responses. PASSWORD columns are always hidden. Default: every non-PASSWORD column. Also bounds which columns a client may filter, search, sort and aggregate on.","items":{"type":"string"},"type":"array"},"public_read":{"description":"[create, update] With auth_model != public: allow GET without a token even though writes require auth.","type":"boolean"},"public_write":{"description":"[create, update] With auth_model != public: allow writes (POST/PUT/DELETE) without a token while GET stays auth-gated. The public-submission shape (contact form/feedback: anyone posts, only an admin reads). Not valid with auth_model=owner/authored, nor with owner_column set: an anonymous writer has no identity to scope the row to.","type":"boolean"},"rate_limit":{"description":"[create, enable_query, update] Requests/minute per IP.","type":"integer"},"required_role":{"description":"[create, update] Role name required when auth_model=role (e.g. admin, editor).","type":"string"},"requires_auth":{"description":"[enable_query] Require a Bearer token (project key or user JWT) to run queries. Default false: anyone can read every non-auth table, so set true unless all of them are public.","type":"boolean"},"table_name":{"description":"[create, update] Existing table backing the endpoint.","type":"string"},"writable_columns":{"description":"[create, update] Pass [\"*\"] to allow every column again. | create: Columns a client may set on POST/PUT; anything else in the body is dropped. Default: every column, so set this whenever the table has privileged fields (status, role, paid, credits). Owner and tenant columns are stamped from the session regardless.","items":{"type":"string"},"type":"array"}},"required":["action"],"type":"object"}
+manage_codebase: Search and inspect the project code across artifacts - grep, resolve a symbol, where_used, tree.
+  params: {"properties":{"action":{"description":"Verb: grep - Regex search across artifact bodies; project_tree - List every artifact in the project, optionally with outlines; resolve - Locate a symbol's definition(s) - file:line, signature, and who references it - from the symbol index. Prefer this over grep+get to find where to edit; where_used - List every file that references a symbol (imports and calls), grouped by file, from the symbol index.","enum":["grep","project_tree","resolve","where_used"],"type":"string"},"compact":{"description":"[project_tree] Suppress outlines; tree only.","type":"boolean"},"kind":{"description":"[resolve] Optional kind filter (js_func, js_method, js_export, css_selector, html_id, html_class).","enum":["js_func","js_method","js_export","css_selector","html_id","html_class"],"type":"string"},"path_glob":{"description":"[grep] Limit to artifacts whose path matches this glob (* does not cross /).","type":"string"},"pattern":{"description":"[grep] Regex pattern.","type":"string"},"symbol":{"description":"[resolve, where_used] Symbol name to list references for. | resolve: Symbol name to locate: a function, CSS selector, HTML id/class, or export.","type":"string"}},"required":["action"],"type":"object"}
+manage_data: Query and write rows on a single project table - CRUD, count, aggregate, FTS search.
+  params: {"properties":{"action":{"description":"Verb: aggregate - Aggregate function (count/sum/avg/min/max) with optional GROUP BY; batch_delete - Delete every row matching the filters in one call; batch_update - Apply many updates in one atomic transaction; count - Count rows matching filters; delete - Delete a single row by id. For filter-based deletes use batch_delete; insert - Insert a single row (data) or many rows in bulk (rows). Prefer bulk for seeding. Do not seed derivable bulk data (e.g. a whole voxel world) into a table - generate it client-side. Column names in a row object are bare identifiers (bet_amount, not a quoted/escaped string); query - Filtered read with optional sort and row limit (no offset; filter to reach other rows); search - FTS5 keyword search over searchable_columns; update - Update rows by id or filters. Provide one, not both; upsert - Insert or update on conflict. Requires conflict_columns, and the table must carry a matching UNIQUE or PRIMARY KEY constraint for them - an ON CONFLICT with no matching constraint errors; use insert when in doubt.","enum":["aggregate","batch_delete","batch_update","count","delete","insert","query","search","update","upsert"],"type":"string"},"column":{"description":"[aggregate] Target column; required for sum/avg/min/max, optional for count (counts non-NULL values of it).","type":"string"},"conflict_columns":{"description":"[upsert] Column(s) whose match triggers UPDATE instead of INSERT.","items":{"type":"string"},"type":"array"},"data":{"description":"[insert, update, upsert] Column-\u003evalue map to apply to matched rows. | insert: Single-row insert: key-\u003evalue column map. Pass either data or rows, not both. | upsert: Row to insert (or update on conflict): key-\u003evalue column map.","type":"object"},"filters":{"description":"[aggregate, batch_delete, count, query, update] Filter array: each item {column, op, value}. Ops: =, !=, \u003c, \u003e, \u003c=, \u003e=, LIKE, NOT LIKE, IS NULL, IS NOT NULL. | update: Filter array: each item {column, op, value}. Ops: =, !=, \u003c, \u003e, \u003c=, \u003e=, LIKE, NOT LIKE, IS NULL, IS NOT NULL. Mutually exclusive with id.","items":{"type":"object"},"type":"array"},"function":{"description":"[aggregate] Aggregation function.","enum":["count","sum","avg","min","max"],"type":"string"},"group_by":{"description":"[aggregate] Optional GROUP BY columns.","items":{"type":"string"},"type":"array"},"id":{"description":"[delete, update] Single-row update by row id. Mutually exclusive with filters - pass one, never both. | delete: Row id of the single row to delete. To delete rows by criteria use action=batch_delete with filters instead - delete is id-only.","type":"integer"},"limit":{"default":50,"description":"[query, search] Max rows returned. Default 50, capped at 500 - a larger value is rejected.","type":"integer"},"order_by":{"description":"[query] Sort spec: {column, direction} (direction=ASC|DESC).","type":"object"},"query_text":{"description":"[search] FTS5 query string. Requires an FTS index on the table: searchable_columns at manage_schema create_table, or manage_keyword_search action=create_index afterwards.","type":"string"},"rows":{"description":"[insert] Bulk insert: [{col: val}, ...]. Pass any number of rows in one call - over 100 auto-splits into 100-row batches, so do not hand-split a seed.","items":{"type":"object"},"type":"array"},"table_name":{"description":"Project table name (snake_case).","type":"string"},"updates":{"description":"[batch_update] Array of {id|filters, data} entries. Cap 100 entries per call.","items":{"type":"object"},"type":"array"}},"required":["action"],"type":"object"}
+manage_diagnostics: Diagnose build-stage failures, project health, cross-artifact integrity, and orphaned page assets.
+  params: {"properties":{"action":{"description":"Verb: errors - Recent failures: BUILD-STAGE failures from the engine run log (which stage failed, and why), plus the RUNTIME errors sandboxed function endpoints raised while serving a request. A function endpoint answers a caller with a generic 'function error' body, so this is where the thrown message is - read it before rewriting a handler that returns 500. A runtime error a PAGE throws in the browser is not here: reproduce that with manage_testing test_page; health - Return process and DB health summary; integrity - Cross-artifact lint: pages pointing at a missing layout, \u003cnav\u003e/\u003cfooter\u003e markup that belongs in the layout, and forms whose submit target does not exist; unlinked_artifacts - List page-scope JS/CSS files that no page loads (neither attached nor imported by a linked entry).","enum":["errors","health","integrity","unlinked_artifacts"],"type":"string"},"limit":{"default":20,"description":"[errors] Maximum entries of EACH kind returned: build-stage failures and runtime errors.","type":"integer"}},"required":["action"],"type":"object"}
+manage_files: Manage pages, layouts, components, and files - save, patch, get, list, attach to pages, rename.
+  params: {"properties":{"action":{"description":"Verb: attach - Attach an EXISTING page-scope JS/CSS file (kind=file) to a page at a position (lower loads first). The file must already be saved (action=save kind=file) - attaching a path that has not been saved fails. To save and attach in one call, use action=save with attach_to instead; bulk_replace - Apply ONE regex pattern+replace across every artifact matching kind / path_prefix / path_glob (at least one required). Use preview=true first. Inline-stored artifacts only; delete - Soft-delete an artifact (tombstone); detach - Remove a page/file attachment; get - Read an artifact body, or a from_line/to_line range (paginates via next_from_line). The 'N| ' gutter is display-only - never copy it into patch search text. A bare get of a large file returns its OUTLINE; pass a range for real source; list - List artifacts, optionally filtered by kind; list_page_files - List files attached to one page; outline - Line-numbered structural map of one artifact (JS signatures, CSS selectors incl. @media, or HTML structure), bodies collapsed. The cheapest way to orient in a big file: outline, then get just the range you need; patch - Apply [{search, replace}] pairs to one artifact body (whitespace/indentation-tolerant; replaces the first match by default - see the patches arg for count/near). The preferred targeted edit when a unique anchor exists; rename - Move an artifact to a new path; restore - Undo: roll an artifact back to the given version, or (omitted) its last snapshot - also recovers a just-deleted file. Recorded as a new version. Inline text artifacts only, last 20 versions; save - Create or overwrite an artifact (page = HTML fragment, layout = the shell; see the page/layout law). Attach page-scope JS/CSS with attach_to, never a hand-written \u003cscript\u003e/\u003clink\u003e. A malformed save is rejected with the exact fix.","enum":["attach","bulk_replace","delete","detach","get","list","list_page_files","outline","patch","rename","restore","save"],"type":"string"},"attach_to":{"description":"[save] kind=file only: page route this file attaches to, linked in this same call so no follow-up action=attach is needed. Pass it on every page entry JS and every page CSS. Leave it OFF a leaf module an entry imports - the import graph reaches those, and attaching them is wrong.","type":"string"},"body":{"description":"[save] Full artifact body, up to 48 KB (client-side JS modules up to 36 KB); build a larger file by splitting it into smaller files, or by saving a smaller complete first version and growing it in focused follow-up edits. See the action docstring for the page/layout body-shape contract.","type":"string"},"content_type":{"description":"[save] MIME type override.","type":"string"},"file_path":{"description":"[all but bulk_replace, list, list_page_files] Path identifier. | attach: The file being attached (must already exist). Attaching makes it page-scoped, so a scope=global file is refused while other pages load it. | detach: The file being detached. | save: Path identifier: a page route as a clean URL with no file extension (\"/\" for home, \"/about\" not \"/about.html\"), an asset path, or a file name. For kind=layout, save the primary layout at path \"default\" - pages with no explicit metadata.layout resolve there automatically, so any other name forces every page to set it. Do not also save the same layout under another name.","type":"string"},"fresh":{"description":"[get] Force a full re-serve even if this range was already shown this session. Use when you no longer hold the body (or an edit anchor will not match) and need to re-read to re-anchor; normally leave false so unchanged repeat reads stay deduped.","type":"boolean"},"from_line":{"description":"[get] Start line for a ranged read (1-based).","type":"integer"},"kind":{"description":"[all but attach, detach, list_page_files] File kind. Optional: omit to infer from file_path when it identifies one artifact. | bulk_replace: Scope filter: limit to this artifact kind. At least one of kind / path_prefix / path_glob is required (call rejected otherwise). | save: File kind. Usually omit it: a route (\"/about\", \"/projects/:slug\") infers page, a \"/files/\" path or asset extension (.js/.css/.png) infers file. Required ONLY for a bare name (\"default\", \"sidebar\"): layout vs component. An explicit kind wins.","enum":["page","layout","component","file"],"type":"string"},"max_per_file":{"description":"[bulk_replace] Max replacements per file (0 = unlimited).","type":"integer"},"metadata":{"description":"[save] Free-form metadata stored with the artifact. On a kind=page, {title: \"Contact\"} sets the page \u003ctitle\u003e; omit it and the plan's per-page title is used automatically (never the project name).","type":"object"},"new_path":{"description":"[rename] Destination path.","type":"string"},"overwrite":{"description":"[save] Set true ONLY to deliberately overwrite this path with entirely different content (a from-scratch rewrite). Not needed for normal edits or re-saves; a save that looks like it is accidentally clobbering an unrelated existing file is refused unless this is set.","type":"boolean"},"page_path":{"description":"[attach, detach, list_page_files] Owning page the file attaches to.","type":"string"},"patches":{"description":"[patch] Array of hunks, applied in order: {search, replace} to change text, or {insert_after|insert_before, text} / {append} / {prepend} to add text. Prefer a search that occurs once; if it matches more than once only the FIRST is replaced and a warning is returned. Give each region exactly ONE hunk: a hunk that only matches text an earlier hunk in the same call just wrote is refused. near targets a single occurrence; count is ignored when near is set.","items":{"properties":{"search":{"description":"Exact current text of the file to replace, copied verbatim as one contiguous run (never the 'N| ' line-number gutter).","type":"string"},"replace":{"description":"The full new text for the matched span; empty deletes it. It must differ from search (an identical replace changes nothing). To ADD text without replacing any, use insert_after / insert_before / append / prepend instead.","type":"string"},"insert_after":{"description":"Insert form: an existing line (or lines) of the file; `text` is added right after it. Use instead of search/replace when you are only adding.","type":"string"},"insert_before":{"description":"Insert form: an existing line (or lines) of the file; `text` is added right before it.","type":"string"},"text":{"description":"The new lines for insert_after / insert_before.","type":"string"},"append":{"description":"Insert form: new lines added at the very end of the file; no anchor needed.","type":"string"},"prepend":{"description":"Insert form: new lines added at the very start of the file; no anchor needed.","type":"string"},"near":{"description":"Text close to the intended occurrence when search repeats; the nearest occurrence is replaced.","type":"string"},"count":{"description":"Occurrences to replace: omit for the first only, -1 for all, N for the first N.","type":"integer"}},"type":"object"},"type":"array"},"path_glob":{"description":"[bulk_replace] Scope filter, path.Match glob: * does not cross /, no ** (css/*.css). ANDs with path_prefix / kind.","type":"string"},"path_prefix":{"description":"[bulk_replace] Scope filter, only artifacts whose path starts with this.","type":"string"},"pattern":{"description":"[bulk_replace] Single Go regex applied across every matched artifact.","type":"string"},"position":{"description":"[attach, save] Attach order (default 0, lower first; CSS cascade order - JS modules resolve through imports, not tag order). | save: Page-scope attach order, used with attach_to only (default 0, lower loads first; CSS cascade order - JS modules resolve through imports, not tag order).","type":"integer"},"preview":{"description":"[bulk_replace] Report per-file replacement counts without writing.","type":"boolean"},"replace":{"description":"[bulk_replace] Replacement (empty deletes matches); $1 and ${x} expand groups, so write $$ for a literal $. A patch carries its replacement in its hunk, never here.","type":"string"},"scope":{"description":"[save] Asset visibility, a TOP-LEVEL arg - never nest it inside metadata. Usually omit it: JS/CSS files default to \"page\" (a single-page split) and a re-save keeps the existing scope. Pass \"global\" only for assets genuinely shared across every page (sitewide analytics/helpers).","enum":["page","global"],"type":"string"},"to_line":{"description":"[get] End line for a ranged read (inclusive).","type":"integer"},"version":{"description":"[restore] Version number to restore the body from (see the version each save/edit returns). Omit to undo the last change - restores the most recent prior snapshot, which also recovers a just-deleted file.","type":"integer"}},"required":["action"],"type":"object"}
+manage_guides: Read the platform guides: load-bearing build contracts and reference docs for every capability. Read-only.
+  params: {"properties":{"action":{"description":"Verb: list - List the platform guide catalogue (slug, title, one-line summary) so you can recall a relevant guide's full body; recall - Fetch a guide by slug: core body + section index (default), one EXTENDED section (section=\u003canchor\u003e), or the whole guide (section=all); search - Search the platform guides for entries matching a query.","enum":["list","recall","search"],"type":"string"},"query":{"description":"[search] Free-text query matched against slug/title/summary/body.","type":"string"},"section":{"description":"[recall] EXTENDED section anchor from the guide's section index. Omit for the core body plus the list of sections; pass 'all' for the whole guide.","type":"string"},"slug":{"description":"[recall] Guide slug to fetch (from the guide index in the system prompt, or list).","type":"string"}},"required":["action"],"type":"object"}
+manage_schema: Define table DDL - create/alter/drop, indexes, validation. PASSWORD/ENCRYPTED columns auto-hash/auto-encrypt.
+  params: {"properties":{"action":{"description":"Verb: add_index - Create a B-tree index over one or more columns; alter_table - Add or drop columns on an existing table (no rename or retype); create_table - Create a new project table. Declare every column the table needs up front - especially the FK/owner columns a join table is FOR (a channel_members table MUST carry channel_id, not just user_id) - then add_index its filter/lookup/FK columns in that SAME turn, while the shape is fresh: splitting create and index across turns is how you end up indexing a column the table never got (`no such column`); create_view - Create (or replace) a read-only view over project tables. Serve it to the app with manage_api create (table_name=\u003cview\u003e); manage_sql execute_sql reads it at build time; describe_table - Return column list, types, indexes, and validation for one table; drop_table - Drop a table, its indexes, and the API and auth endpoints built on it. Destructive; requires confirm=true, plus owner approval when the table holds rows. alter_table cannot rename or retype a column, so on an empty table with a wrong column drop and recreate it; on a table holding rows migrate through a new column instead; drop_view - Drop a view. Non-destructive - a view stores no rows; list_tables - List every project table; set_validation - Attach per-column validation rules (merged into any already set). Enforced on every write: the app's CRUD API answers 400 {error, fields} for a violating POST/PUT, and manage_data / manage_sql imports reject the row.","enum":["add_index","alter_table","create_table","create_view","describe_table","drop_table","drop_view","list_tables","set_validation"],"type":"string"},"add_columns":{"description":"[alter_table] Columns to add. Same shape as create_table.column_defs (bare-type or constraint-object form).","type":"object"},"column_defs":{"description":"[create_table] Map of column-names-only -\u003e type-or-constraint-object. Bare-type form: {\"title\":\"TEXT\",\"qty\":\"INTEGER\"}. Constraint-object form: {\"email\":{\"type\":\"TEXT\",\"unique\":true,\"not_null\":true}}. Types: TEXT, INTEGER, REAL, BOOLEAN, BLOB (raw bytes; prefer manage_uploads for files), PASSWORD (auto-hashed with bcrypt on write - store user passwords as PASSWORD, never TEXT), ENCRYPTED (AES-encrypted at rest). Constraint keys: type, not_null, unique, default, check (SQL expression), references (\"table(col)\"), generate. generate puts a SERVER-GENERATED value on the row at insert time - one of: code (short share slug), token, uuid, expires_in_days:N, expires_in_hours:N. It is filled automatically by an upload or CRUD auto-insert, so a share code / expiry needs NO server function: e.g. {\"slug\":{\"type\":\"TEXT\",\"unique\":true,\"not_null\":true,\"generate\":\"code\"},\"expires_at\":{\"type\":\"TEXT\",\"generate\":\"expires_in_days:7\"}}. (generate works only at create_table, not alter_table add_columns.) DO NOT include sibling args here: table_name and searchable_columns are top-level args; id and created_at are added automatically. Wrong: {\"table_name\":\"items\",\"title\":\"TEXT\"} - table_name goes outside column_defs.","type":"object"},"confirm":{"description":"[alter_table, drop_table] Required when drop_columns is set. Acknowledges that dropping columns deletes data permanently. | drop_table: Must be true. Acknowledges that drop_table deletes every row and is irreversible without a backup. Owner approval is also enforced at run time.","type":"boolean"},"drop_columns":{"description":"[alter_table] Column names to drop. Destructive - requires confirm=true, plus owner approval when the table holds rows (an empty table has nothing to lose, so it is waived).","items":{"type":"string"},"type":"array"},"index_columns":{"description":"[add_index] Column names to include in the index - bare names (\"channel_id\"), never table-qualified (\"channel_members.channel_id\").","items":{"type":"string"},"type":"array"},"searchable_columns":{"description":"[create_table] TEXT column names to index for FTS5 keyword search via manage_data action=search. Must reference columns declared in column_defs.","items":{"type":"string"},"type":"array"},"select":{"description":"[create_view] A single read-only SELECT defining the view, e.g. \"SELECT u.id, u.name, COUNT(o.id) AS order_count FROM users u LEFT JOIN orders o ON o.user_id = u.id GROUP BY u.id\". SELECT only - no INSERT/UPDATE/DELETE, no ';' (single statement), and no of_ system tables. Re-running with the same view_name replaces the definition.","type":"string"},"table_name":{"description":"[all but create_view, drop_view, list_tables] Existing table name. | create_table: New table name (snake_case). Reserved prefix of_ is rejected - use a descriptive project-specific prefix.","type":"string"},"unique":{"description":"[add_index] Create a UNIQUE index.","type":"boolean"},"validation":{"description":"[set_validation] Map of column name -\u003e rule object. Supported rules: min_length, max_length, min, max (numeric), pattern (regex), format (email|url|phone|uuid|date|time), enum (array of allowed values), custom_message. Example: {\"email\":{\"format\":\"email\"},\"age\":{\"min\":0,\"max\":120}}.","type":"object"},"view_name":{"description":"[create_view, drop_view] View to drop. Holds no data; this only removes the saved query. To drop a table use drop_table. | create_view: New view name (snake_case). Reserved prefix of_ is rejected; must not collide with an existing table.","type":"string"}},"required":["action"],"type":"object"}
+manage_testing: Probe the running server (endpoints, URLs, auth, pages, modules, websockets); write and replay of_test.js user flows.
+  params: {"properties":{"action":{"description":"Verb: explore - Click every visible control on one page in a real browser, once each, and report what threw, what changed nothing, what another element covers, and sideways scroll at phone size. The same check the end-of-build sweep runs: use it to verify a fix to such a finding instead of guessing. Data written by the clicks is rolled back; test_auth_flow - Exercise the register/login flow of an auth endpoint; test_endpoint - Probe a REST endpoint: checks the HTTP status and that the JSON response is an object carrying expected_fields (a 200 with the wrong shape is a contract break a page probe cannot see). It authenticates itself on an auth-gated path. A create tool's returned contract is already verified, so an endpoint you just created needs no probe; test_flows - Re-run of_test.js after an app fix (write_flows replays on its own save). Per failure: the step, the reason, JS errors, failed requests, the page's visible controls, and whether the app or the step is at fault; test_module - Load a saved JS file in a real browser tab and call one `entry` (an ES export or a window global it installs), capturing console output and exceptions. With no callable entry it passes if the import does not throw. A module that touches document, canvas or events is imported against its owning page without calling its exports: verify those with test_page; test_page - Render a page (or several via page_paths) in a real browser, signed in as a seeded user when the project has a login: checks the expected status, no uncaught error, and that its scripts and styles load. Reports visible_chars/media_count and console_errors for you to judge; only an uncaught throw or a failed same-origin script or stylesheet hard-fails; test_url - Probe a verbatim URL path (page roots, /manifest.json, dynamic non-/api paths). /files/ assets serve whenever saved. A WebSocket endpoint answers a plain GET with 426 and reports healthy, which only proves the route is mounted; test_websocket - Open a real WebSocket to a relay, tick, authoritative, matchmaking or signaling endpoint: handshake plus the welcome frame. two_peer=true also checks the room_gated token flow and that the endpoint's model delivers between two peers (app_action drives one authoritative action). A requires_auth endpoint needs auth_token from test_auth_flow. Prefer this over test_url for chat, call and multiplayer endpoints; write_flows - Save of_test.js and replay it at once. Shape: export default { flows: [{ name, viewport?, steps: [...] }] }, plain data, one verb per step (verbs: the user_flows guide, section=writing-flows). The save REPLACES the file: a script missing a saved flow is refused unless that flow is listed in drop. Every save replays; replays that stop getting closer to green are refused.","enum":["explore","test_auth_flow","test_endpoint","test_flows","test_module","test_page","test_url","test_websocket","write_flows"],"type":"string"},"app_action":{"description":"[test_websocket] Authoritative + two_peer: an action peer B sends as net.action() would, e.g. {\"type\":\"MOVE\",\"x\":1}; asserts peer A gets a newer state.","type":"object"},"args":{"description":"[test_module] Positional arguments passed to the entry function.","items":{},"type":"array"},"auth_token":{"description":"[test_endpoint, test_url, test_websocket] Bearer token. | test_endpoint: USUALLY UNNECESSARY - the probe authenticates itself against an auth-gated endpoint (it mints a token for an existing user and retries once if a request 401s), so leave this empty. Pass a token ONLY to probe as a specific user or role. | test_websocket: JWT for a requires_auth endpoint (every probe peer connects with it). Mint one with action=test_auth_flow - its result carries 'token'. Without it an auth-gated handshake is refused 401 before the upgrade.","type":"string"},"drop":{"description":"[write_flows] Names of saved flows you are deliberately removing (their feature is gone, or you renamed them). Every other saved flow must still be in source.","items":{"type":"string"},"type":"array"},"endpoint_path":{"description":"[test_auth_flow, test_endpoint, test_websocket] Auth endpoint path. | test_endpoint: REST endpoint path WITHOUT the /api/ prefix (e.g. 'posts'). | test_websocket: WebSocket endpoint path, e.g. 'call' (also accepts '/api/call/ws').","type":"string"},"entry":{"default":"default","description":"[test_module] Function to call: a named ES export, or a window global the file sets (e.g. \"AudioEngine\" for window.AudioEngine, dotted paths like \"App.init\" allowed). Defaults to the module's default export.","type":"string"},"expected_fields":{"description":"[test_endpoint] Fields that must exist in the JSON response.","items":{"type":"string"},"type":"array"},"expected_status":{"description":"[test_endpoint, test_page, test_url] Expected HTTP status code; omit to accept any 2xx. | test_endpoint: Expected HTTP status code; omit to accept any 2xx (a create returns 201, not 200). For a deliberate negative test pass the intended status (e.g. 404) so it records as a pass. | test_url: Expected HTTP status code; omit to accept any 2xx. For a deliberate negative test pass the intended status (e.g. 404 for an unknown route) so it records as a pass.","type":"integer"},"file_path":{"description":"[test_module] Path of the JS module artifact to import (e.g. \"/files/qrcode.js\").","type":"string"},"flow":{"description":"[test_flows] Run only the flow with this name; omit to run all of them in order.","type":"string"},"method":{"default":"GET","description":"[test_endpoint, test_url] HTTP method. | test_endpoint: HTTP method. CRUD endpoints answer GET/POST/PUT/DELETE; PATCH is only for a manage_function endpoint that declares it.","enum":["GET","POST","PUT","PATCH","DELETE"],"type":"string"},"page_path":{"default":"/","description":"[explore, test_page] Page path (e.g. '/about'). | explore: Page path to click through (e.g. '/staff').","type":"string"},"page_paths":{"description":"[test_page] Several page paths probed in one call (at most 8); replaces page_path and answers per page under pages.","items":{"type":"string"},"type":"array"},"request_body":{"description":"[test_endpoint, test_url] Request body for POST/PUT/PATCH.","type":"object"},"room":{"description":"[test_websocket] Room to join. Defaults to a unique throwaway probe room.","type":"string"},"source":{"description":"[write_flows] The full of_test.js module; replaces the existing file.","type":"string"},"timeout_ms":{"description":"[test_module, test_websocket] Per-frame read timeout. | test_module: Per-call execution timeout in milliseconds (maximum 30000).","type":"integer"},"two_peer":{"description":"[test_websocket] Run the full two-peer flow (room_gated mint/join/refuse + one relayed message) instead of the default single-socket smoke.","type":"boolean"},"url_path":{"description":"[test_url] Verbatim URL path (e.g. '/', '/manifest.json'). Static files under /files/ don't need probing - they always serve when saved.","type":"string"}},"required":["action"],"type":"object"}
+find_tool: Loads other tools so you can call them. Your loadable tools are named in the system prompt: the '## Tool catalogue' (LIVE) or the '## Deferred capabilities' note (BUILD, where your planned tools are already loaded); a no-argument call lists them all. names:["manage_api", ...] makes those tools callable for the rest of the conversation - their parameter schemas then appear in your tool list, so this returns only the when-to-use guidance and call examples. A name already in your tool list comes back as already_loaded - just call it. query:"send email" searches the catalogue and returns ranked matches without schemas - a fallback when you cannot name the tool. A real tool needing an unconfigured provider comes back under `unavailable` with a reason - take the stated fallback. `not_found` means no such tool exists. A search that matches nothing returns a `note` with what to do instead: act on it, because rewording the same search is refused.
+  params: {"properties":{"limit":{"description":"Max matches for a query (default 10, max 25).","type":"integer"},"names":{"description":"Exact tool names to load.","items":{"type":"string"},"type":"array"},"query":{"description":"Keyword search; returns matches without schemas.","type":"string"}},"type":"object"}
+--- messages (5) ---
+[0] user cacheable=false
+[mode: owner-reported] make the heading blue
+[1] user cacheable=false
+<date_context>
+- Today (UTC): <date>
+</date_context>
+[2] user cacheable=true
+<!--__of_snapshot:baseline__-->
+<project_state>
+## Current Project State (project_state)
+
+### Pages (1)
+- `/`
+
+### Artifacts (1)
+Every file listed here is SAVED and CURRENT. A file flagged unlinked below is the sole exception worth acting on.
+- `favicon.svg` (svg, global)
+
+</project_state>
+State at the start of this session. Any earlier project_state messages describe prior work and are historical. Change updates below track what you build from here.
+[3] assistant cacheable=false
+done
+[4] user cacheable=false
+You added / in this change, but of_test.js has no flow that visits it. Read the saved script (manage_files get of_test.js), then re-save it with manage_testing action=write_flows keeping every existing flow and adding one for the new page (visit it, assert its heading, follow its nav link). Then stop.

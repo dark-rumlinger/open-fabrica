@@ -1,0 +1,12 @@
+---
+id: payment-flow
+title: Hosted checkout and server-side fulfillment
+kind: prose
+governs: [payments]
+probes: [hosted checkout, payment.completed]
+---
+**Payments are hosted checkout + server-side fulfillment. Card data never touches the app.** The flow is fixed: the buyer's action POSTs to a `manage_function` endpoint whose handler opens a hosted checkout with `ctx.checkout({amount, success_url, cancel_url, description, metadata})` (amount in cents; `plan_id` instead of amount for a subscription) and returns its `checkout_url`, the browser is redirected to the PROVIDER's page, and after paying the provider redirects back to your `success_url`. `ctx.checkout` records the payment the webhook later reconciles; a session opened any other way (a raw `ctx.fetch` to the provider) is never recognised.
+
+**Fulfillment (granting the thing paid for) MUST happen server-side on the `payment.completed` event, NEVER on the `success_url` redirect.** The redirect is attacker-reachable (a buyer can open `success_url` directly, or close the tab before it loads), so granting access, marking an order paid, or sending the receipt there both leaks the product to non-payers and loses it for buyers whose redirect never fires. The provider's signed webhook is the only trustworthy confirmation. The platform serves it at a fixed route, **`POST /payments/webhook`**, which verifies the provider's signature, reconciles the payment record, and raises `payment.completed` (or `payment.failed`) - wire a `manage_triggers` hook on that event to do the fulfillment (grant the role, flip the order row, email the receipt). The event carries `external_id` (the provider's session/payment id) plus every key of the checkout `metadata` you passed, so put your order id in that `metadata` when you open the checkout and correlate on it in the trigger.
+
+**Register that route with the provider, or nothing arrives.** The path is fixed by the platform (you do not build it, and `configure` hands it back to you), but the PROVIDER must be told to call it: add it as the webhook endpoint in the provider's dashboard, signed with the secret you named in `webhook_secret_name`. Until then the provider posts nowhere, no event is raised, and fulfillment never runs while every gate stays green. Automatic reconciliation is Stripe-only today; the other provider families use signature schemes this build cannot authenticate and their webhooks are refused rather than trusted.

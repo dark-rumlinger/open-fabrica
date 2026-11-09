@@ -1,0 +1,60 @@
+/* ==========================================================================
+   Right-to-left support. Layout itself follows the logical properties used in
+   the component files (margin-inline-start, inset-inline-end, ...); this file
+   holds what logical properties cannot express: the direction sign used by
+   slide animations, mirrored arrows, and keeping code and addresses left to
+   right. Loaded last so it can win over the component files.
+   ========================================================================== */
+
+/* +1 in left-to-right, -1 in right-to-left. Slide-in/out distances multiply by it. */
+:root { --dir-sign: 1; }
+html[dir="rtl"] { --dir-sign: -1; }
+
+/* ---------- Mirror icons that point in a direction ---------- */
+/* chevron-right, arrow-left, log-out and send, matched by their path data. */
+html[dir="rtl"] svg:has(> polyline[points="9 18 15 12 9 6"]),
+html[dir="rtl"] svg:has(> polyline[points="12 19 5 12 12 5"]),
+html[dir="rtl"] svg:has(> polyline[points="16 17 21 12 16 7"]),
+html[dir="rtl"] svg:has(> polygon[points="22 2 15 22 11 13 2 9 22 2"]) {
+  transform: scaleX(-1);
+}
+
+/* ---------- Keep technical text left to right ---------- */
+html[dir="rtl"] code,
+html[dir="rtl"] pre,
+html[dir="rtl"] kbd,
+html[dir="rtl"] samp,
+html[dir="rtl"] .code-editor,
+html[dir="rtl"] .chat-game {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+}
+
+/* Typed text takes the direction of its own content, so a URL or an address
+   stays left to right while Arabic text flows right to left. */
+html[dir="rtl"] input[type="text"],
+html[dir="rtl"] input[type="url"],
+html[dir="rtl"] input[type="email"],
+html[dir="rtl"] input[type="search"],
+html[dir="rtl"] input[type="password"],
+html[dir="rtl"] input[type="number"],
+html[dir="rtl"] textarea {
+  unicode-bidi: plaintext;
+}
+
+/* Chat text is written by people and models in any language. Each paragraph takes
+   its own direction from its first strong character, so an English reply inside
+   an Arabic interface keeps its punctuation and alignment. */
+html[dir="rtl"] .message__content,
+html[dir="rtl"] .message__content :is(p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th),
+html[dir="rtl"] .message__body :is(p, li) {
+  unicode-bidi: plaintext;
+}
+
+/* The select arrow and the pipeline fill are positioned by physical values. */
+html[dir="rtl"] select.input { background-position: left 12px center; }
+html[dir="rtl"] .pipeline-tracker__line--done::after { transform-origin: right; }
+
+/* Scale toasts toward the corner they are anchored to (see toast.css). */
+html[dir="rtl"] .toast { transform-origin: left bottom; }

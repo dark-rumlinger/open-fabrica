@@ -1,0 +1,1 @@
+A group chat app for a book club: members sign up and log in, see a list of rooms, join a room, and chat in real time with messages that stay after a reload. Show who is online in the room and when someone is typing.

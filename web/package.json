@@ -1,0 +1,6 @@
+{
+  "//": "Not a dependency manifest - there are no dependencies and nothing to install. This file exists only to tell Node that the .js under web/ are ES modules (they are already served to the browser as ESM), which is what lets `node --test web/tests` import them. It sits at web/ rather than web/admin/ deliberately: embed.go embeds `all:web/admin`, so anything under that path is compiled into the binary and served by the admin panel.",
+  "name": "open-fabrica-web",
+  "private": true,
+  "type": "module"
+}

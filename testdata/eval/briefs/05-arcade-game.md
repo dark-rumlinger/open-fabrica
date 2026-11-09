@@ -1,0 +1,1 @@
+A 2D arcade game where you pilot a little ship through an asteroid field. Arrow keys or touch to steer, space or tap to shoot, asteroids split when hit, lives and a score, a short game-over screen with your best score kept between visits, and it should feel punchy: screen shake, particles, sound.

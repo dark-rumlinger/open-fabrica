@@ -1,0 +1,27 @@
+/* ---------- About: fake Blue Screen of Death (the APPLY PATCH gag) ---------- */
+.bsod {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  background: #0000aa;
+  color: #fff;
+  font: 15px/1.55 "Lucida Console", "Consolas", "Courier New", monospace;
+  padding: 10vh 8vw;
+  overflow: auto;
+  cursor: pointer;
+  animation: bsodIn 90ms steps(2);
+}
+@keyframes bsodIn { from { opacity: 0; } to { opacity: 1; } }
+.bsod__text {
+  max-width: 760px;
+  margin: 0 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bsod__prompt { margin-top: 1.6em; }
+.bsod__caret { animation: bsodBlink 1s steps(1) infinite; }
+@keyframes bsodBlink { 50% { opacity: 0; } }
+@media (max-width: 520px) {
+  .bsod { font-size: 12px; padding: 8vh 6vw; }
+}
+

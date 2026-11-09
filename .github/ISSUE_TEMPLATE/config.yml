@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/dark-rumlinger/open-fabrica/security/advisories/new
+    about: Please report security issues privately via GitHub Security Advisories, never in a public issue. See docs/SECURITY.md.
+  - name: Questions & project updates
+    url: https://x.com/open_fabrica
+    about: General questions, ideas, and news.

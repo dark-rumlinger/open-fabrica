@@ -1,0 +1,275 @@
+{
+  "providers": [
+    {
+      "vendor": "anthropic",
+      "kind": "llm",
+      "name": "Anthropic Claude",
+      "transport": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "auth": {
+        "env": "ANTHROPIC_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://platform.claude.com/settings/keys",
+      "config": {
+        "cache_ttl": "1h"
+      }
+    },
+    {
+      "vendor": "openai",
+      "kind": "llm",
+      "name": "OpenAI",
+      "transport": "openai-chat",
+      "base_url": "https://api.openai.com/v1",
+      "auth": {
+        "env": "OPENAI_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://platform.openai.com/api-keys",
+      "config": {
+        "embedding_model": "text-embedding-3-small",
+        "strict_model_filter": true
+      }
+    },
+    {
+      "vendor": "ollama",
+      "kind": "llm",
+      "name": "Ollama (local)",
+      "transport": "ollama",
+      "base_url": "http://localhost:11434/v1",
+      "models_url": "http://localhost:11434/api/tags",
+      "auth": {
+        "required": false
+      },
+      "config": {
+        "models_shape": "ollama"
+      }
+    },
+    {
+      "vendor": "llamacpp",
+      "kind": "llm",
+      "name": "llama.cpp (local)",
+      "transport": "openai-chat",
+      "base_url": "http://localhost:8080/v1",
+      "auth": {
+        "required": false
+      },
+      "signup_url": "https://github.com/ggml-org/llama.cpp",
+      "config": {
+        "models_shape": "llamacpp"
+      }
+    },
+    {
+      "vendor": "gemini",
+      "kind": "llm",
+      "name": "Google Gemini",
+      "transport": "openai-chat",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "models_url": "https://generativelanguage.googleapis.com/v1beta/models",
+      "auth": {
+        "env": "GEMINI_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://aistudio.google.com/app/apikey",
+      "config": {
+        "models_shape": "gemini",
+        "models_auth": {
+          "scheme": "query",
+          "param": "key"
+        }
+      }
+    },
+    {
+      "vendor": "openrouter",
+      "kind": "llm",
+      "name": "OpenRouter",
+      "transport": "openai-chat",
+      "base_url": "https://openrouter.ai/api/v1",
+      "auth": {
+        "env": "OPENROUTER_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://openrouter.ai/keys",
+      "config": {
+        "models_shape": "openrouter",
+        "cache_control": true,
+        "cache_ttl": "1h",
+        "extra_headers": {
+          "HTTP-Referer": "https://github.com/dark-rumlinger/open-fabrica",
+          "X-Title": "OpenFabrica"
+        }
+      }
+    },
+    {
+      "vendor": "zai",
+      "kind": "llm",
+      "name": "Z.ai (GLM)",
+      "transport": "openai-chat",
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "auth": {
+        "env": "ZAI_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://z.ai/manage-apikey/apikey-list",
+      "plan": "standard"
+    },
+    {
+      "vendor": "zai-coding",
+      "kind": "llm",
+      "name": "Z.ai Coding Plan (GLM)",
+      "transport": "openai-chat",
+      "plan": "coding",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
+      "auth": {
+        "env": "ZAI_CODING_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://docs.z.ai/devpack/overview"
+    },
+    {
+      "vendor": "kimi-coding",
+      "kind": "llm",
+      "name": "Kimi Code (coding plan)",
+      "transport": "openai-chat",
+      "plan": "coding",
+      "base_url": "https://api.kimi.com/coding/v1",
+      "auth": {
+        "env": "KIMI_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://www.kimi.com/code/docs/en/"
+    },
+    {
+      "vendor": "minimax-coding",
+      "kind": "llm",
+      "name": "MiniMax Token Plan (coding)",
+      "transport": "anthropic",
+      "plan": "coding",
+      "base_url": "https://api.minimax.io/anthropic/v1",
+      "auth": {
+        "env": "MINIMAX_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://platform.minimax.io/docs/token-plan/quickstart",
+      "config": {
+        "cache_ttl": "1h"
+      }
+    },
+    {
+      "vendor": "alibaba-coding",
+      "kind": "llm",
+      "name": "Alibaba Coding Plan (Qwen)",
+      "transport": "openai-chat",
+      "plan": "coding",
+      "base_url": "https://coding-intl.dashscope.aliyuncs.com/v1",
+      "auth": {
+        "env": "ALIBABA_CODING_PLAN_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://www.alibabacloud.com/help/en/model-studio/coding-plan"
+    },
+    {
+      "vendor": "openai-images",
+      "kind": "image",
+      "name": "OpenAI Images",
+      "transport": "openai-image",
+      "base_url": "https://api.openai.com/v1",
+      "auth": {
+        "env": "OPENAI_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://platform.openai.com/api-keys"
+    },
+    {
+      "vendor": "automatic1111",
+      "kind": "image",
+      "name": "Automatic1111 (local)",
+      "transport": "automatic1111",
+      "base_url": "http://127.0.0.1:7860",
+      "models_url": "http://127.0.0.1:7860/sdapi/v1/sd-models",
+      "auth": {
+        "required": false
+      }
+    },
+    {
+      "vendor": "pexels",
+      "kind": "stock",
+      "name": "Pexels",
+      "transport": "pexels",
+      "base_url": "https://api.pexels.com/v1",
+      "auth": {
+        "env": "PEXELS_KEY",
+        "required": true
+      },
+      "signup_url": "https://www.pexels.com/api/new/",
+      "default_model": {
+        "id": "default",
+        "display_name": "Pexels Search"
+      }
+    },
+    {
+      "vendor": "unsplash",
+      "kind": "stock",
+      "name": "Unsplash",
+      "transport": "unsplash",
+      "base_url": "https://api.unsplash.com",
+      "auth": {
+        "env": "UNSPLASH_KEY",
+        "required": true
+      },
+      "signup_url": "https://unsplash.com/developers",
+      "default_model": {
+        "id": "default",
+        "display_name": "Unsplash Search"
+      }
+    },
+    {
+      "vendor": "pixabay",
+      "kind": "stock",
+      "name": "Pixabay",
+      "transport": "pixabay",
+      "base_url": "https://pixabay.com/api",
+      "auth": {
+        "env": "PIXABAY_KEY",
+        "required": true
+      },
+      "signup_url": "https://pixabay.com/api/docs/",
+      "default_model": {
+        "id": "default",
+        "display_name": "Pixabay Search"
+      }
+    },
+    {
+      "vendor": "tavily",
+      "kind": "search",
+      "name": "Tavily",
+      "transport": "tavily",
+      "base_url": "https://api.tavily.com",
+      "auth": {
+        "env": "TAVILY_KEY",
+        "required": true
+      },
+      "signup_url": "https://tavily.com/",
+      "default_model": {
+        "id": "default",
+        "display_name": "Tavily Search"
+      }
+    },
+    {
+      "vendor": "brave",
+      "kind": "search",
+      "name": "Brave Search",
+      "transport": "brave",
+      "base_url": "https://api.search.brave.com/res/v1",
+      "auth": {
+        "env": "BRAVE_SEARCH_KEY",
+        "required": true
+      },
+      "signup_url": "https://brave.com/search/api/",
+      "default_model": {
+        "id": "default",
+        "display_name": "Brave Search"
+      }
+    }
+  ]
+}

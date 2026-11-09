@@ -1,0 +1,363 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>e2ee harness</title>
+<script type="module">
+// Test harness for the platform-owned js/e2ee.js. It drives the helper against an
+// in-page stand-in for the relay so the crypto runs under real Web Crypto in a real
+// browser, which is the only place it CAN run. Each scenario returns a plain value;
+// __run wraps it so a Go test reads one JSON blob per scenario.
+import { session, groupSession } from './e2ee.js';
+
+// relay mirrors what server/public/stream.go actually does to a text frame: stamp
+// _sender from the connection, route _to at one client, never echo to the sender.
+// A reconnect replaces a client id's handler with no leave broadcast, which is the
+// takeover the hub performs when the same cid comes back.
+function makeRelay() {
+  const clients = new Map();
+  return {
+    join(id, onFrame) { clients.set(id, onFrame); },
+    leave(id) { clients.delete(id); },
+    ws(id) {
+      return {
+        send(raw) {
+          const m = JSON.parse(raw);
+          m._sender = id;
+          const to = m._to;
+          for (const [cid, cb] of clients) {
+            if (cid === id) continue;
+            if (to && cid !== to) continue;
+            cb(JSON.parse(JSON.stringify(m)));
+          }
+        },
+      };
+    },
+  };
+}
+
+function waitFor(pred, label) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    (function poll() {
+      let v;
+      try { v = pred(); } catch (e) { return reject(e); }
+      if (v) return resolve(v);
+      if (Date.now() - started > 15000) return reject(new Error('timed out waiting for ' + label));
+      setTimeout(poll, 15);
+    })();
+  });
+}
+
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
+// peer wires one session object to the relay under an id and records what it
+// decrypts, so a scenario reads received text instead of re-implementing routing.
+function peer(relay, id, sess) {
+  const got = [];
+  const ws = relay.ws(id);
+  relay.join(id, async (m) => {
+    if (await sess.handleSignal(m, ws)) return;
+    if (m.type === 'chat' && m.ct) {
+      const t = await sess.decrypt(m);
+      if (t != null) got.push(t);
+    }
+  });
+  return { id, sess, ws, got, start: () => sess.start(ws), send: async (text) => ws.send(JSON.stringify(await sess.encrypt(text, id))) };
+}
+
+const PLAINTEXT_KEYS = ['text', 'content', 'body', 'message', 'msg', 'plaintext'];
+
+const scenarios = {
+  // The core two-party contract: handshake, fail-closed send before ready, envelope
+  // shape the relay guard accepts, round trip.
+  async twoParty() {
+    const relay = makeRelay();
+    const a = peer(relay, 'a', session({ roomId: 'room-1', password: 'hunter2' }));
+    const b = peer(relay, 'b', session({ roomId: 'room-1', password: 'hunter2' }));
+
+    let threwBeforeReady = false;
+    try { await a.sess.encrypt('too early', 'a'); } catch (e) { threwBeforeReady = true; }
+
+    await a.start(); await b.start();
+    await waitFor(() => a.sess.ready && b.sess.ready, 'both sessions ready');
+
+    const frame = await a.sess.encrypt('hello there', 'a');
+    assert(frame.type === 'chat' && frame.v === 1, 'envelope must be {type:chat,v:1,...}');
+    assert(typeof frame.iv === 'string' && typeof frame.ct === 'string', 'envelope needs base64 iv/ct');
+    for (const k of PLAINTEXT_KEYS) assert(!(k in frame), 'envelope must not carry a plaintext body field: ' + k);
+
+    a.ws.send(JSON.stringify(frame));
+    await waitFor(() => b.got.length === 1, 'b receives one message');
+
+    // A third peer must not displace an established two-party pair.
+    const c = peer(relay, 'c', session({ roomId: 'room-1', password: 'hunter2' }));
+    await c.start();
+    await a.send('still paired');
+    await waitFor(() => b.got.length === 2, 'the pair keeps talking past a third arrival');
+
+    return { threwBeforeReady, received: b.got[0], verifyMatches: (await a.sess.verifyCode()) === (await b.sess.verifyCode()) };
+  },
+
+  // A peer reloads: same client id, brand new ephemeral key, no leave frame. Both
+  // sides must re-handshake and keep talking.
+  async twoPartyReconnect() {
+    const relay = makeRelay();
+    const a = peer(relay, 'a', session({ roomId: 'room-2', password: 'pw' }));
+    const b = peer(relay, 'b', session({ roomId: 'room-2', password: 'pw' }));
+    let aReadyFires = 0;
+    a.sess.onReady(() => { aReadyFires++; });
+
+    await a.start(); await b.start();
+    await waitFor(() => a.sess.ready && b.sess.ready, 'first handshake');
+    await a.send('before reload');
+    await waitFor(() => b.got.length === 1, 'first message');
+
+    // The reload: a fresh session takes over the same id.
+    const b2 = peer(relay, 'b', session({ roomId: 'room-2', password: 'pw' }));
+    await b2.start();
+    await waitFor(() => b2.sess.ready, 'returning peer derives a key');
+
+    await a.send('after reload');
+    await waitFor(() => b2.got.length === 1, 'returning peer receives');
+    await b2.send('reply after reload');
+    await waitFor(() => a.got.length === 1, 'incumbent receives from returning peer');
+
+    return { aReadyFires, toReturning: b2.got[0], fromReturning: a.got[0] };
+  },
+
+  // Group: three members share an epoch key; a member that leaves cannot read what
+  // is sent after the rotation.
+  async group() {
+    const relay = makeRelay();
+    const mk = (id) => peer(relay, id, session({ roomId: 'room-3', password: 'pw', mode: 'group' }));
+    const a = mk('a'), b = mk('b'), c = mk('c');
+    const all = [a, b, c];
+    const roster = (ids) => { for (const p of all) { if (!ids.includes(p.id)) continue; p.sess.setSelf(p.id); p.sess.onRoster(ids); } };
+
+    for (const p of all) await p.start();
+    roster(['a', 'b', 'c']);
+    await waitFor(() => all.every((p) => p.sess.ready), 'every member holds an epoch key');
+
+    await a.send('to the whole room');
+    await waitFor(() => b.got.length === 1 && c.got.length === 1, 'both peers decrypt');
+
+    // c leaves; the remaining members re-key.
+    relay.leave('c');
+    const epBefore = a.sess.curEp;
+    for (const p of [a, b]) { p.sess.setSelf(p.id); p.sess.onRoster(['a', 'b']); }
+    await waitFor(() => a.sess.curEp > epBefore && b.sess.epochs[a.sess.curEp], 'epoch rotates after leave');
+
+    const afterLeave = await a.sess.encrypt('members only');
+    afterLeave._sender = 'a';
+    const readByB = await b.sess.decrypt(afterLeave);
+    const readByC = await c.sess.decrypt(afterLeave);
+
+    return { first: [b.got[0], c.got[0]], readByB, readByCIsNull: readByC === null };
+  },
+
+  // A group member reloads on the same client id, so the roster never changes and
+  // only its fresh pub reveals the reconnect. The distributor has to re-key or the
+  // returning member holds an epoch key it can never be sent again.
+  async groupReconnect() {
+    const relay = makeRelay();
+    const mk = (id, opts) => peer(relay, id, session(Object.assign({ roomId: 'room-8', password: 'pw', mode: 'group' }, opts || {})));
+    const a = mk('a'), b = mk('b'), c = mk('c');
+    const all = [a, b, c];
+    for (const p of all) await p.start();
+    for (const p of all) { p.sess.setSelf(p.id); p.sess.onRoster(['a', 'b', 'c']); }
+    await waitFor(() => all.every((p) => p.sess.ready), 'group ready');
+    await a.send('before the reload');
+    await waitFor(() => c.got.length === 1, 'c receives before reloading');
+
+    const epBefore = a.sess.curEp;
+    const c2 = mk('c');                       // same id, fresh session: the reload
+    await c2.start();
+    c2.sess.setSelf('c'); c2.sess.onRoster(['a', 'b', 'c']);
+    await waitFor(() => a.sess.curEp > epBefore, 'the distributor re-keys on the new pub');
+    await waitFor(() => c2.sess.ready, 'returning member holds the new epoch key');
+
+    await a.send('after the reload');
+    await waitFor(() => c2.got.length === 1 && b.got.length === 2, 'everyone still reads the room');
+    return { before: c.got[0], after: c2.got[0], stillPaired: b.got[1] };
+  },
+
+  // Ratchet: each message gets its own key and the key is destroyed after use, so a
+  // second decrypt of the same frame fails.
+  async ratchet() {
+    const relay = makeRelay();
+    const mk = (id) => peer(relay, id, session({ roomId: 'room-4', password: 'pw', mode: 'group', ratchet: true }));
+    const a = mk('a'), b = mk('b');
+    for (const p of [a, b]) await p.start();
+    for (const p of [a, b]) { p.sess.setSelf(p.id); p.sess.onRoster(['a', 'b']); }
+    await waitFor(() => a.sess.ready && b.sess.ready, 'ratchet group ready');
+
+    const f1 = await a.sess.encrypt('one'); f1._sender = 'a';
+    const f2 = await a.sess.encrypt('two'); f2._sender = 'a';
+    const first = await b.sess.decrypt(f1);
+    const second = await b.sess.decrypt(f2);
+    const replay = await b.sess.decrypt(f1);
+    return { first, second, replayIsNull: replay === null };
+  },
+
+  // A ratchet frame's index i comes off the wire (the untrusted relay stamps _sender)
+  // and drives the catch-up loop. An absurd i must be DROPPED, not force a run of that
+  // many awaited HKDF steps: unbounded, this hangs the tab; bounded, it returns null
+  // fast. b holds a chain for ep|'a' at a low index, so the gap here is ~1e9.
+  async ratchetLargeIndex() {
+    const relay = makeRelay();
+    const mk = (id) => peer(relay, id, session({ roomId: 'room-10', password: 'pw', mode: 'group', ratchet: true }));
+    const a = mk('a'), b = mk('b');
+    for (const p of [a, b]) await p.start();
+    for (const p of [a, b]) { p.sess.setSelf(p.id); p.sess.onRoster(['a', 'b']); }
+    await waitFor(() => a.sess.ready && b.sess.ready, 'ratchet group ready');
+
+    const f1 = await a.sess.encrypt('normal'); f1._sender = 'a';
+    const normal = await b.sess.decrypt(f1);
+
+    const f2 = await a.sess.encrypt('after'); f2._sender = 'a';
+    f2.i = 1e9;                                  // an index no honest sender reaches
+    const started = performance.now();
+    const huge = await b.sess.decrypt(f2);
+    const elapsedMs = performance.now() - started;
+
+    return { normal, hugeIsNull: huge === null, elapsedMs };
+  },
+
+  // Blobs: the chunk shape the e2ee-wire contract fixes, and a round trip.
+  async blob() {
+    const relay = makeRelay();
+    const a = peer(relay, 'a', session({ roomId: 'room-5', password: 'pw' }));
+    const b = peer(relay, 'b', session({ roomId: 'room-5', password: 'pw' }));
+    await a.start(); await b.start();
+    await waitFor(() => a.sess.ready && b.sess.ready, 'blob session ready');
+
+    const bytes = new Uint8Array(5000);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+    const blob = await a.sess.encryptBlob(bytes, { name: 'x.bin', type: 'application/octet-stream', chunkSize: 1200 });
+    const chunksAreStrings = blob.chunks.every((c) => typeof c === 'string');
+    const out = await b.sess.decryptBlob(blob);
+    let same = out && out.length === bytes.length;
+    if (same) for (let i = 0; i < bytes.length; i++) if (out[i] !== bytes[i]) { same = false; break; }
+    return { n: blob.meta.n, chunkCount: blob.chunks.length, chunksAreStrings, roundTrips: same };
+  },
+
+  // The archive lane: a row persisted with _sender stripped (which is what the
+  // durable write does) must reopen in a session built from the room and password
+  // alone, with no handshake and no peer.
+  async archive() {
+    const relay = makeRelay();
+    const a = peer(relay, 'a', session({ roomId: 'room-6', password: 'pw', archive: true }));
+    const b = peer(relay, 'b', session({ roomId: 'room-6', password: 'pw', archive: true }));
+    await a.start(); await b.start();
+    await waitFor(() => a.sess.ready && b.sess.ready, 'archive session ready');
+
+    const frame = await a.sess.encrypt('kept for later', 'a');
+    assert(frame.a === 1, 'archive frames must carry the a:1 marker');
+    a.ws.send(JSON.stringify(frame));
+    await waitFor(() => b.got.length === 1, 'live peer still reads an archive frame');
+
+    // What the durable write actually stores: iv, ct, type, v, ep, a. No _sender.
+    const persist = (f) => {
+      const row = {};
+      for (const k of ['iv', 'ct', 'type', 'v', 'ep', 'a']) if (k in f) row[k] = f[k];
+      return row;
+    };
+    const row = persist(frame);
+
+    const later = session({ roomId: 'room-6', password: 'pw', archive: true });
+    const fromHistory = await later.decrypt(row);
+    const untagged = Object.assign({}, row); delete untagged.a;
+    const fromHistoryUntagged = await later.decrypt(untagged);
+
+    const wrongPw = session({ roomId: 'room-6', password: 'wrong', archive: true });
+    const denied = await wrongPw.decrypt(row);
+
+    // The bug the archive lane fixes: a row written on the LIVE key binds the
+    // relay-stamped _sender the durable write strips, and rides an ephemeral nobody
+    // holds after the reload. It is unreadable to everyone, forever.
+    const liveOnly = peer(relay, 'd', session({ roomId: 'room-6b', password: 'pw' }));
+    const liveOnly2 = peer(relay, 'e', session({ roomId: 'room-6b', password: 'pw' }));
+    await liveOnly.start(); await liveOnly2.start();
+    await waitFor(() => liveOnly.sess.ready && liveOnly2.sess.ready, 'live-only session ready');
+    const liveRow = persist(await liveOnly.sess.encrypt('never persisted readably', 'd'));
+    const laterLive = session({ roomId: 'room-6b', password: 'pw' });
+    const liveFromHistory = await laterLive.decrypt(liveRow);
+
+    return {
+      live: b.got[0], fromHistory, fromHistoryUntagged,
+      deniedIsNull: denied === null,
+      liveLaneHistoryIsNull: liveFromHistory === null,
+    };
+  },
+
+  // Group archive history, and the refusal of the one combination that cannot work.
+  async archiveGroup() {
+    const g = session({ roomId: 'room-7', password: 'pw', mode: 'group', archive: true });
+    g.setSelf('a');
+    g.onRoster(['a']);
+    const frame = await g.encryptArchive('group history');
+    const row = {}; for (const k of ['iv', 'ct', 'type', 'v', 'a']) if (k in frame) row[k] = frame[k];
+    const later = session({ roomId: 'room-7', password: 'pw', mode: 'group', archive: true });
+    const fromHistory = await later.decrypt(row);
+
+    let refused = false;
+    try { groupSession({ roomId: 'r', password: 'p', archive: true, ratchet: true }); } catch (e) { refused = true; }
+    return { fromHistory, ratchetRefused: refused };
+  },
+
+  // Reconnect replay: a returning peer re-handshakes with a fresh ephemeral key. A
+  // malicious relay can replay the peer's STALE signed pub to force the incumbent to
+  // re-derive back to the old key, then replay the messages sent under it. The replay
+  // counter is namespaced by peer pubkey (not cleared on re-derive), so the stale pub
+  // lands on its old high-water mark and the replayed message is dropped, not shown as
+  // fresh. Clearing the window on re-derive (the old bug) re-accepted it.
+  async twoPartyReconnectReplay() {
+    const relay = makeRelay();
+    const a = peer(relay, 'a', session({ roomId: 'room-9', password: 'pw' }));
+
+    // b built by hand so the test can hold its frame handler and drive the replay
+    // through it deterministically, and capture A's first (stale) pub as it arrives.
+    const bSess = session({ roomId: 'room-9', password: 'pw' });
+    const bGot = [];
+    let stalePub = null;
+    const bWs = relay.ws('b');
+    const bHandle = async (m) => {
+      if (m.type === 'e2ee-pub' && stalePub === null) stalePub = JSON.parse(JSON.stringify(m));
+      if (await bSess.handleSignal(m, bWs)) return;
+      if (m.type === 'chat' && m.ct) { const t = await bSess.decrypt(m); if (t != null) bGot.push(t); }
+    };
+    relay.join('b', bHandle);
+
+    await a.start(); await bSess.start(bWs);
+    await waitFor(() => a.sess.ready && bSess.ready, 'first handshake');
+
+    // A sends under the FIRST key; B reads it, advancing that pub's counter to 1.
+    const m1 = await a.sess.encrypt('first key message', 'a');
+    a.ws.send(JSON.stringify(m1));
+    await waitFor(() => bGot.length === 1, 'b reads the first-key message');
+    const staleMsg = JSON.parse(JSON.stringify(m1)); staleMsg._sender = 'a';
+
+    // A reconnects with a fresh ephemeral key (the reload takeover on the same id).
+    const a2 = peer(relay, 'a', session({ roomId: 'room-9', password: 'pw' }));
+    await a2.start();
+    await waitFor(() => a2.sess.ready && bSess.ready, 're-handshake after reconnect');
+    await a2.send('second key message');
+    await waitFor(() => bGot.length === 2, 'b reads the second-key message under the new key');
+
+    // The malicious relay replays A's stale pub then the stale message straight to B.
+    assert(stalePub && stalePub.type === 'e2ee-pub', 'captured A stale pub');
+    await bHandle(stalePub);
+    await bHandle(staleMsg);
+
+    return { firstKeyMsg: bGot[0], secondKeyMsg: bGot[1], replayRejected: bGot.length === 2 };
+  },
+};
+
+window.__run = async function (name) {
+  try {
+    return { ok: true, value: await scenarios[name]() };
+  } catch (e) {
+    return { ok: false, error: String((e && e.stack) || e) };
+  }
+};
+window.__ready = true;
+</script>

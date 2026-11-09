@@ -1,0 +1,23 @@
+# Force LF line endings for text files on every platform. Without this, a Windows
+# checkout (core.autocrlf=true) rewrites files to CRLF, which inflates the byte
+# counts of the embedded prompts and guides and trips the size-budget tests in
+# pack/ (they pass on LF, fail on CRLF). Normalizing to LF also stops Git warning
+# about line-ending conversion on every add.
+* text=auto eol=lf
+
+# Windows-native scripts are expected to have CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets must never be normalized.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.syso binary
+*.zip binary
+*.gz binary
+*.exe binary

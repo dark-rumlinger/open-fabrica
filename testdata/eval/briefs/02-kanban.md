@@ -1,0 +1,1 @@
+A personal kanban board with To do, Doing and Done columns. I can add cards with a title and a short note, drag them between columns and reorder them, edit or delete a card, and the board is still there when I come back tomorrow. Cards can carry a coloured label (bug, feature, chore) and I can filter the board by label.

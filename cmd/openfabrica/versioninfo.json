@@ -1,0 +1,39 @@
+{
+  "FixedFileInfo": {
+    "FileVersion": {
+      "Major": 0,
+      "Minor": 2,
+      "Patch": 4,
+      "Build": 0
+    },
+    "ProductVersion": {
+      "Major": 0,
+      "Minor": 2,
+      "Patch": 4,
+      "Build": 0
+    },
+    "FileFlagsMask": "3f",
+    "FileFlags": "",
+    "FileOS": "040004",
+    "FileType": "01",
+    "FileSubType": "00"
+  },
+  "StringFileInfo": {
+    "Comments": "",
+    "CompanyName": "Open Fabrica",
+    "FileDescription": "Open Fabrica",
+    "FileVersion": "v0.2.4",
+    "InternalName": "openfabrica",
+    "OriginalFilename": "openfabrica.exe",
+    "ProductName": "Open Fabrica",
+    "ProductVersion": "v0.2.4"
+  },
+  "VarFileInfo": {
+    "Translation": {
+      "LangID": "0409",
+      "CharsetID": "04B0"
+    }
+  },
+  "IconPath": "openfabrica.ico",
+  "ManifestPath": ""
+}
