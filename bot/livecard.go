@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"openfabrica/db/models"
@@ -21,21 +22,34 @@ import (
 
 const cardMaxSteps = 4
 
+// atomicDur is a duration safe to read from the pump goroutines while a test
+// shrinks it; a pump started by one test can outlive it.
+type atomicDur struct{ v atomic.Int64 }
+
+func newAtomicDur(d time.Duration) *atomicDur {
+	a := &atomicDur{}
+	a.v.Store(int64(d))
+	return a
+}
+
+func (a *atomicDur) Load() time.Duration   { return time.Duration(a.v.Load()) }
+func (a *atomicDur) Store(d time.Duration) { a.v.Store(int64(d)) }
+
 // Timings, variables so tests can shrink them.
 var (
 	// Fastest a card is edited: Telegram allows about one edit a second per chat.
-	cardMinInterval = 2 * time.Second
+	cardMinInterval = newAtomicDur(2 * time.Second)
 	// A card goes quiet this long after the last event (unless the model is
 	// mid-call), so an idle project costs nothing.
-	cardIdleAfter = 20 * time.Second
+	cardIdleAfter = newAtomicDur(20 * time.Second)
 	// Longest a "thinking" flag is trusted without a fresh event.
 	cardThinkingMax = 5 * time.Minute
 	// A card that other messages have pushed up the chat is reposted at the
 	// bottom, but not more often than this.
-	cardRepostEvery = 15 * time.Second
+	cardRepostEvery = newAtomicDur(15 * time.Second)
 	// How often a quiet pump wakes to check for idleness and refresh the
 	// typing indicator.
-	cardTick = 4 * time.Second
+	cardTick = newAtomicDur(4 * time.Second)
 )
 
 // Verbosity levels.
@@ -278,9 +292,9 @@ func (s *BotService) pump(c *projectCard) {
 	for {
 		select {
 		case <-c.wake:
-		case <-time.After(cardTick):
+		case <-time.After(cardTick.Load()):
 		}
-		if wait := cardMinInterval - time.Since(lastRender); wait > 0 {
+		if wait := cardMinInterval.Load() - time.Since(lastRender); wait > 0 {
 			time.Sleep(wait)
 		}
 
@@ -291,7 +305,7 @@ func (s *BotService) pump(c *projectCard) {
 			l := *c.st.last
 			snap.last = &l
 		}
-		idle := time.Since(snap.lastEvent) > cardIdleAfter && (!snap.thinking || time.Since(snap.lastEvent) > cardThinkingMax)
+		idle := time.Since(snap.lastEvent) > cardIdleAfter.Load() && (!snap.thinking || time.Since(snap.lastEvent) > cardThinkingMax)
 		if idle {
 			snap.thinking = false
 		}
@@ -383,7 +397,7 @@ func (s *BotService) deliverCard(st *UserState, text string, kb map[string]any) 
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
 
-	stale := st.LiveCardStale.Load() && time.Since(st.LiveCardAt) >= cardRepostEvery
+	stale := st.LiveCardStale.Load() && time.Since(st.LiveCardAt) >= cardRepostEvery.Load()
 	if st.LiveCardMessageID != 0 && !stale {
 		if st.LiveCardText == text {
 			return

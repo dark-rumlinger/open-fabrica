@@ -12,10 +12,16 @@ import (
 // fastCards shrinks the card timings for the duration of a test.
 func fastCards(t *testing.T) {
 	t.Helper()
-	oldMin, oldIdle, oldRepost, oldTick := cardMinInterval, cardIdleAfter, cardRepostEvery, cardTick
-	cardMinInterval, cardIdleAfter, cardRepostEvery, cardTick = 20*time.Millisecond, 150*time.Millisecond, 0, 30*time.Millisecond
+	oldMin, oldIdle, oldRepost, oldTick := cardMinInterval.Load(), cardIdleAfter.Load(), cardRepostEvery.Load(), cardTick.Load()
+	cardMinInterval.Store(20 * time.Millisecond)
+	cardIdleAfter.Store(150 * time.Millisecond)
+	cardRepostEvery.Store(0)
+	cardTick.Store(30 * time.Millisecond)
 	t.Cleanup(func() {
-		cardMinInterval, cardIdleAfter, cardRepostEvery, cardTick = oldMin, oldIdle, oldRepost, oldTick
+		cardMinInterval.Store(oldMin)
+		cardIdleAfter.Store(oldIdle)
+		cardRepostEvery.Store(oldRepost)
+		cardTick.Store(oldTick)
 	})
 }
 
