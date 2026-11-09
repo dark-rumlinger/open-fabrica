@@ -35,15 +35,8 @@ We're certain you'll come up with the most amazing stuff yourself.
 
 ![Build end](docs/assets/build_2.jpg)
 
-## Free, Private and Portable
 
-- **Forever Free.** No sign-up, no subscription, no per-project fee. Download the binary and run it.
-- **No phone-home.** No usage or error reporting, no analytics SDK, no "check for updates" call. The admin panel is fully self-contained (every script, style, and font is served from the binary), so it works fully offline.
-- **Local First.** One binary, your data, your machine. The only time anything leaves your computer is when *you* trigger it.
-- **Bring your own key.** Use your own Anthropic, OpenAI, Google Gemini, OpenRouter, or Z.ai key, or run fully offline models with Ollama or llama.cpp.
-- **Portable.** Copy the binary and your `data/` folder to any Windows, macOS, or Linux box and it picks up where it left off, or use `openfabrica backup` / `openfabrica restore` for a single-file backup that works while the server runs. To remove an installation completely, send `/selfdestruct` to the Telegram bot (two confirmations); `openfabrica selfdestruct --dry-run` previews what it would erase. See [SECURITY.md](docs/SECURITY.md) for its limits.
 
-![Your idea](docs/assets/projects.jpg)
 
 ## Quick Start
 
@@ -85,6 +78,18 @@ We're certain you'll come up with the most amazing stuff yourself.
 - **Roles and permissions**: named roles with a wildcard permission catalogue; endpoints are gated by role name (`admin` passes every gate).
 - **Copy and share projects**: duplicate a project in one click, or export it as a `.of` file and import it into another instance.
 - **Free HTTPS** automatically, no manual actions needed.
+
+
+![Your idea](docs/assets/projects.jpg)
+
+
+## Free, Private and Portable
+
+- **Forever Free.** No sign-up, no subscription, no per-project fee. Download the binary and run it.
+- **No phone-home.** No usage or error reporting, no analytics SDK, no "check for updates" call. The admin panel is fully self-contained (every script, style, and font is served from the binary), so it works fully offline.
+- **Local First.** One binary, your data, your machine. The only time anything leaves your computer is when *you* trigger it.
+- **Bring your own key.** Use your own Anthropic, OpenAI, Google Gemini, OpenRouter, or Z.ai key, or run fully offline models with Ollama or llama.cpp.
+- **Portable.** Copy the binary and your `data/` folder to any Windows, macOS, or Linux box and it picks up where it left off, or use `openfabrica backup` / `openfabrica restore` for a single-file backup that works while the server runs. To remove an installation completely, send `/selfdestruct` to the Telegram bot (two confirmations); `openfabrica selfdestruct --dry-run` previews what it would erase. See [SECURITY.md](docs/SECURITY.md) for its limits.
 
 
 ## Before You Go Live
