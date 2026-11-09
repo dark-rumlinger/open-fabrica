@@ -181,6 +181,11 @@ func TestE2E_MatchmakingPairsIntoCappedRandomRoom(t *testing.T) {
 func TestE2E_ActionOnRelayIsRefusedVisibly(t *testing.T) {
 	e := newWSE2E(t, `INSERT INTO of_ws_endpoints (path, model) VALUES ('chat', 'relay')`)
 	a := e.dial("chat", "room=r&cid=c-alice-secret")
+	// Wait for A to be registered in the room before B joins, otherwise a slow
+	// machine can broadcast B's join before A is listening and A never sees it.
+	if _, err := until(t, a, typed("welcome")); err != nil {
+		t.Fatalf("A got no welcome: %v", err)
+	}
 	b := e.dial("chat", "room=r&cid=c-bob-secret-1")
 	if _, err := until(t, a, typed("join")); err != nil {
 		t.Fatalf("A never saw B join: %v", err)
