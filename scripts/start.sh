@@ -6,6 +6,9 @@ echo ""
 
 BINARY="./openfabrica"
 if [ ! -f "$BINARY" ]; then
+    echo "Regenerating embedded assets..."
+    go run openfabrica/internal/assetgen || { echo "Asset generation failed (admin UI)!"; exit 1; }
+    go run openfabrica/knowledge/encgen || { echo "Asset generation failed (knowledge)!"; exit 1; }
     echo "Building..."
     go build -o "$BINARY" ./cmd/openfabrica || { echo "Build failed!"; exit 1; }
 fi

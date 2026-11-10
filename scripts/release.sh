@@ -48,13 +48,13 @@ sedi "s/\"Patch\": [0-9]*/\"Patch\": $PATCH/g" cmd/openfabrica/versioninfo.json
 sedi "s/\"FileVersion\": \"[^\"]*\"/\"FileVersion\": \"$VERSION\"/" cmd/openfabrica/versioninfo.json
 sedi "s/\"ProductVersion\": \"[^\"]*\"/\"ProductVersion\": \"$VERSION\"/" cmd/openfabrica/versioninfo.json
 
-# Regenerate embedded assets before any build: the encrypted knowledge tree and the
-# minified admin UI + client helpers. The generators locate the repo root themselves
-# and are deterministic, so this is safe to run every time. set -e aborts the release
+# Regenerate embedded assets before any build: first the minified admin UI + client
+# helpers (JS minification), then the encrypted knowledge tree. The generators
+# locate the repo root themselves and are deterministic, so this is safe to run every time. set -e aborts the release
 # if either fails rather than shipping stale or cleartext embeds.
 echo "Regenerating embedded assets..."
-go run openfabrica/knowledge/encgen
 go run openfabrica/internal/assetgen
+go run openfabrica/knowledge/encgen
 
 echo "Building $VERSION..."
 
