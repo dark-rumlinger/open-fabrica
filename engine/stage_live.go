@@ -112,8 +112,10 @@ func (w *Worker) liveFlowCoverage(since time.Time) func() string {
 		if asked || w.pdb == nil || !w.userFlowsEnabled() {
 			return ""
 		}
+		// created_at has one-second resolution, so compare strictly: >= would count a page
+		// built earlier in the same second as this wake as one the wake just added.
 		rows, err := w.pdb.Reader().Query(
-			`SELECT path FROM of_files WHERE kind = 'page' AND is_deleted = 0 AND created_at >= ?`,
+			`SELECT path FROM of_files WHERE kind = 'page' AND is_deleted = 0 AND created_at > ?`,
 			since.UTC().Format("2006-01-02 15:04:05"))
 		if err != nil {
 			return ""
