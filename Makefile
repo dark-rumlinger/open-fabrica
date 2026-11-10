@@ -32,9 +32,11 @@ restore-version:
 .PHONY: generate build build-linux build-darwin build-windows build-all clean clean-data run dev
 
 # Regenerate the embedded assets: the encrypted knowledge tree (knowledge/encrypted/)
-# and the minified admin UI + client helpers (web/admin-min/, *.min.js). Every build
-# target depends on this so the binary never ships stale or cleartext embeds. Output
-# is deterministic, so this rewrites nothing when the sources are unchanged.
+# and the minified admin UI + client helpers (web/admin-min/, *.min.js). These are
+# build artifacts and are NOT committed (see .gitignore), so run this once after
+# cloning. Every build, test, vet and dev target depends on it because the go:embed
+# directives fail to compile without the generated files. Output is deterministic,
+# so this rewrites nothing when the sources are unchanged.
 generate:
 	go generate ./knowledge ./web
 
@@ -61,7 +63,7 @@ build-all: build-linux build-darwin build-windows
 run: build
 	./bin/$(BINARY)$(GOEXE)
 
-dev:
+dev: generate
 	go run -tags dev ./cmd/openfabrica
 
 # Remove build output only. NEVER touches data/ - projects, databases, and the
@@ -80,7 +82,7 @@ clean-data:
 .PHONY: test test-js test-race vet fmt fmt-check lint check
 
 # Run the full test suite.
-test:
+test: generate
 	go test ./...
 
 # Tests for the admin frontend (web/). Uses Node's built-in runner and assert -
@@ -94,11 +96,11 @@ test-js:
 # Race detector. Needs cgo and a C toolchain, which the normal build
 # deliberately does not (every dependency is pure Go, so the binary
 # cross-compiles without one). Not part of `check` for that reason.
-test-race:
+test-race: generate
 	CGO_ENABLED=1 go test -race ./...
 
 # Static analysis (built into the toolchain, no extra install).
-vet:
+vet: generate
 	go vet ./...
 
 # Rewrite source to gofmt canonical form.
@@ -113,13 +115,13 @@ fmt-check:
 	fi
 
 # Full linter (requires golangci-lint; see .golangci.yml).
-lint:
+lint: generate
 	@command -v golangci-lint >/dev/null 2>&1 || { \
 		echo "golangci-lint not installed: https://golangci-lint.run/welcome/install/"; exit 1; }
 	golangci-lint run
 
 # One-shot gate: format check, vet, build, and tests (Go + web).
-check: fmt-check vet
+check: fmt-check generate vet
 	go build ./...
 	go test ./...
 	@$(MAKE) test-js

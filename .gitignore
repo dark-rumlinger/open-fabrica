@@ -44,3 +44,11 @@ tmp/
 
 # openfabrica eval output
 eval-results/
+
+# Generated at build time by `make generate` (go generate ./knowledge ./web).
+# The go:embed directives need these to exist, so run it after cloning.
+/web/admin-min/
+/knowledge/encrypted/
+/tools/auth/js/auth.min.js
+/tools/api/js/e2ee.min.js
+/tools/api/js/ofnet.min.js

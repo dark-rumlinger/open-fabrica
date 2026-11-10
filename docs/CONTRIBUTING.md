@@ -24,6 +24,11 @@ from source, the local quality gates, and what a good change looks like.
 git clone https://github.com/dark-rumlinger/open-fabrica.git
 cd open-fabrica
 
+# The minified admin UI, encrypted knowledge tree and *.min.js helpers are build
+# artifacts (git-ignored). Generate them once after cloning; make dev, make build,
+# make test and make check run this for you.
+go generate ./knowledge ./web      # or: make generate
+
 # Fast path: run directly. `make dev` passes `-tags dev`, which serves the
 # admin UI from web/admin on disk, so edits show on reload without a rebuild.
 make dev
