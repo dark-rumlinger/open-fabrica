@@ -1,54 +1,52 @@
+![Build end](docs/assets/before_after.png)
+
 [![Latest release](https://img.shields.io/github/v/release/dark-rumlinger/open-fabrica?display_name=tag&sort=semver)](https://github.com/dark-rumlinger/open-fabrica/releases)
 [![Single binary](https://img.shields.io/badge/deploy-single%20binary-blue)](https://github.com/dark-rumlinger/open-fabrica/releases)
 [![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)](https://github.com/dark-rumlinger/open-fabrica/releases)
 [![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://github.com/dark-rumlinger/open-fabrica/releases)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](https://github.com/dark-rumlinger/open-fabrica/releases)
 
-# Welcome to the era of Open Fabrica
+# The Era of Open Fabrica
 
-Just imagine a wild party where webservers, coding agents, database engines, reducers and many more entities get an omnipotent baby together which is well trained, super easy to handle and doesn't cry. It's a complete ecosystem in a single file.
+**Build anything you dream of with one (literally) click. Instantly served to the world from your own machine. 100% private.**
 
-![Your idea](docs/assets/build_1.jpg)
+You don't need to know anything about hosting, databases, APIs or a certain "tech stack". Open Fabrica IS the stack. All in one single, portable file. 
 
-In fact, it is the **most powerful and user friendly ai-powered software in the observable universe**. In literally one click you go from an idea to a product, reachable by anyone in the world. Zero config needed, no matter the complexity.
+You have to experience her to believe it.
 
+## Ideas are Everywhere
 
-## Great Ideas are Everywhere
-
-It's meant for everyone. Literally. From school kids to teachers and from scientists to managers. Everyone has ideas and now there is no technical mountain to climb anymore. 
+Open Fabrica is meant for everyone. Literally. From school kids to teachers and from scientists to managers. Everyone has amazing ideas and now there are no more (technical) hurdles. Everything just works.
 
 So get your cheap coding plan or run a local model and start changing the world.
 
 ## What Can I Build?
 
-ANYTHING which runs in a browser, just using one (!) click.
+**Anything** which runs in a browser:
 
 - LLM-powered tools (chatbots, automated customer support, code generators etc.)
 - File sharing platforms
 - Apps for shops and businesses (like a coffee order board)
-- Web(apps/sites) (duh!)
+- Web(apps/sites)
 - 2D/3D multiplayer games
-- (Encrypted) communication apps
+- Encrypted (audio/video/text) communication apps
 - Realtime collaboration tools
 
-We're certain you'll come up with the most amazing stuff yourself.
+*We're certain you'll make things we haven't even thought of.*
 
 ![Build end](docs/assets/build_2.jpg)
 
-
-
-
 ## Quick Start
-
-**Important: This is an experimental release, things will break and tokens will be wasted. Ideally you're on a cheap coding plan or run a local model when your hardware allows for that.**
-
-[![1 minute setup](docs/assets/setup.png)](https://www.youtube.com/watch?v=n17afF0SnDo)
 
 1. **Download latest binary** from [Releases](https://github.com/dark-rumlinger/open-fabrica/releases).
 2. **Run it.** Double-click the file, or run `./openfabrica` in your terminal.
 3. **Open** `http://localhost:5734` in your browser.
 4. **Pick an AI provider.** The setup wizard lists the built-in providers (Anthropic, OpenAI, Gemini, OpenRouter, Z.ai, Ollama, llama.cpp, plus a few subscription coding plans) and asks for an API key. Ollama and llama.cpp need no key, so a local model works as soon as it is running. Any other OpenAI-compatible endpoint can be added later from the AI Providers page.
 5. **Describe your idea.** Open Fabrica takes it from there.
+
+*The video below guides you through the simple setup process:*
+
+[![1 minute setup](docs/assets/setup.png)](https://www.youtube.com/watch?v=n17afF0SnDo)
 
 ## Features
 
@@ -91,6 +89,7 @@ We're certain you'll come up with the most amazing stuff yourself.
 - **Bring your own key.** Use your own Anthropic, OpenAI, Google Gemini, OpenRouter, or Z.ai key, or run fully offline models with Ollama or llama.cpp.
 - **Portable.** Copy the binary and your `data/` folder to any Windows, macOS, or Linux box and it picks up where it left off, or use `openfabrica backup` / `openfabrica restore` for a single-file backup that works while the server runs. To remove an installation completely, send `/selfdestruct` to the Telegram bot (two confirmations); `openfabrica selfdestruct --dry-run` previews what it would erase. See [SECURITY.md](docs/SECURITY.md) for its limits.
 
+![Your idea](docs/assets/build_1.jpg)
 
 ## Before You Go Live
 
@@ -103,6 +102,8 @@ If you only run locally, the Quick Start is all you need. If you expose generate
 - **Keep the admin panel on localhost** (the default). See **Security** below.
 
 Health probes on either port (both bypass auth and routing): `GET /health` (alias `/healthz`) is a **liveness** check that always returns `{"status":"ok"}` while the process can answer requests. `GET /ready` (alias `/readyz`) is a **readiness** check that pings the database and returns `{"status":"ready"}` (200) when it can serve, or `{"status":"unavailable"}` (503) when the database is unreachable, point your load balancer or orchestrator at `/ready`.
+
+![Build end](docs/assets/plato_quote.png)
 
 ## Self-Hosting and HTTPS
 
