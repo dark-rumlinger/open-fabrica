@@ -1,5 +1,0 @@
-import{createUserMessage as g,createStreamingMessage as h}from"../../../ui/chat/message.js";import{startStream as S}from"../../../ui/chat/stream.js";import{humanizeError as x}from"../../../ui/errors.js";import{t as f}from"../../../core/i18n.js";function k({scope:c,projectId:d,feed:s,chatInput:r,toolCardMap:l,onActivity:u}){let t=null,e=null;function a(){t=null,r.setWorking("chat",!1)}function m(){if(t){try{t.abort()}catch{}if(e){const i=f("chat.stopped");e.appendText(`
-
-*${i}*`),e.finish(),e=null}a()}}c.add(m);function p(i){u(),s.append(g(i)),r.setWorking("chat",!0),e=h(),s.append(e.element),t=S(`/admin/api/chat/${d}/stream`,JSON.stringify({message:i,session_id:"admin"}),{onResult(o){for(const n of o.tools||[])l.start({id:n.id,name:n.name}),l.finish({id:n.id,name:n.name,result:n.result,is_error:n.is_error});o.text&&e?.appendText(o.text),e?.finish(),e=null,s.scrollToBottom(),a(),r.focus()},onError(o){if(e){const n=f("chat.sendFailed",{reason:x(String(o))});e.appendText(`
-
-*${n}*`),e.finish(),e=null}r.restore(i),a(),r.focus()}})}return{send:p,abort:m,isSending(){return t!==null}}}export{k as createSender};
