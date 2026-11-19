@@ -54,11 +54,11 @@ where the model must make a **choice it cannot infer from a rejection**
 
 ## Guardrails that keep this true (run under `go test ./engine/`)
 
-- **`TestNoCrossPackDuplication` / `TestNoContractRestatement`** (`engine/pack_duplication_test.go`)
+- **`TestNoCrossPackDuplication` / `TestNoContractRestatement`** (`internal/archtest/pack_duplication_test.go`)
   - the automatic backstop: ANY substantial prose line that appears verbatim in two
   packs, or any canonical contract line pasted into a pack that does not transclude
   it, fails here, no one has to remember a canary.
-- **`TestDetectorCodeSingleHome`** (`engine/gate_code_singlehome_test.go`) - the
+- **`TestDetectorCodeSingleHome`** (`internal/archtest/gate_code_singlehome_test.go`) - the
   detector guard. It greps save-time reject codes out of `tools/content` and issue
   categories out of `engine/validators`, then fails if a code is named in more than
   one pack, or in a pack that is not its declared `detectorPointerHome`. The code
@@ -88,21 +88,11 @@ where the model must make a **choice it cannot infer from a rejection**
   mechanism, and only the latter hits a full conjunction). Its limits are real and
   documented in the file: a paraphrase that drops both anchors passes, and no test sees
   a *contradiction*. Add a rule by adding one registry entry.
-- **`TestGovernedDocsMatchContracts`** (`engine/contracts_consistency_test.go`) - a
+- **`TestGovernedDocsMatchContracts`** (`internal/archtest/contracts_consistency_test.go`) - a
   governed fact must be transcluded or carry the contract's probe tokens; a drifted
   inline copy fails.
-- **`TestDocsReferenceRealTools` / `…RealActions`** (`engine/docs_consistency_test.go`)
+- **`TestDocsReferenceRealTools` / `…RealActions`** (`internal/archtest/docs_consistency_test.go`)
   - every tool/`action=` a frame names must exist in the registry.
-- **`TestStageFrameSizeBudget`** (`pack/promptsize_test.go`) - caps each stage frame in
-  bytes. This is the only guard a rewording cannot evade: `TestRuleSingleHome` reads
-  the words and so rewards a thesaurus, while a byte budget never reads them and prices
-  a restatement whatever it is called. Over budget means find the rule's one home and
-  cut the copy; raising the cap is the last resort. Lower the budget when a cut lands -
-  the test prints when one has drifted loose.
-- **`TestGuideCoreTotalBudget`** (`pack/guide_coresize_test.go`) - the same kind of
-  byte cap over the rendered capability cores. The frame budget above cannot see them
-  (it empties `{{GUIDES_CATALOGUE}}`), so without this a rule collapsed out of a frame
-  could reappear in a guide for free.
 - **`TestPlanFacetCarriesEveryChoiceBlock` / `TestPlanFacetOmitsBuildMechanics`**
   (`pack/guide_decision_test.go`) - PLAN carries no tools and emits JSON, so it gets a
   guide's `## Decision:`/`## Choose:` blocks and its section titles, never the build
@@ -131,15 +121,15 @@ Further drift guards enforcing the same one-home / no-drift discipline (run unde
   rejects any key `pack.Parse` has no case for, since an unrecognised key is dropped in
   silence and reads as working routing metadata; `TestKnownFrontMatterKeysAllParse`
   (`pack/pack_test.go`) keeps the exported allowlist from claiming a key Parse ignores.
-- **`TestNoDanglingGuideRecallReferences`** (`engine/guide_reference_test.go`) - every
+- **`TestNoDanglingGuideRecallReferences`** (`internal/archtest/guide_reference_test.go`) - every
   `slug=<x>` recall pointer in any `.go`/`.md` resolves to an embedded guide.
 - **Runtime ↔ docs** - `TestReducerRuntimeMatchesCanonicalSurface`,
   `TestReducerSurfaceDocumented`, `TestRuntimeFrameKeysDocumentedAndEmitted`
-  (`engine/runtime_frames_drift_test.go`): the reducer `ctx` surface and every client-facing
+  (`internal/archtest/runtime_frames_drift_test.go`): the reducer `ctx` surface and every client-facing
   WS frame key are both emitted by the runtime AND documented in the knowledge tree.
-- **`TestTriggerEventsContractCoversProjectFacingEvents`** (`engine/trigger_events_drift_test.go`)
+- **`TestTriggerEventsContractCoversProjectFacingEvents`** (`internal/archtest/trigger_events_drift_test.go`)
   - every project-facing event constant is documented in the `trigger-events` contract.
-- **`TestDocsCiteRealTestNames`** (`engine/drift_guards_test.go`) - every test a doc or a
+- **`TestDocsCiteRealTestNames`** (`internal/archtest/drift_guards_test.go`) - every test a doc or a
   Go comment names by identifier still exists. Naming the test IS how a reader finds the
   enforcement behind a rule, so a renamed test leaves the citation reading as working
   provenance while pointing at nothing. Go comments are in scope because that is where the
@@ -152,7 +142,7 @@ Further drift guards enforcing the same one-home / no-drift discipline (run unde
   `TestPlanSecurityContractResolves`, `TestBriefImpliesEncryptionAccountVeto`.
 - **Knowledge front-matter & index** - `TestGuidesHaveRequiredFrontMatter`,
   `TestMentalModelContractsResolve`, `TestEveryGuideAppearsInAssembledIndex`
-  (`knowledge/knowledge_test.go`); `TestNoEmptyGuideCores`, `TestGuideCoreNotOversized`
+  (`knowledge/knowledge_test.go`); `TestNoEmptyGuideCores`
   (`pack/guide_coresize_test.go`).
 
 ## Adding a capability guide - checklist
@@ -249,9 +239,9 @@ referencing it or the clause is gutted:
 - `store.AssetLoadingNote` - the canonical asset channels; used by the cross-origin
   and same-origin asset gates. Guard: `TestAssetRejectionsShareTheChannelNote`.
 - `tools.CodeMissingArg` - the one `missing_arg` code across the schema check and the
-  `RequireString`/`RequireAction` helpers. Guard: `TestRequireHelpersCarryMissingArgCode`.
+  `RequireString`/`RequireAction` helpers.
 - `store.HumanSize` - size ceilings derive from the byte constants, never hand-typed
-  KB prose. Guard: `TestBodySizeProseMatchesConstants`.
+  KB prose.
 
 Direction: the triplicated `store.Issue` renderers (save gate / `check` /
 post-build validator) collapse onto one `store`-level explainer per category, each

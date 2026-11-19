@@ -118,6 +118,15 @@ type Deps struct {
 	// project_state reports the resolved policy so the build model knows what it is
 	// building under; a per-project override wins over it (config.ResolveCSP).
 	PublicCSP string
+
+	// BuildVersion and BuildBuiltAt identify the engine binary that creates runs.
+	// Empty in tests and dev builds, which is fine - the DB columns default to ''.
+	BuildVersion string
+	BuildBuiltAt string
+
+	// ScheduleRunner executes a named scheduled task during user-flow replays.
+	// engine.New defaults it to e.RunScheduleForFlow when nil.
+	ScheduleRunner func(ctx context.Context, projectID int, name string) error
 }
 
 // toolEnv returns the tool env every engine tool call runs under: the injected
@@ -129,10 +138,11 @@ func (d *Deps) toolEnv() *tools.Env {
 		return d.ToolEnv
 	}
 	env := &tools.Env{
-		Bus:        d.Bus,
-		Encryptor:  d.Encryptor,
-		JWTManager: d.JWTManager,
-		PublicPort: d.PublicPort,
+		Bus:                   d.Bus,
+		Encryptor:             d.Encryptor,
+		JWTManager:            d.JWTManager,
+		PublicPort:            d.PublicPort,
+		RunScheduleByNameFunc: d.ScheduleRunner,
 	}
 	if d.DB != nil {
 		env.GlobalDB = d.DB.DB

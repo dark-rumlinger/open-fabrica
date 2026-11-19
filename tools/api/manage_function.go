@@ -39,17 +39,7 @@ func init() {
 		MaxResult: 16000,
 		Category:  "api",
 		OneLiner:  "Mount a sandboxed JS function at /api/<path> for custom request logic (compute, external API calls, multi-step writes).",
-		WhenToUse: `Reach for this when a request needs COMPUTED server logic the declarative
-tools can't express: a custom response shape, an external API call with the
-API key kept server-side and the result reshaped, multi-step
-validate-then-write, or a derived/aggregated payload. Prefer manage_api for
-plain table CRUD (POST/GET/PUT/DELETE over one table) and a read-only view
-endpoint for joins/aggregations; prefer manage_triggers for "when X happens do
-Y" side-effects fired off a data/auth/payment event. The handler is sandboxed
-JS - handler(req, ctx), synchronous (no async/await), no npm/fs/network beyond
-ctx; the code arg and the server_functions guide carry the ctx surface. Grant
-secrets explicitly via the secrets allowlist, and read the current source with
-action=get before fixing it.`,
+		WhenToUse: `Custom computed server logic, external API calls with server-kept secrets, or multi-step validate-then-write. Prefer manage_api for table CRUD/views and manage_triggers for event side-effects. Sandboxed synchronous JS handler(req, ctx) (see server_functions guide); grant secrets via the secrets allowlist and action=get before fixing.`,
 		Actions: []tools.Action{
 			&FunctionCreate{},
 			&FunctionUpdate{},
@@ -108,7 +98,7 @@ func marshalSecrets(names []string) (string, string) {
 
 type FunctionCreate struct {
 	EndpointPath string   `arg:"endpoint_path,required" desc:"Literal path suffix (no /api/, no leading slash, no :param). The handler mounts at /api/<path>."`
-	Code         string   `arg:"code,required"          desc:"Server-side handler JS. MUST define function handler(req, ctx) that RETURNS the response - either an envelope { status, body, headers } or a bare value (becomes 200 JSON; a string body is sent verbatim). req = { method, path, query, headers, body (parsed JSON), user:{id,role}|null }. ctx.query(sql, params) runs a read-only SELECT; ctx.insert(table,row) / ctx.update(table,patch,where) / ctx.upsert(table,row,[keyCol]) DECLARE writes applied after a successful return. Only ctx.query takes SQL - every write argument is a plain OBJECT the platform turns into a statement: where is equality matches ({id: 7} or {user_id: uid, post_id: pid}, keys ANDed), NOT a SQL string ('id = 7' throws a TypeError, and the response for a thrown handler is a generic 500 that will not name the type). patch supports {\"col\":{\"$increment\":n}} / {\"$decrement\":n} - prefer it over reading a value and writing back the sum, which loses concurrent updates. ctx.fetch(url,{method,headers,body}) is an SSRF-guarded outbound call; ctx.secret(name) reads a granted secret; ctx.llm(prompt,{system,max_tokens}) runs one completion on the project's ALREADY-configured LLM provider (no separate key) and returns the text - use it to summarize/classify/extract; ctx.checkout({amount, success_url, cancel_url, description, metadata}) opens a hosted payment checkout and returns {checkout_url, payment_id} (the payments guide); ctx.now() is the clock. Runs sandboxed and SYNCHRONOUS: no async/await, no require/import, no fs/network beyond ctx.fetch."`
+	Code         string   `arg:"code,required"          desc:"Synchronous sandboxed JS defining function handler(req, ctx) returning {status, body, headers} or a bare value (200 JSON). No async/await, require/import, or fs. ctx provides query(sql,params), insert/update/upsert (plain-object row/patch/where, never SQL strings), fetch, secret, llm, checkout, now, random (see server_functions guide)."`
 	Methods      string   `arg:"methods"                desc:"Comma-separated HTTP methods to answer (GET,POST,PUT,PATCH,DELETE). Default POST."`
 	RequiresAuth bool     `arg:"requires_auth"          desc:"When true, the request must carry a valid token; req.user is then {id, role}. When false req.user is null."`
 	CorsOrigins  string   `arg:"cors_origins"           desc:"Comma-separated allowed CORS origins for cross-site browser calls. Omit for same-origin only."`

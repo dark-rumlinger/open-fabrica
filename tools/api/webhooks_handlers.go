@@ -195,8 +195,7 @@ func webhookDelete(ctx *tools.ToolContext, name string) (*tools.Result, error) {
 }
 
 // webhookUpdate takes typed args straight from WebhookUpdate. An empty url and
-// a nil isEnabled mean "leave unchanged", matching the prior map path where the
-// Run method only forwarded those keys when set.
+// a nil isEnabled mean "leave unchanged".
 func webhookUpdate(ctx *tools.ToolContext, name, url string, isEnabled *bool) (*tools.Result, error) {
 	var setClauses []string
 	var values []any

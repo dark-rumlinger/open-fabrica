@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"openfabrica/events"
+	"openfabrica/internal/replaybudget"
 )
 
 // MarshalToolResult encodes a tool result without HTML escaping. The output goes
@@ -161,6 +162,14 @@ func (e *Executor) execute(ctx context.Context, toolCtx *ToolContext, name strin
 
 	applyHints(def, args, result)
 
+	if result.Success && shouldDirtyFlows(def, args) {
+		replaybudget.MarkDirty(replaybudget.Scope{
+			DB:        toolCtx.DB,
+			ProjectID: toolCtx.ProjectID,
+			RunID:     toolCtx.RunID,
+		})
+	}
+
 	payload["success"] = result.Success
 	if toolCtx.Bus != nil {
 		toolCtx.Bus.Publish(events.NewEvent(events.EventToolExecuted, toolCtx.ProjectID, payload))
@@ -231,9 +240,23 @@ func (e *Executor) marshalError(msg string) (string, error) {
 // not killed (nothing can stop it from here), so the change can commit after the model
 // was told the call failed. Retrying blind then duplicates a row or a send. Empty for a
 // read-only action, whose retry is harmless.
-func timeoutWriteNote(def *ToolDef, args map[string]any) string {
+func isReadOnlyAction(def *ToolDef, args map[string]any) bool {
 	action, _ := args["action"].(string)
-	if meta, ok := def.ActionMeta[action]; ok && meta.ReadOnly {
+	meta, ok := def.ActionMeta[action]
+	return ok && meta.ReadOnly
+}
+
+// shouldDirtyFlows reports whether a successful tool call may have changed the
+// app or of_test.js, invalidating a cached clean-green user-flow result.
+func shouldDirtyFlows(def *ToolDef, args map[string]any) bool {
+	if def == nil || def.PreservesFlows || isReadOnlyAction(def, args) {
+		return false
+	}
+	return true
+}
+
+func timeoutWriteNote(def *ToolDef, args map[string]any) string {
+	if isReadOnlyAction(def, args) {
 		return ""
 	}
 	return " - the call may still complete in the background, so check the current state (project_state, a get or list) before retrying"

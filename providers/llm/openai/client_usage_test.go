@@ -77,24 +77,28 @@ func TestParseResponseSubtractsCachedFromInclusivePromptTokens(t *testing.T) {
 // rather than through two transport harnesses.
 func TestNormalizeUsageBoundaries(t *testing.T) {
 	cases := []struct {
-		name                       string
-		prompt, completion, cached int
-		wantInput, wantCacheRead   int
+		name                                   string
+		prompt, completion, cached, cacheWrite int
+		wantInput, wantCacheRead, wantWrite    int
 	}{
-		{"no cache reported", 500, 20, 0, 500, 0},
-		{"inclusive: cached is a subset", 1000, 20, 800, 200, 800},
-		{"inclusive: fully cached prefix", 800, 20, 800, 0, 800},
-		{"exclusive: cached exceeds prompt", 200, 20, 800, 200, 800},
-		{"empty usage", 0, 0, 0, 0, 0},
+		{"no cache reported", 500, 20, 0, 0, 500, 0, 0},
+		{"inclusive: cached is a subset", 1000, 20, 800, 0, 200, 800, 0},
+		{"inclusive: fully cached prefix", 800, 20, 800, 0, 0, 800, 0},
+		{"inclusive: cache write and read", 1200, 20, 800, 300, 100, 800, 300},
+		{"exclusive: cached exceeds prompt", 200, 20, 800, 0, 200, 800, 0},
+		{"empty usage", 0, 0, 0, 0, 0, 0, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeUsage(tc.prompt, tc.completion, tc.cached)
+			got := normalizeUsage(tc.prompt, tc.completion, tc.cached, tc.cacheWrite)
 			if got.InputTokens != tc.wantInput {
 				t.Errorf("InputTokens = %d, want %d", got.InputTokens, tc.wantInput)
 			}
 			if got.CacheReadInputTokens != tc.wantCacheRead {
 				t.Errorf("CacheReadInputTokens = %d, want %d", got.CacheReadInputTokens, tc.wantCacheRead)
+			}
+			if got.CacheCreationInputTokens != tc.wantWrite {
+				t.Errorf("CacheCreationInputTokens = %d, want %d", got.CacheCreationInputTokens, tc.wantWrite)
 			}
 			if got.OutputTokens != tc.completion {
 				t.Errorf("OutputTokens = %d, want %d", got.OutputTokens, tc.completion)

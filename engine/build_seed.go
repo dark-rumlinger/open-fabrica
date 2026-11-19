@@ -164,29 +164,25 @@ func renderChecklist(d *sql.DB) string {
 // IS the entry (leaves wired in through deps). With no home, a page-route task's
 // JS paths are dropped so no scaffold is rendered; any other task keeps its order.
 func exportHomePaths(paths []string, editedByAnyTask map[string]bool) []string {
-	isJS := func(p string) bool {
-		lp := strings.ToLower(strings.TrimSpace(p))
-		return strings.HasSuffix(lp, ".js") || strings.HasSuffix(lp, ".mjs")
-	}
 	ownsRoute, anyEdited := false, false
 	for _, p := range paths {
 		if isPageRoutePath(p) {
 			ownsRoute = true
 		}
-		if isJS(p) && editedByAnyTask[normPlanPath(p)] {
+		if isClientModulePath(p) && editedByAnyTask[normPlanPath(p)] {
 			anyEdited = true
 		}
 	}
 	home := -1
 	for i, p := range paths {
-		if isJS(p) && isStoreModuleName(p) {
+		if isClientModulePath(p) && isStoreModuleName(p) {
 			home = i
 			break
 		}
 	}
 	if home < 0 && (!ownsRoute || anyEdited) {
 		for i, p := range paths {
-			if isJS(p) && !editedByAnyTask[normPlanPath(p)] {
+			if isClientModulePath(p) && !editedByAnyTask[normPlanPath(p)] {
 				home = i
 				break
 			}
@@ -198,7 +194,7 @@ func exportHomePaths(paths []string, editedByAnyTask map[string]bool) []string {
 		}
 		out := make([]string, 0, len(paths))
 		for _, p := range paths {
-			if !isJS(p) {
+			if !isClientModulePath(p) {
 				out = append(out, p)
 			}
 		}
@@ -338,9 +334,7 @@ func (w *Worker) buildSystemPrompt(plan *Plan) string {
 	if w.deps != nil && w.deps.ToolRegistry != nil {
 		reg = w.deps.ToolRegistry
 		packs = w.effectivePacks()
-		if w.deps.DB != nil {
-			caps, _ = llm.LoadCapabilities(w.deps.DB.DB)
-		}
+		caps = w.loadCapabilities("buildSystemPrompt")
 		// The always-preloaded set's routing prose. A preloaded tool reaches the model as a
 		// wire schema with only its 130-char one-liner; WhenToUse is emitted by find_tool,
 		// which the ground rules forbid for these, so without this block that guidance never
@@ -352,7 +346,8 @@ func (w *Worker) buildSystemPrompt(plan *Plan) string {
 		if planNeedsBackbone(plan) {
 			always = append(always, tools.BuildBackboneToolNames...)
 		}
-		if prose := w.deps.ToolRegistry.RoutingProse(always, caps, StageBuild); prose != "" {
+		isFlowGate := w.userFlowsEnabled() && planHasUserFlowsTask(plan)
+		if prose := w.deps.ToolRegistry.RoutingProseFiltered(always, caps, StageBuild, buildTestingOmitActions(isFlowGate)); prose != "" {
 			extra += "## Your always-loaded tools\n\n" + prose + "\n\n"
 		}
 	}
@@ -367,6 +362,7 @@ func (w *Worker) buildSystemPrompt(plan *Plan) string {
 		}
 	}
 	conds, omit := w.buildPromptConditions(plan)
+	isFlowGate := conds["flows"]
 	return pack.Assemble(pack.AssembleInput{
 		Stage:      StageBuild,
 		Wave:       pack.Wave,
@@ -374,9 +370,9 @@ func (w *Worker) buildSystemPrompt(plan *Plan) string {
 		Extra:      extra,
 		Conditions: conds,
 		OmitLaws:   omit,
-		// Capability-dead guides are left out of every index: naming one
-		// advertises tools that cannot be loaded, and the search costs turns.
-		HiddenGuides: capabilityDeadGuides(packs, reg, caps),
+		// Capability-dead guides (and user_flows outside the flow gate) are left out of
+		// every index: naming one advertises tools that cannot be loaded.
+		HiddenGuides: userFlowsHiddenGuides(capabilityDeadGuides(packs, reg, caps), isFlowGate),
 	}).System
 }
 
@@ -388,30 +384,22 @@ func (w *Worker) buildSeedGuides(plan *Plan) (map[string]bool, []string) {
 	ps := w.effectivePacks()
 	want := planGuideSlugs(plan, ps)
 	var capNotes []string
-	if len(want) > 0 && w.deps.DB != nil && w.deps.DB.DB != nil {
-		// Capability-aware prefetch: warn inline about an implied guide whose tools are
-		// capability-gated off, instead of letting the builder burn a find_tool round. Fail-
-		// open on a load error: a build with an unchecked guide beats one missing its contract.
-		if caps, err := llm.LoadCapabilities(w.deps.DB.DB); err != nil {
-			w.logger.Warn("load capabilities failed; guide prefetch not capability-checked", "error", err)
-		} else {
-			want, capNotes = guideCapabilityGaps(want, ps, w.deps.ToolRegistry, caps)
-		}
+	if len(want) > 0 && w.deps != nil && w.deps.DB != nil && w.deps.DB.DB != nil {
+		caps := w.loadCapabilities("buildSeedGuides")
+		want, capNotes = guideCapabilityGaps(want, ps, w.deps.ToolRegistry, caps)
 	}
 	return want, capNotes
 }
 
 // buildSharedSeed renders the block a build carries that is NOT about this project: the
-// auto-prefetched guide cores, the routing prose for the tools the plan pulled in, the
-// install's capability notes. It leads the seed because it is the most widely shared text in
-// the request. Guide cores come from a fixed corpus, so two projects that select the same
-// guides carry the same bytes, and a rebuild of one project carries the same bytes as the
-// build before it. Project-unique text sitting in front of it (as goal/voice/design used to)
-// would put a few KB of never-repeated content ahead of tens of KB of repeatable content and
-// make none of it shareable.
+// routing prose for the tools the plan pulled in, the install's capability notes, and the
+// auto-prefetched guide cores. It leads the seed because it is the most widely shared text in
+// the request: two projects that select the same tools and guides carry the same bytes, and a
+// rebuild of one project carries the same bytes as the build before it.
 //
-// Ordered most-shared first within the block too: corpus guides, then the plan's tool prose,
-// then install notes, then the conditional window-bridge rule.
+// Tool routing prose leads the block so it sits immediately after the system prompt's
+// always-loaded tools and deferred catalogue, keeping every tool instruction in one
+// contiguous region before the corpus guide cores.
 func (w *Worker) buildSharedSeed(plan *Plan) string {
 	var b strings.Builder
 	b.WriteString(buildSharedSentinel)
@@ -419,6 +407,31 @@ func (w *Worker) buildSharedSeed(plan *Plan) string {
 
 	ps := w.effectivePacks()
 	want, capNotes := w.buildSeedGuides(plan)
+
+	// Routing prose for the tools this plan pulled in beyond the always-loaded set. Placed
+	// first so it is not buried beneath tens of KB of guide cores: a preloaded tool reaches
+	// the model as its 130-char one-liner only (WhenToUse is emitted by find_tool, which the
+	// model is told not to call for these), so its disambiguation and per-action required args
+	// must be immediately visible. Plan-derived and stable, so cached once.
+	if w.deps != nil && w.deps.ToolRegistry != nil {
+		caps := w.loadCapabilities("buildSharedSeed")
+		isFlowGate := w.userFlowsEnabled() && planHasUserFlowsTask(plan)
+		if prose := w.deps.ToolRegistry.RoutingProseFiltered(planExtraTools(plan), caps, StageBuild, buildTestingOmitActions(isFlowGate)); prose != "" {
+			b.WriteString("\n## Tools this plan loaded for you\n\n")
+			b.WriteString("This is when to reach for each over its neighbours.\n\n")
+			b.WriteString(prose)
+			b.WriteString("\n")
+		}
+	}
+
+	if len(capNotes) > 0 {
+		b.WriteString("\n## Unavailable in this configuration\n")
+		b.WriteString("These are settled facts about this install, not obstacles to work around. Each names what to do instead; do it, and never spend a turn searching for the missing tool.\n")
+		for _, n := range capNotes {
+			b.WriteString("- " + n + "\n")
+		}
+	}
+
 	var locked map[string]string
 	if plan != nil {
 		locked = lockedDecisionChoices(plan.Decisions)
@@ -440,10 +453,10 @@ func (w *Worker) buildSharedSeed(plan *Plan) string {
 	// manage_authoritative (the create + set_reducer tool) without that exact
 	// decision wording. Keyed on both signals so a reducer never ships without
 	// its contract just because the decision was recorded differently.
-	if plan != nil && (planLocksAuthoritative(plan.Decisions) || planWritesReducer(plan)) {
+	if plan != nil && (plan.LocksAuthoritativeRealtime() || planWritesReducer(plan)) {
 		b.WriteString("\n## Writing the reducer (authoritative endpoints)\n\n")
 		lead := "This build writes an authoritative reducer."
-		if planLocksAuthoritative(plan.Decisions) {
+		if plan.LocksAuthoritativeRealtime() {
 			lead = "Your plan locked `realtime model = authoritative`."
 		}
 		b.WriteString(lead + " The reducer's contract follows - read it before writing one; the sandbox deliberately throws on things that work everywhere else. Worked example, seeding, matchmaking handoff, hidden-info `view()`: recall the realtime_signaling guide's `authoritative-games` section.\n\n")
@@ -451,30 +464,6 @@ func (w *Worker) buildSharedSeed(plan *Plan) string {
 		b.WriteString("\n")
 	}
 
-	// Routing prose for the tools this plan pulled in beyond the always-loaded set. A
-	// preloaded tool reaches the model as its 130-char one-liner only (WhenToUse is emitted
-	// by find_tool, which the model is told not to call for these), so the relay-vs-tick-vs-
-	// authoritative disambiguation must be delivered here. Plan-derived and stable, so cached once.
-	if w.deps != nil && w.deps.ToolRegistry != nil {
-		var caps llm.Capabilities
-		if w.deps.DB != nil && w.deps.DB.DB != nil {
-			caps, _ = llm.LoadCapabilities(w.deps.DB.DB)
-		}
-		if prose := w.deps.ToolRegistry.RoutingProse(planExtraTools(plan), caps, StageBuild); prose != "" {
-			b.WriteString("\n## Tools this plan loaded for you\n\n")
-			b.WriteString("This is when to reach for each over its neighbours.\n\n")
-			b.WriteString(prose)
-			b.WriteString("\n")
-		}
-	}
-
-	if len(capNotes) > 0 {
-		b.WriteString("\n## Unavailable in this configuration\n")
-		b.WriteString("These are settled facts about this install, not obstacles to work around. Each names what to do instead; do it, and never spend a turn searching for the missing tool.\n")
-		for _, n := range capNotes {
-			b.WriteString("- " + n + "\n")
-		}
-	}
 	// A plan below the full client_js_split threshold can still ship two sibling client-JS
 	// files that need to share a symbol. There the split guide is not injected, so without
 	// this the model defaults to a `window.*` bridge the save gate rejects only reactively.
@@ -501,27 +490,6 @@ func lockedDecisionChoices(decisions []PlanDecision) map[string]string {
 		}
 	}
 	return out
-}
-
-// planRealtimeChoice returns the locked "realtime model" decision's choice in
-// lowercase (topic and choices as the realtime guide's decision block names
-// them), or "" when the plan carries no such decision.
-func planRealtimeChoice(decisions []PlanDecision) string {
-	for _, d := range decisions {
-		if isRealtimeModelTopic(d.Topic) {
-			if canon := normalizeRealtimeChoice(d.Choice); canon != "" {
-				return canon
-			}
-			return strings.ToLower(strings.TrimSpace(d.Choice))
-		}
-	}
-	return ""
-}
-
-// planLocksAuthoritative reports whether the plan locked the realtime model
-// decision to the authoritative reducer.
-func planLocksAuthoritative(decisions []PlanDecision) bool {
-	return planRealtimeChoice(decisions) == "authoritative"
 }
 
 // planWritesReducer reports whether any plan task pulled in manage_authoritative,
@@ -627,7 +595,7 @@ func renderLockedDecisions(decisions []PlanDecision) string {
 			fmt.Fprintf(&b, " - %s", r)
 		}
 		if dec.Check != nil && strings.TrimSpace(dec.Check.Field) != "" &&
-			decisionCheckResolvable(dec.Check.Artifact, dec.Check.Field) && validDecisionOps[dec.Check.Op] {
+			DecisionCheckResolvable(dec.Check.Artifact, dec.Check.Field) && validDecisionOps[dec.Check.Op] {
 			fmt.Fprintf(&b, " (verified: %s `%s`.%s %s %v)", dec.Check.Artifact, dec.Check.ID, dec.Check.Field, dec.Check.Op, dec.Check.Value)
 		}
 		b.WriteString("\n")

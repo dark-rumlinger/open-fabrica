@@ -30,7 +30,7 @@ func TestNormalizeRealtimeChoice(t *testing.T) {
 
 	p := &Plan{Decisions: []PlanDecision{{Topic: "Realtime model", Choice: "Authoritative reducer"}}}
 	normalizeRealtimeChoices(p)
-	if !planLocksAuthoritative(p.Decisions) {
+	if !p.LocksAuthoritativeRealtime() {
 		t.Fatalf("decision %+v did not normalize to a locked authoritative model", p.Decisions[0])
 	}
 	if w := planCheckWarnings(&Plan{Decisions: []PlanDecision{{Topic: "realtime model", Choice: "peer to peer"}}}); len(w) == 0 {
@@ -68,7 +68,7 @@ func TestPlanWritesReducer(t *testing.T) {
 			{ID: "game", Title: "Match reducer", Tools: []string{"manage_authoritative"}},
 		},
 	}
-	if planLocksAuthoritative(mm.Decisions) {
+	if mm.LocksAuthoritativeRealtime() {
 		t.Fatal("a matchmaking decision must not report as locked-authoritative")
 	}
 	if !planWritesReducer(mm) {
@@ -103,5 +103,41 @@ func TestRealtimeChoiceNone(t *testing.T) {
 	plan.Tasks[0].Tools = []string{"manage_relay"}
 	if !slices.Contains(buildAllTools(plan), "manage_relay") {
 		t.Error("a planner-declared realtime tool must stay")
+	}
+}
+
+// A locked tick/authoritative decision settles the realtime wire tool, so the
+// keyword-inferred manage_relay schema must not ride the preload; a planner-
+// declared manage_relay (a second, relay-only endpoint) always survives.
+func TestLockedRealtimeDropsInferredRelay(t *testing.T) {
+	task := PlanTaskSpec{ID: "net", Title: "Multiplayer chat", Intent: "players share a room", Tools: []string{"manage_tick"}}
+	has := func(names []string, n string) bool {
+		for _, x := range names {
+			if x == n {
+				return true
+			}
+		}
+		return false
+	}
+
+	unlocked := &Plan{Tasks: []PlanTaskSpec{task}}
+	if !has(buildAllTools(unlocked), "manage_relay") {
+		t.Error("without a locked decision the relay inference must stand (a miss costs a find_tool)")
+	}
+
+	tick := &Plan{Tasks: []PlanTaskSpec{task}, Decisions: []PlanDecision{{Topic: "realtime model", Choice: "tick"}}}
+	if has(buildAllTools(tick), "manage_relay") {
+		t.Error("tick-locked plan still preloads keyword-inferred manage_relay")
+	}
+
+	declared := PlanTaskSpec{ID: "notify", Title: "Notifications", Intent: "live notifications", Tools: []string{"manage_relay"}}
+	mixed := &Plan{Tasks: []PlanTaskSpec{task, declared}, Decisions: []PlanDecision{{Topic: "realtime model", Choice: "tick"}}}
+	if !has(buildAllTools(mixed), "manage_relay") {
+		t.Error("planner-declared manage_relay was dropped by the locked-decision gate")
+	}
+
+	relay := &Plan{Tasks: []PlanTaskSpec{task}, Decisions: []PlanDecision{{Topic: "realtime model", Choice: "relay"}}}
+	if !has(buildAllTools(relay), "manage_relay") {
+		t.Error("relay-locked plan lost the relay tool")
 	}
 }

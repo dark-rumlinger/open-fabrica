@@ -1,7 +1,7 @@
 /**
- * Admin audit log: who changed what in the control plane, newest first. Read-only
- * and admin-only (the endpoint is gated); the control plane can read and decrypt
- * every project, so this is the first place to look after an unexpected change.
+ * Admin audit log: who changed what in the control plane, newest first. Read-only;
+ * the control plane can read and decrypt every project, so this is the first
+ * place to look after an unexpected change.
  */
 
 import { h, clear } from '../../core/dom.js';

@@ -16,9 +16,14 @@ import (
 
 	"openfabrica/analysis"
 	"openfabrica/db"
+	"openfabrica/internal/browser"
+
 	"openfabrica/internal/dbh"
+
 	"openfabrica/internal/flowsnap"
+
 	"openfabrica/store"
+
 	"openfabrica/tools"
 )
 
@@ -89,7 +94,7 @@ type DiagTestEndpoint struct {
 	RequestBody    map[string]any `arg:"request_body"           desc:"Request body for POST/PUT/PATCH requests."`
 	ExpectedStatus int            `arg:"expected_status"        desc:"Expected HTTP status code; omit to accept any 2xx (a create returns 201, not 200). For a deliberate negative test pass the intended status (e.g. 404) so it records as a pass."`
 	ExpectedFields []string       `arg:"expected_fields"        desc:"Fields that must exist in the JSON response."`
-	AuthToken      string         `arg:"auth_token"             desc:"USUALLY UNNECESSARY - the probe authenticates itself against an auth-gated endpoint (it mints a token for an existing user and retries once if a request 401s), so leave this empty. Pass a token ONLY to probe as a specific user or role."`
+	AuthToken      string         `arg:"auth_token"             desc:"USUALLY UNNECESSARY - the probe authenticates itself against an auth-gated endpoint (it mints a token for an existing user and retries once if a request 401s), so leave this empty. Pass a token ONLY to probe as a specific user or role." sensitive:"true"`
 }
 
 func (a *DiagTestEndpoint) ActionName() string { return "test_endpoint" }
@@ -123,7 +128,7 @@ func (a *DiagTestEndpoint) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	case "", "GET", "HEAD", "OPTIONS":
 		return a.run(ctx)
 	}
-	// A write probe leaves its row behind: a "Test / Hack" order on the live board, a
+	// A write probe leaves its row behind: a test record in a table, or a
 	// probe account in the users table. Run it between a snapshot and its restore, the way
 	// flow replays do. Where no snapshot can be taken (no opener here, or real visitors are
 	// on the site) it runs as before.
@@ -142,7 +147,7 @@ func (a *DiagTestEndpoint) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 			if restoreErr != nil {
 				data["rollback_error"] = "the data this probe wrote could not be fully rolled back: " + restoreErr.Error()
 			} else {
-				data["rolled_back"] = "the probe's write was rolled back so test rows do not ship; to keep data, insert it with manage_data"
+				data["rolled_back"] = "the probe's DB writes were rolled back after the response so test rows do not ship; check response_preview for the handler's output rather than querying DB state post-probe (to keep data, insert it with manage_data)"
 			}
 		}
 	}
@@ -202,11 +207,13 @@ func (a *DiagTestEndpoint) run(ctx *tools.ToolContext) (*tools.Result, error) {
 		"status": status, "expected_status": expectedStatusLabel(a.ExpectedStatus),
 		"response_size": len(respBody),
 	}
+	if len(respBody) > 0 {
+		result["response_preview"] = string(respBody[:min(len(respBody), 500)])
+	}
 	if autoAuth {
 		result["auto_auth"] = true
 	}
 	if !expectedStatusOK(status, a.ExpectedStatus) {
-		result["response_preview"] = string(respBody[:min(len(respBody), 500)])
 		probeErr := expectedStatusError(a.ExpectedStatus, status)
 		if cause := serverErrorCause(ctx.DB, a.EndpointPath, status); cause != "" {
 			result["server_error"] = cause
@@ -219,7 +226,6 @@ func (a *DiagTestEndpoint) run(ctx *tools.ToolContext) (*tools.Result, error) {
 		if json.Unmarshal(respBody, &parsed) != nil {
 			// Expected fields promise an object. A bare list, a scalar, or a non-JSON body
 			// carries none of them - the silent shape break this check exists to catch.
-			result["response_preview"] = string(respBody[:min(len(respBody), 500)])
 			return &tools.Result{Success: false, Error: fmt.Sprintf("expected a JSON object carrying %s, but the response is not a JSON object (a bare list or non-JSON body)", strings.Join(a.ExpectedFields, ", ")), Data: result}, nil
 		}
 		var missing []string
@@ -249,7 +255,7 @@ type DiagTestURL struct {
 	Method         string         `arg:"method"            desc:"HTTP method." enum:"GET,POST,PUT,PATCH,DELETE" default:"GET"`
 	RequestBody    map[string]any `arg:"request_body"      desc:"Request body for POST/PUT/PATCH."`
 	ExpectedStatus int            `arg:"expected_status"   desc:"Expected HTTP status code; omit to accept any 2xx. For a deliberate negative test pass the intended status (e.g. 404 for an unknown route) so it records as a pass."`
-	AuthToken      string         `arg:"auth_token"        desc:"Bearer token."`
+	AuthToken      string         `arg:"auth_token"        desc:"Bearer token." sensitive:"true"`
 }
 
 func (a *DiagTestURL) ActionName() string { return "test_url" }
@@ -744,7 +750,7 @@ func (a *DiagTestPage) probe(ctx *tools.ToolContext, path string) (*tools.Result
 	if rerr != nil {
 		// No browser, or an infra error driving it: degrade to the status-only
 		// result rather than fail a healthy page on a browser-less host or a flake.
-		if errors.Is(rerr, store.ErrBrowserUnavailable) {
+		if errors.Is(rerr, browser.ErrBrowserUnavailable) {
 			result["render_check"] = "skipped: no browser available to verify rendering"
 		} else {
 			result["render_check"] = "skipped: " + rerr.Error()

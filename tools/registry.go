@@ -112,6 +112,25 @@ func (r *Registry) Get(name string) (*ToolDef, error) {
 	return t, nil
 }
 
+// SensitiveArgs lists the args of a tool that carry a credential, in any of
+// its actions. Unknown tools have none.
+func (r *Registry) SensitiveArgs(name string) []string {
+	if r == nil {
+		return nil
+	}
+	def, err := r.Get(name)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range def.Params {
+		if p.Sensitive {
+			out = append(out, p.Name)
+		}
+	}
+	return out
+}
+
 func (r *Registry) sortedNames() []string {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {

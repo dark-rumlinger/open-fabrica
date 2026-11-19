@@ -241,19 +241,27 @@ func (s *session) executeToolCalls(ctx context.Context, spec *SessionSpec, st *s
 			continue
 		}
 
-		// find_tool: serviced locally - loads schemas into the live set. Answered off the
-		// dispatch path, so it repeats that path's arg repair and result truncation rather
-		// than inheriting them.
+		// find_tool: serviced locally - loads schemas into the live set.
 		if tc.Name == tools.FindToolName {
-			findArgs, _ := tools.RepairAndUnmarshalArgs(tc.Arguments)
-			s.events.toolStart(tc, findArgs)
-			payload := s.truncateToolResult(tc.Name, s.handleFindTool(ctx, spec, st, findArgs))
-			st.tr.Append(llm.Message{Role: llm.RoleTool, Content: payload, ToolCallID: tc.ID})
-			s.events.toolResult(tc, findArgs, payload, tools.ResultIsSuccess(payload))
+			s.executeFindTool(ctx, spec, st, tc)
 			continue
 		}
 
 		args, validErr := s.validateAndParse(spec, st, tc)
+
+		if validErr == "" {
+			if omit := spec.OmitToolActions[tc.Name]; len(omit) > 0 {
+				if act, _ := args["action"].(string); omit[act] {
+					validErr = "action " + act + " is not available in this phase"
+				}
+			}
+		}
+
+		if validErr == "" && spec.BlockFlowActions && tc.Name == "manage_testing" {
+			if act, _ := args["action"].(string); act == "write_flows" || act == "test_flows" {
+				validErr = "user-flow tests (write_flows/test_flows) run in the post-build flow gate after the build and repairs finish; complete the build checklist first without writing of_test.js."
+			}
+		}
 
 		// Guard: screen. Stop force-stops the session after this iteration.
 		if validErr == "" && spec.Guard != nil {
@@ -378,10 +386,7 @@ func (s *session) validateAndParse(spec *SessionSpec, st *segState, tc llm.ToolC
 // unavailableToolError classifies why a name is not callable so the model
 // gets an actionable reason.
 func (s *session) unavailableToolError(spec *SessionSpec, name string) string {
-	caps, capsErr := llm.LoadCapabilities(s.deps.DB.DB)
-	if capsErr != nil {
-		s.logger.Warn("unavailableToolError: load capabilities failed", "err", capsErr)
-	}
+	caps := s.loadCapabilities("unavailableToolError")
 	stage := strings.ToLower(spec.Stage)
 	switch s.deps.ToolRegistry.Availability(name, caps, stage) {
 	case tools.AvailLoadable:
@@ -396,17 +401,28 @@ func (s *session) unavailableToolError(spec *SessionSpec, name string) string {
 }
 
 // hiddenGuides returns the capability guides no loaded provider can back, for the
-// guide tool to leave out. Nil when capabilities cannot be read.
-func (s *session) hiddenGuides() map[string]bool {
-	caps, err := llm.LoadCapabilities(s.deps.DB.DB)
-	if err != nil {
-		return nil
+// guide tool to leave out. Fails closed when capabilities cannot be read.
+func (s *session) hiddenGuides(extra map[string]bool) map[string]bool {
+	var hidden map[string]bool
+	caps := s.loadCapabilities("hiddenGuides")
+	if ps, err := pack.Embedded(); err == nil {
+		hidden = capabilityDeadGuides(ps, s.deps.ToolRegistry, caps)
 	}
-	ps, err := pack.Embedded()
-	if err != nil {
-		return nil
+	if len(extra) == 0 {
+		return hidden
 	}
-	return capabilityDeadGuides(ps, s.deps.ToolRegistry, caps)
+	out := make(map[string]bool, len(hidden)+len(extra))
+	for k, v := range hidden {
+		if v {
+			out[k] = true
+		}
+	}
+	for k, v := range extra {
+		if v {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // dispatchTool executes the tool when validErr is empty, else surfaces the
@@ -446,7 +462,12 @@ func (s *session) dispatchTool(ctx context.Context, spec *SessionSpec, st *segSt
 					tctx.RunID = s.runID
 				}
 				if tc.Name == "manage_guides" {
-					tctx.HiddenGuides = s.hiddenGuides()
+					tctx.HiddenGuides = s.hiddenGuides(spec.ExtraHiddenGuides)
+				}
+				if tc.Name == "manage_schedules" {
+					tctx.RunScheduleNowFunc = func(_ context.Context, taskID int64) (map[string]any, error) {
+						return runScheduleNow(s.deps, completeDepsFor(s.deps, s.caller.limiter, s.logger), s.pdb, s.projectID, s.logger, taskID)
+					}
 				}
 			},
 		})
@@ -474,13 +495,19 @@ func toolFailureJSON(msg string) string {
 // already-repaired argument map (see tools.RepairAndUnmarshalArgs). The names/query/
 // browse core is shared with live chat via tools.ServiceFindTool; the repeat-
 // search guard stays here because it keys on per-segment state.
+func (s *session) executeFindTool(ctx context.Context, spec *SessionSpec, st *segState, tc llm.ToolCall) {
+	findArgs, _ := tools.RepairAndUnmarshalArgs(tc.Arguments)
+	s.events.toolStart(tc, findArgs)
+	payload := s.truncateToolResult(tc.Name, s.handleFindTool(ctx, spec, st, findArgs))
+	st.tr.Append(llm.Message{Role: llm.RoleTool, Content: payload, ToolCallID: tc.ID})
+	s.events.toolResult(tc, findArgs, payload, tools.ResultIsSuccess(payload))
+}
+
 func (s *session) handleFindTool(ctx context.Context, spec *SessionSpec, st *segState, raw map[string]any) string {
 	args := tools.ParseFindToolArgs(raw)
+	args.OmitActions = spec.OmitToolActions
 
-	caps, capsErr := llm.LoadCapabilities(s.deps.DB.DB)
-	if capsErr != nil {
-		s.logger.Warn("find_tool: load capabilities failed; capability-gated tools hidden", "err", capsErr)
-	}
+	caps := s.loadCapabilities("find_tool")
 
 	// A search this segment already ran is answered from the earlier verdict.
 	// Rewording the same intent is the shape a fruitless hunt takes, and each

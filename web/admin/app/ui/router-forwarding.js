@@ -17,11 +17,10 @@ import { isPublicDomain } from './helpers.js';
 const PROTOCOL_NAMES = { upnp: 'UPnP', natpmp: 'NAT-PMP', pcp: 'PCP' };
 
 /**
- * Renders the notice into container when forwarding is enabled. Admin-only
- * and best-effort: any error renders nothing.
+ * Renders the notice into container when forwarding is enabled. Best-effort:
+ * any error renders nothing.
  */
 export async function loadRouterForwardingNotice(container, project) {
-  if (!state.isAdmin()) return;
   if (!isPublicDomain(project.domain)) return;
   let status;
   try {

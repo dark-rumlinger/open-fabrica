@@ -81,13 +81,13 @@ function renderProvidersForKind(container, kind, scope) {
       iconName: copy.emptyIcon,
       title: copy.emptyTitle,
       description: copy.emptyDescription,
-      action: state.isAdmin() ? { label: copy.addLabel, onClick: () => showAddProviderModal(kind, () => list.reload()) } : null,
+      action: { label: copy.addLabel, onClick: () => showAddProviderModal(kind, () => list.reload()) },
     },
     errorMsg: copy.errorMsg,
   });
 
   const headerActions = [];
-  if (state.isAdmin() && kind === 'llm') {
+  if (kind === 'llm') {
     headerActions.push({
       label: t('prov.syncAll'),
       iconName: 'rotate-ccw',
@@ -95,14 +95,12 @@ function renderProvidersForKind(container, kind, scope) {
       onClick: () => syncAllProviders(list.reload),
     });
   }
-  if (state.isAdmin()) {
-    headerActions.push({
-      label: copy.addLabel,
-      iconName: 'plus',
-      kind: 'primary',
-      onClick: () => showAddProviderModal(kind, list.reload),
-    });
-  }
+  headerActions.push({
+    label: copy.addLabel,
+    iconName: 'plus',
+    kind: 'primary',
+    onClick: () => showAddProviderModal(kind, list.reload),
+  });
 
   const header = pageHeader({
     title: copy.title,
@@ -167,7 +165,6 @@ function renderProviderCard(p, expandedModels, reload) {
     : null;
 
   const modelsContainer = h('div', { className: 'mt-4' });
-  const isAdmin = state.isAdmin();
 
   const card = h('div', { className: 'card mb-4' }, [
     h('div', { className: 'card__header' }, [
@@ -186,25 +183,23 @@ function renderProviderCard(p, expandedModels, reload) {
     ]),
     healthNote(p),
     h('div', { className: 'flex flex-wrap items-center gap-2 mt-4' }, [
-      ...(isAdmin ? [actionBtn(t('prov.test'), 'activity', () => testProvider(p.id))] : []),
+      actionBtn(t('prov.test'), 'activity', () => testProvider(p.id)),
       ...(showModelsBtn ? [actionBtn(t('prov.models'), 'list', () => toggleModels(p, expandedModels, modelsContainer))] : []),
-      ...(isAdmin && showModelsBtn && p.supports_sync ? [
+      ...(showModelsBtn && p.supports_sync ? [
         actionBtn(t('prov.syncModels'), 'rotate-ccw', () => syncModels(p.id, () => {
           if (expandedModels.has(p.id)) loadModels(p, modelsContainer);
         })),
       ] : []),
-      ...(isAdmin && showModelsBtn && p.probes_caps ? [
+      ...(showModelsBtn && p.probes_caps ? [
         actionBtn(t('pm.checkCapabilities'), 'activity', () => checkCapabilities(p.id, () => {
           if (expandedModels.has(p.id)) loadModels(p, modelsContainer);
         })),
       ] : []),
-      ...(isAdmin && showDefaultBtn && !p.is_default
+      ...(showDefaultBtn && !p.is_default
         ? [actionBtn(t('prov.setDefault'), 'star', () => setDefaultProvider(p.id, reload))]
         : []),
-      ...(isAdmin ? [
-        actionBtn(t('common.edit'), 'edit', () => showEditProviderModal(p, reload)),
-        actionBtn(t('common.delete'), 'trash', () => confirmDeleteProvider(p, reload), 'btn btn--danger btn--sm'),
-      ] : []),
+      actionBtn(t('common.edit'), 'edit', () => showEditProviderModal(p, reload)),
+      actionBtn(t('common.delete'), 'trash', () => confirmDeleteProvider(p, reload), 'btn btn--danger btn--sm'),
     ]),
     modelsContainer,
   ]);

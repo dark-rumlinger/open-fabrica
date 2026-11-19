@@ -243,7 +243,7 @@ func DataImportCSV(ctx *tools.ToolContext, a *SQLImportCSV) (*tools.Result, erro
 		// the raw value would put a plaintext password or secret in the table.
 		for j, col := range colNames {
 			if kind, ok := secureCols[col]; ok {
-				processed, pErr := store.ProcessSecureValue(kind, values[j], ctx.Encryptor)
+				processed, pErr := security.ProcessSecureValue(kind, values[j], ctx.Encryptor)
 				if pErr != nil {
 					return tools.Fail("row %d: cannot secure %s column %s: %v - nothing was imported", i+1, kind, col, pErr), nil
 				}
@@ -355,7 +355,7 @@ func DataImportJSON(ctx *tools.ToolContext, a *SQLImportJSON) (*tools.Result, er
 		for j, col := range cols {
 			val := row[col]
 			if kind, ok := secureCols[col]; ok {
-				processed, pErr := store.ProcessSecureValue(kind, val, ctx.Encryptor)
+				processed, pErr := security.ProcessSecureValue(kind, val, ctx.Encryptor)
 				if pErr != nil {
 					return tools.Fail("row %d: cannot secure %s column %s: %v - nothing was imported", i+1, kind, col, pErr), nil
 				}

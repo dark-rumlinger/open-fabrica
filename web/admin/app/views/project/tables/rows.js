@@ -16,7 +16,6 @@ import { showAddRowModal, showEditRowModal, confirmDeleteRow, showAddColumnModal
  */
 export async function showTableRows(container, table, projectId, onBack, hooks) {
   clear(container);
-  const canWrite = state.isAdmin();
 
   let currentOffset = 0;
   const pageSize = 50;
@@ -43,17 +42,15 @@ export async function showTableRows(container, table, projectId, onBack, hooks) 
         title: t('tbl.exportCsv'),
         onClick: () => exportCsv(projectId, table),
       }, [h('span', { innerHTML: icon('download') }), ' CSV']),
-      ...(canWrite ? [
-        h('button', {
-          className: 'btn btn--sm btn--secondary',
-          title: t('tbl.addColumn'),
-          onClick: () => showAddColumnModal(projectId, table, () => showTableRows(container, table, projectId, onBack, hooks)),
-        }, [h('span', { innerHTML: icon('plus') }), ' ' + t('tbl.column')]),
-        h('button', {
-          className: 'btn btn--primary btn--sm',
-          onClick: () => showAddRowModal(projectId, table, reload),
-        }, [h('span', { innerHTML: icon('plus') }), ' ' + t('tbl.addRow')]),
-      ] : []),
+      h('button', {
+        className: 'btn btn--sm btn--secondary',
+        title: t('tbl.addColumn'),
+        onClick: () => showAddColumnModal(projectId, table, () => showTableRows(container, table, projectId, onBack, hooks)),
+      }, [h('span', { innerHTML: icon('plus') }), ' ' + t('tbl.column')]),
+      h('button', {
+        className: 'btn btn--primary btn--sm',
+        onClick: () => showAddRowModal(projectId, table, reload),
+      }, [h('span', { innerHTML: icon('plus') }), ' ' + t('tbl.addRow')]),
     ]),
   ]);
 
@@ -106,7 +103,7 @@ export async function showTableRows(container, table, projectId, onBack, hooks) 
       return;
     }
     if (r.stale) return;
-    renderRows(dataContainer, r.data, projectId, table, currentOffset, pageSize, changePage, reload, canWrite, { sortCol, sortDir, onSort });
+    renderRows(dataContainer, r.data, projectId, table, currentOffset, pageSize, changePage, reload, { sortCol, sortDir, onSort });
   }
 
   await loadRows();
@@ -124,7 +121,7 @@ async function exportCsv(projectId, table) {
   }
 }
 
-function renderRows(container, data, projectId, table, offset, limit, onPageChange, reload, canWrite, sortState) {
+function renderRows(container, data, projectId, table, offset, limit, onPageChange, reload, sortState) {
   clear(container);
   if (!data.rows || data.rows.length === 0) {
     // Deleting the last row on a later page leaves that page empty; step back
@@ -144,13 +141,13 @@ function renderRows(container, data, projectId, table, offset, limit, onPageChan
   tableEl.appendChild(h('thead', {}, [
     h('tr', {}, [
       ...cols.map(col => headerCell(col, schema[col], sortState)),
-      ...(canWrite ? [h('th', { style: { width: '100px' } }, t('projects.col.actions'))] : []),
+      h('th', { style: { width: '100px' } }, t('projects.col.actions')),
     ]),
   ]));
 
   const tbody = h('tbody');
   for (const row of data.rows) {
-    tbody.appendChild(buildRowTr(cols, row, projectId, table, data, reload, canWrite));
+    tbody.appendChild(buildRowTr(cols, row, projectId, table, data, reload));
   }
   tableEl.appendChild(tbody);
 
@@ -204,10 +201,10 @@ function headerCell(col, schemaType, sortState) {
   return th;
 }
 
-function buildRowTr(cols, row, projectId, table, data, reload, canWrite) {
+function buildRowTr(cols, row, projectId, table, data, reload) {
   return h('tr', {}, [
     ...cols.map(col => buildCellTd(col, row[col])),
-    ...(canWrite ? [h('td', {}, [
+    h('td', {}, [
       h('div', { className: 'flex items-center gap-1' }, [
         h('button', {
           className: 'btn btn--ghost btn--sm',
@@ -222,7 +219,7 @@ function buildRowTr(cols, row, projectId, table, data, reload, canWrite) {
           onClick: () => confirmDeleteRow(projectId, table, row, reload),
         }, [h('span', { innerHTML: icon('trash') })]),
       ]),
-    ])] : []),
+    ]),
   ]);
 }
 

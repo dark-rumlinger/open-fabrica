@@ -204,3 +204,34 @@ func TestRegisterInviteOnlyLeavesNoAccountOnBadInvite(t *testing.T) {
 		t.Error("valid invite should create exactly one account")
 	}
 }
+
+// A re-issued session is built from the database: it keeps the tenant only
+// while the membership is active, and carries the role the user has now.
+func TestMintSessionUsesCurrentRoleAndMembership(t *testing.T) {
+	db := tenancyDB(t)
+	db.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, role TEXT)`)
+	db.Exec(`INSERT INTO users (id, email, role) VALUES (5, 'ada@example.com', 'editor')`)
+	db.Exec(`INSERT INTO of_tenants (id, slug, name) VALUES (1,'acme','Acme')`)
+	db.Exec(`INSERT INTO of_tenant_members (tenant_id, user_id, role, status) VALUES (1, 5, 'owner', 'active')`)
+
+	jwt := security.NewJWTManager(strings.Repeat("k", 32), time.Hour)
+	h := &Handler{deps: &Deps{JWTManager: jwt}}
+	ae := &authEndpointConfig{RoleColumn: "role", DefaultRole: "user"}
+
+	token, _, err := h.mintSession(db, 1, 5, 1, "ada@example.com", "users", ae)
+	if err != nil {
+		t.Fatalf("mintSession: %v", err)
+	}
+	claims, err := jwt.Validate(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.TenantID != 1 || claims.TenantRole != "owner" || claims.Role != "editor" {
+		t.Errorf("claims = tenant %d / %q, role %q; want 1 / owner / editor", claims.TenantID, claims.TenantRole, claims.Role)
+	}
+
+	db.Exec(`UPDATE of_tenant_members SET status = 'disabled' WHERE user_id = 5`)
+	if _, status, err := h.mintSession(db, 1, 5, 1, "ada@example.com", "users", ae); err == nil || status != http.StatusForbidden {
+		t.Errorf("a removed member still got a tenant session (status %d, err %v)", status, err)
+	}
+}

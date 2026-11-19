@@ -19,7 +19,7 @@ func TestLoadFailureKind(t *testing.T) {
 		{"same-origin document is hard", network.ResourceTypeDocument, true, "load_failed"},
 		{"same-origin xhr is hard", network.ResourceTypeXHR, true, "load_failed"},
 		{"same-origin fetch is hard", network.ResourceTypeFetch, true, "load_failed"},
-		{"same-origin image is soft", network.ResourceTypeImage, true, "load_failed_asset"},
+		{"same-origin image is hard", network.ResourceTypeImage, true, "load_failed"},
 		{"same-origin font is soft", network.ResourceTypeFont, true, "load_failed_asset"},
 		{"same-origin media is soft", network.ResourceTypeMedia, true, "load_failed_asset"},
 		{"same-origin other is soft", network.ResourceTypeOther, true, "load_failed_asset"},
@@ -81,20 +81,20 @@ func TestLoadFailureKind_SameProjectHostStaysHard(t *testing.T) {
 // re-seed a newly-revealed site without looping on a persistent one.
 func TestRuntimeSignature(t *testing.T) {
 	frame := func(fn, file, lc string) string {
-		return "\n    at " + fn + " (http://azure-falcon-j6byl.localhost:5733/files/" + file + ":" + lc + ")"
+		return "\n    at " + fn + " (http://app.localhost:5733/files/" + file + ":" + lc + ")"
 	}
 	entryFrame := func(v, lc string) string {
-		return "\n    at init (http://azure-falcon-j6byl.localhost:5733/files/game.entry.js?v=" + v + ":" + lc + ")"
+		return "\n    at init (http://app.localhost:5733/files/app.entry.js?v=" + v + ":" + lc + ")"
 	}
-	const hdr = `[console.error] "hook onPlanetArrival failed" TypeError: rng is not a function`
+	const hdr = `[console.error] "hook onUpdate failed" TypeError: fn is not a function`
 
 	layer1 := []string{
-		hdr + frame("makeFloraMesh", "game.terrain.js", "218:30") + frame("buildFlora", "game.terrain.js", "178:18") + entryFrame("3184fbe2", "66:5"),
-		hdr + frame("makeCreature", "game.creatures.js", "94:40") + frame("spawnCreatures", "game.creatures.js", "68:22"),
+		hdr + frame("renderView", "app.view.js", "218:30") + frame("buildView", "app.view.js", "178:18") + entryFrame("3184fbe2", "66:5"),
+		hdr + frame("loadItems", "app.items.js", "94:40") + frame("syncItems", "app.items.js", "68:22"),
 	}
 	layer2 := []string{
-		hdr + frame("genFloraName", "game.terrain.js", "280:25") + frame("buildFlora", "game.terrain.js", "185:30") + entryFrame("3184fbe2", "66:5"),
-		hdr + frame("genCreatureName", "game.creatures.js", "149:25") + frame("spawnCreatures", "game.creatures.js", "72:38"),
+		hdr + frame("formatView", "app.view.js", "280:25") + frame("buildView", "app.view.js", "185:30") + entryFrame("3184fbe2", "66:5"),
+		hdr + frame("formatItem", "app.items.js", "149:25") + frame("syncItems", "app.items.js", "72:38"),
 	}
 
 	s1, s2 := runtimeSignature(layer1), runtimeSignature(layer2)
@@ -104,14 +104,14 @@ func TestRuntimeSignature(t *testing.T) {
 	if s1 == s2 {
 		t.Fatalf("distinct throwing layers must have distinct signatures, both = %q", s1)
 	}
-	if !strings.Contains(s1, "makeFloraMesh@game.terrain.js") || !strings.Contains(s2, "genFloraName@game.terrain.js") {
+	if !strings.Contains(s1, "renderView@app.view.js") || !strings.Contains(s2, "formatView@app.view.js") {
 		t.Fatalf("signature must key on the throwing frames:\n s1=%q\n s2=%q", s1, s2)
 	}
 
 	// Same defect, drifted line:col + host + ?v= must reduce to the same signature.
 	layer1Rerun := []string{
-		hdr + frame("makeFloraMesh", "game.terrain.js", "219:31") + "\n    at buildFlora (http://other.localhost:9111/files/game.terrain.js:179:18)" + entryFrame("ff00ff00", "66:5"),
-		hdr + frame("makeCreature", "game.creatures.js", "95:41") + frame("spawnCreatures", "game.creatures.js", "69:22"),
+		hdr + frame("renderView", "app.view.js", "219:31") + "\n    at buildView (http://other.localhost:9111/files/app.view.js:179:18)" + entryFrame("ff00ff00", "66:5"),
+		hdr + frame("loadItems", "app.items.js", "95:41") + frame("syncItems", "app.items.js", "69:22"),
 	}
 	if got := runtimeSignature(layer1Rerun); got != s1 {
 		t.Fatalf("signature must be stable across line/host/query drift:\n first: %q\n rerun: %q", s1, got)

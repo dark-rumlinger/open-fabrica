@@ -24,11 +24,9 @@ export async function fetchFirewallStatus() {
 /**
  * Fetches the local firewall status and, if the firewall is blocking inbound
  * on a machine serving a public domain, renders the one-click control into
- * container. Admin-only and best-effort: any error or irrelevant state renders
- * nothing.
+ * container. Best-effort: any error or irrelevant state renders nothing.
  */
 export async function loadFirewallNotice(container, project) {
-  if (!state.isAdmin()) return;
   if (!isPublicDomain(project.domain)) return;
   const status = await fetchFirewallStatus();
   if (status) renderFirewallNotice(container, status);

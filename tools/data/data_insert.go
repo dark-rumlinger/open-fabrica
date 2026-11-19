@@ -247,7 +247,7 @@ func DataInsertSingle(ctx *tools.ToolContext, tx *sql.Tx, physicalName, tableNam
 
 		if secureCols != nil {
 			if kind, isSecure := secureCols[col]; isSecure {
-				processed, err := store.ProcessSecureValue(kind, val, ctx.Encryptor)
+				processed, err := security.ProcessSecureValue(kind, val, ctx.Encryptor)
 				if err != nil {
 					return nil, fmt.Errorf("processing secure column %s: %w", col, err)
 				}
@@ -355,7 +355,7 @@ func DataInsertBulk(ctx *tools.ToolContext, tx *sql.Tx, physicalName, tableName 
 
 			if secureCols != nil {
 				if kind, isSecure := secureCols[col]; isSecure {
-					processed, err := store.ProcessSecureValue(kind, val, ctx.Encryptor)
+					processed, err := security.ProcessSecureValue(kind, val, ctx.Encryptor)
 					if err != nil {
 						return nil, fmt.Errorf("processing secure column %s in row %d: %w", col, i, err)
 					}
@@ -488,7 +488,7 @@ func DataUpsert(ctx *tools.ToolContext, a *DataActUpsert, tx *sql.Tx) (*tools.Re
 	secureCols, _ := loadSecureColumnsTx(ctx, tx, a.TableName)
 	for col, kind := range secureCols {
 		if val, ok := data[col]; ok {
-			processed, err := store.ProcessSecureValue(kind, val, ctx.Encryptor)
+			processed, err := security.ProcessSecureValue(kind, val, ctx.Encryptor)
 			if err != nil {
 				return tools.Fail("processing %s: %v", col, err), nil
 			}

@@ -56,6 +56,17 @@ test('failure text alone is enough for a red summary', () => {
   assert.equal(flowsView('test_flows', {}, '2 of 4 flows failed: a, b', 'error').state, 'failed');
 });
 
+test('flow names with commas do not inflate failedCount above head[1]', () => {
+  const v = flowsView(
+    'write_flows',
+    {},
+    { success: false, error: '3 of 4 flows failed: board updates, barista advances, undoes, edits and cancels, staff login gate' },
+    'error',
+  );
+  assert.equal(v.state, 'failed');
+  assert.equal(v.title, '3 of 4 flows failed');
+});
+
 // The step is printed the way the runner prints it: JSON with > style escapes.
 const GT = '\\' + 'u003e';
 const AMP = '\\' + 'u0026';
@@ -144,6 +155,15 @@ test('footnotes come from weak checks, rollback problems and warnings', () => {
     '1 warning in the script.',
     '1 replay left this hour.',
   ]);
+});
+
+test('already_passed renders a neutral card without duplicating the pass count', () => {
+  const v = flowsView('test_flows', {}, { success: true, data: { already_passed: true, flows: ['a', 'b'] } }, 'success');
+  assert.equal(v.state, 'already_passed');
+  assert.equal(v.tone, 'neutral');
+  assert.equal(v.title, 'Already passed');
+  assert.equal(v.sub, 'No changes since the last green replay.');
+  assert.deepEqual(v.rows, []);
 });
 
 test('anything unparseable or empty still yields a neutral card', () => {

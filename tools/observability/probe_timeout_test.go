@@ -130,6 +130,10 @@ func TestEndpointProbe_ExpectedFieldsRequireAnObject(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("an envelope carrying the fields must pass, got %+v", res)
 	}
+	data, _ := res.Data.(map[string]any)
+	if data["response_preview"] != `{"rows":[],"count":0}` {
+		t.Fatalf("2xx probe must include response_preview, got %#v", data["response_preview"])
+	}
 }
 
 func mustExec(t *testing.T, db *sql.DB, q string) {

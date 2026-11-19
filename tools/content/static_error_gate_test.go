@@ -17,17 +17,17 @@ import (
 func TestSave_StaticError_ConstReassignRejected(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
-	seedJS(t, db, "state.js", `export const PLANET_RADIUS = 10;`)
+	seedJS(t, db, "state.js", `export const DEFAULT_SIZE = 10;`)
 
-	body := `import { PLANET_RADIUS } from './state.js';
-function makeGeom(r, s){ return { r: r, s: s }; }
-function flatShade(g){ return g; }
-export function buildTerrain(seed) {
-  const geom = makeGeom(PLANET_RADIUS, seed);
-  geom = flatShade(geom);
-  return geom;
+	body := `import { DEFAULT_SIZE } from './state.js';
+function makeItem(r, s){ return { r: r, s: s }; }
+function normalize(g){ return g; }
+export function buildView(seed) {
+  const item = makeItem(DEFAULT_SIZE, seed);
+  item = normalize(item);
+  return item;
 }`
-	res, err := (&ArtSave{Kind: "file", FilePath: "planet.js", Body: body}).Run(ctx)
+	res, err := (&ArtSave{Kind: "file", FilePath: "view.js", Body: body}).Run(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -47,17 +47,17 @@ export function buildTerrain(seed) {
 func TestSave_StaticError_LetReassignAllowed(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
-	seedJS(t, db, "state.js", `export const PLANET_RADIUS = 10;`)
+	seedJS(t, db, "state.js", `export const DEFAULT_SIZE = 10;`)
 
-	body := `import { PLANET_RADIUS } from './state.js';
-function makeGeom(r, s){ return { r: r, s: s }; }
-function flatShade(g){ return g; }
-export function buildTerrain(seed) {
-  let geom = makeGeom(PLANET_RADIUS, seed);
-  geom = flatShade(geom);
-  return geom;
+	body := `import { DEFAULT_SIZE } from './state.js';
+function makeItem(r, s){ return { r: r, s: s }; }
+function normalize(g){ return g; }
+export function buildView(seed) {
+  let item = makeItem(DEFAULT_SIZE, seed);
+  item = normalize(item);
+  return item;
 }`
-	res, err := (&ArtSave{Kind: "file", FilePath: "planet.js", Body: body}).Run(ctx)
+	res, err := (&ArtSave{Kind: "file", FilePath: "view.js", Body: body}).Run(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -79,19 +79,19 @@ func TestSave_StaticError_PreexistingNotTrapped(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
 	// Seed the broken body directly (bypassing the gate) so it is the prior state.
-	seedJS(t, db, "planet.js", `export function buildTerrain() {
-  const geom = make();
-  geom = flat(geom);
-  return geom;
+	seedJS(t, db, "view.js", `export function buildView() {
+  const item = make();
+  item = normalize(item);
+  return item;
 }`)
 	// Re-save with the SAME const-reassign plus an unrelated edit. The defect was
 	// not introduced here, so it must proceed (so the model can repair in steps).
-	body := `export function buildTerrain() {
-  const geom = make();
-  geom = flat(geom);
-  return geom; // touched
+	body := `export function buildView() {
+  const item = make();
+  item = normalize(item);
+  return item; // touched
 }`
-	res, err := (&ArtSave{Kind: "file", FilePath: "planet.js", Body: body}).Run(ctx)
+	res, err := (&ArtSave{Kind: "file", FilePath: "view.js", Body: body}).Run(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

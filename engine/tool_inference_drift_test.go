@@ -7,6 +7,7 @@ package engine
 // referenced tool to the real registry.
 
 import (
+	"slices"
 	"testing"
 
 	"openfabrica/pack"
@@ -39,8 +40,10 @@ func TestTaskInferenceToolsRouteToAGuide(t *testing.T) {
 	// Tools that deliberately own no guide: their capability is small enough that
 	// the tool's own schema and description are the whole contract.
 	guideless := map[string]bool{
-		"manage_email":     true,
-		"manage_schedules": true,
+		"manage_email":      true,
+		"manage_schedules":  true,
+		"manage_web_search": true,
+		"manage_web_fetch":  true,
 	}
 	toolGuide := guideToolMap(ps) // tool name -> owning guide slug (derived from guide `tools:`)
 	for _, inf := range taskToolInference {
@@ -52,5 +55,15 @@ func TestTaskInferenceToolsRouteToAGuide(t *testing.T) {
 		if !owned && !guideless[inf.tool] {
 			t.Errorf("taskToolInference infers %q, which no guide's `tools:` claims - inferring it preloads a schema with no contract behind it; add the tool to its guide or list it as guideless here", inf.tool)
 		}
+	}
+}
+
+// An agent task declared manage_agent (and manage_llm_proxy) but not
+// manage_function, which the agent's own tools are built with, so the build loaded it
+// with find_tool mid-segment and re-bought the cached prefix. The agent tool implies it.
+func TestBuildPreloadTools_AgentImpliesFunction(t *testing.T) {
+	names := buildPreloadTools(Task{Title: "Assistant agent", Tools: []string{"manage_agent", "manage_llm_proxy"}}, false)
+	if !slices.Contains(names, "manage_function") {
+		t.Fatalf("an agent task must preload manage_function, got %v", names)
 	}
 }

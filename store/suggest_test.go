@@ -69,9 +69,9 @@ func TestSuggestArtifactPaths(t *testing.T) {
 func TestResolveUniqueBasename(t *testing.T) {
 	// A flat state leaf referenced with a phantom js/ prefix. The
 	// basename is unique across the project, so it resolves to the real path.
-	db := setupSuggestDB(t, []string{"tetris.state.js", "tetris.audio.js", "tetris.engine.js"})
-	if got, ok := ResolveUniqueBasename(db, "file", "js/tetris.state.js"); !ok || got != "tetris.state.js" {
-		t.Fatalf("expected resolve to tetris.state.js, got %q ok=%v", got, ok)
+	db := setupSuggestDB(t, []string{"app.state.js", "app.audio.js", "app.core.js"})
+	if got, ok := ResolveUniqueBasename(db, "file", "js/app.state.js"); !ok || got != "app.state.js" {
+		t.Fatalf("expected resolve to app.state.js, got %q ok=%v", got, ok)
 	}
 
 	// The reverse direction: a flat guess for a file that actually lives under js/.

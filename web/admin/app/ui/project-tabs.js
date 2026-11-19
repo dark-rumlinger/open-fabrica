@@ -48,8 +48,7 @@ export const GROUPS = [
       { id: 'webhooks', label: t('tabs.eventHooks') },
       { id: 'webhooks-actions', label: t('tabs.automated') },
       { id: 'tasks', label: t('tabs.scheduled') },
-      // Orders and subscriptions carry buyer references, so the owner alone sees them.
-      { id: 'payments', label: t('tabs.payments'), adminOnly: true },
+      { id: 'payments', label: t('tabs.payments') },
     ],
   },
   {
@@ -68,9 +67,7 @@ export const GROUPS = [
     label: t('tabs.settings'),
     panels: [
       { id: 'settings', label: t('tabs.general') },
-      // The settings panel hides this section from non-admins, so the pill
-      // that leads to it has to disappear with it.
-      { id: 'settings-sharing', label: t('tabs.sharing'), adminOnly: true },
+      { id: 'settings-sharing', label: t('tabs.sharing') },
       { id: 'settings-advanced', label: t('tabs.advanced') },
       { id: 'secrets', label: t('tabs.apiKeys') },
       { id: 'providers', label: t('nav.services') },
@@ -101,11 +98,6 @@ export function groupForPanel(panelId) {
   return GROUPS.find(g => g.panels.some(p => p.id === panelId)) || GROUPS[0];
 }
 
-/** The panels of a group this user can actually reach. */
-function visiblePanels(group) {
-  return group.panels.filter(p => !p.adminOnly || state.isAdmin());
-}
-
 /**
  * Build the tab bar for a project.
  * @param {{projectId: number, activePanel: string, scope: object}} opts
@@ -126,7 +118,7 @@ export function createProjectTabs({ projectId, activePanel, scope }) {
     clear(tabRow);
     for (const group of GROUPS) {
       const isActive = group.id === activeGroup.id;
-      const landing = visiblePanels(group)[0] || group.panels[0];
+      const landing = group.panels[0];
       // A pending question is the one thing in here that needs answering, so it
       // is surfaced on the tab as well as the pill inside it.
       const wantsBadge = group.panels.some(p => p.badge) && pendingFor(projectId) > 0;
@@ -144,7 +136,7 @@ export function createProjectTabs({ projectId, activePanel, scope }) {
 
   function renderRail() {
     clear(rail);
-    for (const panel of visiblePanels(activeGroup)) {
+    for (const panel of activeGroup.panels) {
       const children = [h('span', {}, panel.label)];
       if (panel.badge) {
         const count = pendingFor(projectId);
@@ -182,5 +174,5 @@ export function createProjectTabs({ projectId, activePanel, scope }) {
 
   // A tab with one panel (the chat) has nothing to list, so it gets no rail
   // and the panel takes the full width.
-  return { element, rail: visiblePanels(activeGroup).length > 1 ? rail : null };
+  return { element, rail: activeGroup.panels.length > 1 ? rail : null };
 }

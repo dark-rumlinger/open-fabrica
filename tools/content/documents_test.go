@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"openfabrica/store"
+	"openfabrica/internal/browser"
 )
 
 func TestSanitizePDFFilename(t *testing.T) {
@@ -35,7 +35,7 @@ func TestSanitizePDFFilename(t *testing.T) {
 // code so the LLM treats it as an environment gap, not a project bug; any other
 // error stays an untagged failure.
 func TestBrowserFailClassifiesUnavailable(t *testing.T) {
-	res := browserFail(fmt.Errorf("launch: %w", store.ErrBrowserUnavailable))
+	res := browserFail(fmt.Errorf("launch: %w", browser.ErrBrowserUnavailable))
 	if res.Success {
 		t.Fatal("browser_unavailable should not be a success result")
 	}
@@ -54,15 +54,15 @@ func TestBrowserFailClassifiesUnavailable(t *testing.T) {
 // suite stays green in headless CI - the same degrade-gracefully contract the
 // runtime probe relies on.
 func TestRenderHTMLToPDF_Integration(t *testing.T) {
-	if store.DetectChromePath() == "" {
+	if browser.DetectChromePath() == "" {
 		t.Skip("no Chrome/Edge binary on host; skipping headless PDF render")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	html := `<html><body style="font-family:sans-serif"><h1>Receipt</h1><p>Total: $42.00</p></body></html>`
-	data, err := store.RenderHTMLToPDF(ctx, store.BrowserConfig{}, html, store.PDFOptions{PageSize: "A4"})
-	if errors.Is(err, store.ErrBrowserUnavailable) {
+	data, err := browser.RenderHTMLToPDF(ctx, browser.BrowserConfig{}, html, browser.PDFOptions{PageSize: "A4"})
+	if errors.Is(err, browser.ErrBrowserUnavailable) {
 		// Chrome is present but could not launch/connect here (common on loaded
 		// CI runners, and more so under -race). Same degrade-gracefully contract
 		// as the DetectChromePath guard above: skip rather than fail.

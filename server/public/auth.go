@@ -14,6 +14,7 @@ import (
 	"openfabrica/internal/tokenrevoke"
 	"openfabrica/security"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 // authEndpointConfig holds the configuration for auto-generated auth routes.
@@ -39,20 +40,27 @@ type authEndpointConfig struct {
 
 // loadAuthEndpoint loads an auth endpoint configuration from the per-project database.
 func (h *Handler) loadAuthEndpoint(projectDB *sql.DB, path string) (*authEndpointConfig, error) {
-	var ae authEndpointConfig
-	var publicColsJSON, signupColsJSON string
-	err := projectDB.QueryRow(
-		"SELECT id, table_name, path, username_column, password_column, public_columns, COALESCE(signup_columns,'[]'), jwt_expiry_hours, default_role, role_column, COALESCE(rate_limit,60), COALESCE(tenant_signup_mode,'none') FROM of_auth_endpoints WHERE path = ?",
-		path,
-	).Scan(&ae.ID, &ae.TableName, &ae.Path, &ae.UsernameColumn, &ae.PasswordColumn, &publicColsJSON, &signupColsJSON, &ae.JWTExpiryHours, &ae.DefaultRole, &ae.RoleColumn, &ae.RateLimit, &ae.TenantSignupMode)
+	row, err := store.LoadPublicAuthEndpoint(projectDB, path)
 	if err != nil {
 		return nil, err
+	}
+	ae := authEndpointConfig{
+		ID:               row.ID,
+		TableName:        row.TableName,
+		Path:             row.Path,
+		UsernameColumn:   row.UsernameColumn,
+		PasswordColumn:   row.PasswordColumn,
+		JWTExpiryHours:   row.JWTExpiryHours,
+		DefaultRole:      row.DefaultRole,
+		RoleColumn:       row.RoleColumn,
+		RateLimit:        row.RateLimit,
+		TenantSignupMode: row.TenantSignupMode,
 	}
 	if ae.RateLimit <= 0 {
 		ae.RateLimit = 60
 	}
-	_ = json.Unmarshal([]byte(publicColsJSON), &ae.PublicColumns) // malformed config degrades to no public columns
-	_ = json.Unmarshal([]byte(signupColsJSON), &ae.SignupColumns) // malformed config degrades to the default filter
+	_ = json.Unmarshal([]byte(row.PublicColsJSON), &ae.PublicColumns) // malformed config degrades to no public columns
+	_ = json.Unmarshal([]byte(row.SignupColsJSON), &ae.SignupColumns) // malformed config degrades to the default filter
 	if ae.JWTExpiryHours == 0 {
 		ae.JWTExpiryHours = 24
 	}
@@ -125,7 +133,7 @@ func (h *Handler) handleAuthRequest(w http.ResponseWriter, r *http.Request, proj
 			writeError(w, http.StatusTooManyRequests, "too many auth requests, slow down")
 			return true
 		}
-		if !checkEndpointRateLimit(fmt.Sprintf("auth:%d:%s:%s", projectID, authPath, middleware.RateLimitIdentity(r)), ae.RateLimit) {
+		if !h.checkEndpointRateLimit(fmt.Sprintf("auth:%d:%s:%s", projectID, authPath, middleware.RateLimitIdentity(r)), ae.RateLimit) {
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return true
 		}
@@ -140,7 +148,7 @@ func (h *Handler) handleAuthRequest(w http.ResponseWriter, r *http.Request, proj
 			writeError(w, http.StatusTooManyRequests, "too many auth requests, slow down")
 			return true
 		}
-		if !checkEndpointRateLimit(fmt.Sprintf("auth:%d:%s:%s", projectID, authPath, middleware.RateLimitIdentity(r)), ae.RateLimit) {
+		if !h.checkEndpointRateLimit(fmt.Sprintf("auth:%d:%s:%s", projectID, authPath, middleware.RateLimitIdentity(r)), ae.RateLimit) {
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return true
 		}
@@ -195,7 +203,7 @@ func (h *Handler) handleAuthRequest(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// Tenancy sub-routes: tenants (list), tenant/switch.
-	if h.handleTenantSubroute(w, r, projectID, readDB, ae, action) {
+	if h.handleTenantSubroute(w, r, projectID, readDB, physTable, ae, action) {
 		return true
 	}
 
@@ -274,12 +282,7 @@ func (h *Handler) authRegister(w http.ResponseWriter, r *http.Request, projectID
 	filterSignupBody(body, ae)
 
 	// Check if user already exists (read pool, no write lock needed).
-	var existingID int
-	err := readDB.QueryRow(
-		fmt.Sprintf("SELECT id FROM %s WHERE %s = ?", security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn)),
-		username,
-	).Scan(&existingID)
-	if err == nil {
+	if _, err := store.FindAuthUserIDByUsername(readDB, physTable, ae.UsernameColumn, username); err == nil {
 		writeError(w, http.StatusConflict, fmt.Sprintf("user with this %s already exists", ae.UsernameColumn))
 		return
 	}
@@ -309,49 +312,35 @@ func (h *Handler) authRegister(w http.ResponseWriter, r *http.Request, projectID
 	// Load actual table columns to filter out unknown request fields (e.g.
 	// "confirm_password", "terms_accepted"), which would otherwise fail the INSERT.
 	// Uses read pool; PRAGMA is a read operation.
-	colRows, colErr := readDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", security.QuoteIdent(physTable)))
-	if colErr == nil {
-		validCols := make(map[string]bool)
-		for colRows.Next() {
-			var cid int
-			var name, colType string
-			var notNull int
-			var dfltValue sql.NullString
-			var pk int
-			_ = colRows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk)
-			validCols[name] = true
+	if info, colErr := store.GetTableColumnInfo(readDB, physTable); colErr == nil {
+		validCols := make(map[string]bool, len(info))
+		for _, c := range info {
+			validCols[c.Name] = true
 		}
-		colRows.Close()
+		if len(validCols) == 0 {
+			writeError(w, http.StatusInternalServerError,
+				fmt.Sprintf("registration failed: table %q does not exist", ae.TableName))
+			return
+		}
 
-		// An iteration error is tolerated like a failed PRAGMA query: skip the
-		// column checks and let the INSERT surface any real problem.
-		if colRows.Err() == nil {
-			if len(validCols) == 0 {
-				writeError(w, http.StatusInternalServerError,
-					fmt.Sprintf("registration failed: table %q does not exist", ae.TableName))
-				return
-			}
+		// Verify the auth config columns actually exist in the table.
+		if !validCols[ae.UsernameColumn] || !validCols[ae.PasswordColumn] {
+			writeError(w, http.StatusInternalServerError,
+				fmt.Sprintf("auth config mismatch: table %q is missing column %q or %q",
+					ae.TableName, ae.UsernameColumn, ae.PasswordColumn))
+			return
+		}
 
-			// Verify the auth config columns actually exist in the table.
-			if !validCols[ae.UsernameColumn] || !validCols[ae.PasswordColumn] {
-				writeError(w, http.StatusInternalServerError,
-					fmt.Sprintf("auth config mismatch: table %q is missing column %q or %q",
-						ae.TableName, ae.UsernameColumn, ae.PasswordColumn))
-				return
-			}
-
-			// Filter unknown fields, only inside the validCols guard.
-			for col := range body {
-				if !validCols[col] {
-					delete(body, col)
-				}
+		// Filter unknown fields, only inside the validCols guard.
+		for col := range body {
+			if !validCols[col] {
+				delete(body, col)
 			}
 		}
 	}
 
 	// Insert the row, validate column names from request body.
 	columns := make([]string, 0, len(body))
-	placeholders := make([]string, 0, len(body))
 	values := make([]any, 0, len(body))
 	for col, val := range body {
 		if err := security.ValidateColumnName(col); err != nil {
@@ -359,7 +348,6 @@ func (h *Handler) authRegister(w http.ResponseWriter, r *http.Request, projectID
 			return
 		}
 		columns = append(columns, security.QuoteIdent(col))
-		placeholders = append(placeholders, "?")
 		values = append(values, val)
 	}
 
@@ -371,18 +359,11 @@ func (h *Handler) authRegister(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	// Only the INSERT uses the write pool, all prior work used the read pool.
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", security.QuoteIdent(physTable), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
-	result, err := writeDB.Exec(query, values...)
+	userID, err := store.InsertAuthUser(writeDB, physTable, columns, values)
 	if err != nil {
 		status, msg := registrationFailure(err)
 		slog.Warn("registration insert failed", "table", physTable, "error", err)
 		writeError(w, status, msg)
-		return
-	}
-
-	userID, err := result.LastInsertId()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "registration failed: could not read new user id")
 		return
 	}
 
@@ -392,7 +373,7 @@ func (h *Handler) authRegister(w http.ResponseWriter, r *http.Request, projectID
 	if status != 0 {
 		// The account must not outlive a failed signup step (a consumed invite, a
 		// missing default tenant): remove it so the username is not squatted.
-		if _, delErr := writeDB.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", security.QuoteIdent(physTable)), userID); delErr != nil {
+		if delErr := store.DeleteAuthUserByID(writeDB, physTable, userID); delErr != nil {
 			slog.Warn("could not remove user after failed signup", "table", physTable, "user_id", userID, "error", delErr)
 		}
 		writeError(w, status, errMsg)
@@ -456,21 +437,7 @@ func (h *Handler) authLogin(w http.ResponseWriter, r *http.Request, projectID in
 	}
 
 	// Find the user by username (include role column). Read pool, no writes.
-	var userID int
-	var hashedPassword string
-	var role sql.NullString
-	err := readDB.QueryRow(
-		fmt.Sprintf("SELECT id, %s, %s FROM %s WHERE %s = ?", security.QuoteIdent(ae.PasswordColumn), security.QuoteIdent(ae.RoleColumn), security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn)),
-		username,
-	).Scan(&userID, &hashedPassword, &role)
-	if err != nil && strings.Contains(err.Error(), "no such column") {
-		// Role column doesn't exist, retry without it, use default role.
-		err = readDB.QueryRow(
-			fmt.Sprintf("SELECT id, %s FROM %s WHERE %s = ?", security.QuoteIdent(ae.PasswordColumn), security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn)),
-			username,
-		).Scan(&userID, &hashedPassword)
-		role.String = ae.DefaultRole
-	}
+	userID, hashedPassword, roleStr, err := store.FindAuthUserCredentials(readDB, physTable, ae.UsernameColumn, ae.PasswordColumn, ae.RoleColumn, username)
 	if err != nil {
 		// Equalize timing with the wrong-password path so a missing user is
 		// not distinguishable by response latency (username enumeration).
@@ -479,6 +446,7 @@ func (h *Handler) authLogin(w http.ResponseWriter, r *http.Request, projectID in
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	role := sql.NullString{String: roleStr, Valid: roleStr != ""}
 
 	// Verify password, CPU-intensive but doesn't touch the database.
 	if !security.CheckPassword(password, hashedPassword) {
@@ -504,14 +472,14 @@ func (h *Handler) authLogin(w http.ResponseWriter, r *http.Request, projectID in
 	var totpSecretEnc string
 	var totpVerified bool
 	var totpEnabled, totpEnforced bool
-	if err := readDB.QueryRow("SELECT enforced FROM of_totp_endpoints WHERE path = ?", ae.Path).Scan(&totpEnforced); err == nil {
+	if _, enforced, err := store.GetTOTPEndpointConfig(readDB, ae.Path); err == nil {
 		totpEnabled = true
+		totpEnforced = enforced
 	}
 	totpEnrolled := false
 	if totpEnabled {
-		err := readDB.QueryRow(
-			"SELECT secret_encrypted, verified FROM of_user_totp WHERE user_id = ?", userID,
-		).Scan(&totpSecretEnc, &totpVerified)
+		var err error
+		totpSecretEnc, totpVerified, err = store.GetUserTOTP(readDB, userID)
 		totpEnrolled = err == nil && totpVerified
 	}
 	if totpEnabled && !totpEnrolled && totpEnforced {
@@ -690,19 +658,14 @@ func (h *Handler) authMe(w http.ResponseWriter, r *http.Request, projectID int, 
 	for i, c := range colList {
 		quotedCols[i] = security.QuoteIdent(c)
 	}
-	cols := strings.Join(quotedCols, ", ")
 
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE id = ?", cols, security.QuoteIdent(physTable))
-	rows, err := readDB.Query(query, claims.UserID)
+	userRow, err := store.LoadAuthUserMe(readDB, physTable, quotedCols, claims.UserID)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "query error")
-		return
-	}
-	defer rows.Close()
-
-	results := h.scanRowsToMaps(rows)
-	if len(results) == 0 {
-		writeError(w, http.StatusNotFound, "user not found")
 		return
 	}
 
@@ -710,12 +673,12 @@ func (h *Handler) authMe(w http.ResponseWriter, r *http.Request, projectID int, 
 	// column. Surface the value under `role` too so a custom role_column ("user_role")
 	// still passes requireRole instead of bouncing every user.
 	if ae.RoleColumn != "" && ae.RoleColumn != "role" {
-		if _, taken := results[0]["role"]; !taken {
-			results[0]["role"] = results[0][ae.RoleColumn]
+		if _, taken := userRow["role"]; !taken {
+			userRow["role"] = userRow[ae.RoleColumn]
 		}
 	}
 
-	writeJSON(w, http.StatusOK, results[0])
+	writeJSON(w, http.StatusOK, userRow)
 }
 
 // authRefresh handles POST /api/{path}/refresh.
@@ -729,30 +692,17 @@ func (h *Handler) authRefresh(w http.ResponseWriter, r *http.Request, projectID 
 	}
 
 	// Verify the user still exists in the database.
-	var exists int
-	err = readDB.QueryRow(
-		fmt.Sprintf("SELECT 1 FROM %s WHERE id = ?", security.QuoteIdent(physTable)),
-		claims.UserID,
-	).Scan(&exists)
-	if err != nil {
+	if !store.AuthUserExists(readDB, physTable, claims.UserID) {
 		writeError(w, http.StatusUnauthorized, "user no longer exists")
 		return
 	}
 
-	// Fetch current role in case it changed since the token was issued.
-	var role sql.NullString
-	_ = readDB.QueryRow(
-		fmt.Sprintf("SELECT %s FROM %s WHERE id = ?", security.QuoteIdent(ae.RoleColumn), security.QuoteIdent(physTable)),
-		claims.UserID,
-	).Scan(&role)
-	userRole := role.String
-	if userRole == "" {
-		userRole = ae.DefaultRole
-	}
-
-	token, err := h.generateUserToken(claims.UserID, claims.Username, userRole, projectID, ae)
+	// The new token is built from current state, not from the old claims: the role
+	// is re-read, and a tenanted session keeps its tenant only while the user is
+	// still an active member of it.
+	token, status, err := h.mintSession(readDB, projectID, claims.UserID, claims.TenantID, claims.Username, physTable, ae)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		writeError(w, status, err.Error())
 		return
 	}
 
@@ -784,6 +734,48 @@ func authTokenExpiry(ae *authEndpointConfig) time.Duration {
 		return time.Duration(ae.JWTExpiryHours) * time.Hour
 	}
 	return 0
+}
+
+// currentUserRole reads the user's role from their row, falling back to the
+// endpoint's default when the column is empty or unreadable.
+func currentUserRole(readDB *sql.DB, physTable string, ae *authEndpointConfig, userID int) string {
+	return store.ReadAuthUserRole(readDB, physTable, ae.RoleColumn, userID, ae.DefaultRole)
+}
+
+// mintSession re-issues a session for a user who already holds one (refresh,
+// tenant switch). Role and tenant role come from the database, never from the
+// old token. tenantID 0 mints a tenantless token; otherwise the user must still
+// be an active member of that tenant. On failure it returns the HTTP status to
+// answer with.
+func (h *Handler) mintSession(readDB *sql.DB, projectID, userID, tenantID int, username, physTable string, ae *authEndpointConfig) (string, int, error) {
+	if h.deps.JWTManager == nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("failed to generate token")
+	}
+	req := security.TokenRequest{
+		ProjectID: projectID, UserID: userID, Username: username,
+		Role: currentUserRole(readDB, physTable, ae, userID), Expiry: authTokenExpiry(ae),
+	}
+	if tenantID > 0 {
+		memberships, err := h.loadActiveMemberships(readDB, userID)
+		if err != nil {
+			return "", http.StatusInternalServerError, fmt.Errorf("loading memberships")
+		}
+		found := false
+		for _, m := range memberships {
+			if m.TenantID == tenantID {
+				req.TenantID, req.TenantRole, found = m.TenantID, m.Role, true
+				break
+			}
+		}
+		if !found {
+			return "", http.StatusForbidden, fmt.Errorf("not a member of that tenant")
+		}
+	}
+	token, err := h.deps.JWTManager.Generate(req)
+	if err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("failed to generate token")
+	}
+	return token, 0, nil
 }
 
 // generateUserToken creates a JWT token for a project user, scoped to the
@@ -853,32 +845,17 @@ func (h *Handler) revokeUserSessions(writeDB *sql.DB, projectID, userID int, why
 	}
 }
 
-// validateProjectTokenOrJWT checks if the token is either a valid project API key
-// or a valid user JWT token scoped to this project. Returns true if either check passes.
-func (h *Handler) validateProjectTokenOrJWT(projectID int, token string) bool {
-	ok, _ := h.validateProjectTokenOrJWTWithClaims(projectID, token)
-	return ok
-}
-
-// validateProjectTokenOrJWTWithClaims is like validateProjectTokenOrJWT but
-// also returns the user JWT claims when applicable. Returns:
-//   - (true, claims) when the token is a user JWT scoped to this project
-//   - (true, nil)    when the token is a project API key (no user identity)
-//   - (false, nil)   when the token is empty or invalid
-//
-// Lets a user-scoped WebSocket connection stamp user_id onto auto-persisted messages.
-func (h *Handler) validateProjectTokenOrJWTWithClaims(projectID int, token string) (bool, *security.Claims) {
-	if token == "" {
-		return false, nil
+// projectUserClaims validates a user token for this project and returns its
+// claims. ok is false when the token is missing, invalid, revoked, or was
+// issued for another project. Every endpoint kind that accepts a caller token
+// goes through here.
+func (h *Handler) projectUserClaims(projectID int, token string) (claims *security.Claims, ok bool) {
+	if token == "" || h.deps.JWTManager == nil {
+		return nil, false
 	}
-	if h.validateProjectToken(projectID, token) {
-		return true, nil
+	claims, err := h.validateUserClaims(token)
+	if err != nil || claims.ProjectID != projectID {
+		return nil, false
 	}
-	if h.deps.JWTManager != nil {
-		claims, err := h.validateUserClaims(token)
-		if err == nil && claims.ProjectID == projectID {
-			return true, claims
-		}
-	}
-	return false, nil
+	return claims, true
 }

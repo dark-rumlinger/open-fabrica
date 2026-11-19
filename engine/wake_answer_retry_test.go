@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,5 +114,39 @@ func TestWakeAnswerSurvivesTransientStageRetry(t *testing.T) {
 	// Settled run: the payload must not leak into later stages or runs.
 	if worker.wakeContext != nil {
 		t.Fatal("wakeContext not cleared after the run settled")
+	}
+}
+
+// collectAnswers is bounded to the newest 20 answers, kept in chronological
+// order, so the block cannot grow without limit over a project's life.
+func TestCollectAnswersBounded(t *testing.T) {
+	mgr := db.NewProjectDBManager(t.TempDir())
+	t.Cleanup(mgr.CloseAll)
+	pdb, err := mgr.Create(1)
+	if err != nil {
+		t.Fatalf("create project db: %v", err)
+	}
+	w := &Worker{pdb: pdb}
+
+	for i := 1; i <= 25; i++ {
+		res, err := pdb.ExecWrite(`INSERT INTO of_questions (question, status) VALUES (?, 'answered')`, fmt.Sprintf("q%02d", i))
+		if err != nil {
+			t.Fatalf("insert question: %v", err)
+		}
+		qid, _ := res.LastInsertId()
+		if _, err := pdb.ExecWrite(`INSERT INTO of_answers (question_id, answer) VALUES (?, ?)`, qid, fmt.Sprintf("a%02d", i)); err != nil {
+			t.Fatalf("insert answer: %v", err)
+		}
+	}
+
+	lines := strings.Split(w.collectAnswers(), "\n")
+	if len(lines) != 20 {
+		t.Fatalf("got %d lines, want the newest 20", len(lines))
+	}
+	if !strings.HasPrefix(lines[0], "q06:") {
+		t.Errorf("oldest kept line should be q06, got %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[19], "q25:") {
+		t.Errorf("newest line should be q25, got %q", lines[19])
 	}
 }

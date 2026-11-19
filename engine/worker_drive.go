@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"openfabrica/internal/buildstate"
+	"openfabrica/internal/safego"
 )
 
 // circuit-breaker tuning for the stage drive loop.
@@ -65,12 +67,18 @@ func (w *Worker) drive(ctx context.Context) {
 		return
 	}
 
-	// Auto-named projects get a real, description-derived title before any
-	// stage runs, so the owner sees it the moment the build kicks off.
+	// Auto-named projects get a real, description-derived title concurrently with
+	// the opening stage so startup doesn't pay an extra serial LLM round-trip.
 	// Best-effort and fresh-build-only (a resume must not re-spend the call).
+	var titleWG sync.WaitGroup
 	if fresh && run.Kind == RunKindBuild {
-		w.maybeGenerateTitle(ctx)
+		titleWG.Add(1)
+		safego.Go("engine-title", func() {
+			defer titleWG.Done()
+			w.maybeGenerateTitle(ctx)
+		})
 	}
+	defer titleWG.Wait()
 
 	stage := run.Stage
 	prevStage := ""
@@ -347,7 +355,7 @@ func (w *Worker) resolveRun() (run *Run, fresh bool, err error) {
 	if entry == StageExpand && w.projectAmbitionLevel() == AmbitionOff {
 		entry = StagePlan
 	}
-	run, err = createRun(w.pdb, RunKindBuild, entry, "")
+	run, err = createRun(w.pdb, RunKindBuild, entry, "", w.deps.BuildVersion, w.deps.BuildBuiltAt)
 	return run, true, err
 }
 

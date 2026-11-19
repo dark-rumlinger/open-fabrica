@@ -24,6 +24,10 @@ var flowInteractionNameRe = regexp.MustCompile(`(?i)\b(add|create|send|submit|up
 // number compared against zero with >=, or a literal truthy value.
 var flowAlwaysTrueRe = regexp.MustCompile(`(?i)(>=\s*0(?:[^\d.]|$))|^\s*(true|1|!!document\.body|document\.body|!!window|!!document)\s*;?\s*$`)
 
+// flowIndexSearchZeroRe matches `.indexOf(...) >= 0` and sibling search-index checks,
+// where `>= 0` means "found" rather than "vacuously non-negative".
+var flowIndexSearchZeroRe = regexp.MustCompile(`(?i)\.(?:indexOf|lastIndexOf|search|findIndex)\s*\([^()]*\)\s*>=\s*0(?:[^\d.]|$)`)
+
 // flowStorageRe matches assertions on how the app stores data internally.
 var flowStorageRe = regexp.MustCompile(`\b(localStorage|sessionStorage|indexedDB)\b`)
 
@@ -98,7 +102,7 @@ func lintProof(f Flow) []string {
 
 	for i, st := range f.Steps {
 		if v, arg := st.verb(); v == "expectJs" {
-			if flowAlwaysTrueRe.MatchString(arg) {
+			if flowAlwaysTrueRe.MatchString(flowIndexSearchZeroRe.ReplaceAllString(arg, " ")) {
 				out = append(out, fmt.Sprintf("flow %q step %d %s holds for any state (a comparison with >= 0 or a literal true), so it proves nothing. "+
 					"Assert the value a person would notice: a count that went up, text that changed, an element that appeared.", f.Name, i+1, st))
 			}

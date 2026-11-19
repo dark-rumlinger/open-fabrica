@@ -9,6 +9,7 @@ import (
 
 	"openfabrica/db/models"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 // Page serves page content as JSON for the given path query parameter.
@@ -42,8 +43,9 @@ func (h *Handler) Page(w http.ResponseWriter, r *http.Request) {
 	var content, title, metadata, layoutName sql.NullString
 	var routeParams map[string]string
 	resolvedPath := pagePath
-	err := projectDB.QueryRow(publishedPageSelectSQL, pagePath).Scan(&title, &content, &metadata, &layoutName)
-	if err != nil {
+	if pg, err := store.LoadPublishedPage(projectDB.Reader(), pagePath); err == nil {
+		title, content, metadata, layoutName = pg.Title, pg.Content, pg.Metadata, pg.LayoutName
+	} else {
 		templatePath, params, ok := resolveParamPage(projectDB.Reader(), pagePath, &title, &content, &metadata, &layoutName)
 		if !ok {
 			writeError(w, http.StatusNotFound, "page not found")
@@ -146,16 +148,15 @@ func (h *Handler) ServePage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var content, title, metadata, layoutName sql.NullString
-	err := projectDB.QueryRow(
-		"SELECT json_extract(metadata, '$.title'), body, metadata, json_extract(metadata, '$.layout') FROM of_files WHERE kind = 'page' AND path = ? AND status = 'published' AND is_deleted = 0",
-		pagePath,
-	).Scan(&title, &content, &metadata, &layoutName)
 	var routeParams map[string]string
-	if err != nil {
+	if pg, err := store.LoadPublishedPage(projectDB.Reader(), pagePath); err == nil {
+		title, content, metadata, layoutName = pg.Title, pg.Content, pg.Metadata, pg.LayoutName
+	} else {
 		// Try common homepage variants: the engine often saves as /index.html instead of /
 		found := false
 		for _, alt := range homeFallbacks(pagePath) {
-			if projectDB.QueryRow(publishedPageSelectSQL, alt).Scan(&title, &content, &metadata, &layoutName) == nil {
+			if pg, err := store.LoadPublishedPage(projectDB.Reader(), alt); err == nil {
+				title, content, metadata, layoutName = pg.Title, pg.Content, pg.Metadata, pg.LayoutName
 				found = true
 				pagePath = alt
 				break
@@ -210,19 +211,15 @@ func (h *Handler) serve404(w http.ResponseWriter, project *models.Project) {
 	// Check for a custom 404 page.
 	projectDB, err := h.deps.ProjectDBManager.Open(project.ID)
 	if err == nil {
-		var content, title, metadata, layoutName sql.NullString
-		err = projectDB.QueryRow(
-			"SELECT json_extract(metadata, '$.title'), body, metadata, json_extract(metadata, '$.layout') FROM of_files WHERE kind = 'page' AND path = '/404' AND status = 'published' AND is_deleted = 0",
-		).Scan(&title, &content, &metadata, &layoutName)
-		if err == nil {
+		if pg, err := store.LoadPublishedPage(projectDB.Reader(), "/404"); err == nil {
 			doc := h.renderDocument(documentSpec{
 				Project:        project,
 				ProjectDB:      projectDB.Reader(),
 				PagePath:       "/404",
-				Title:          title.String,
-				Content:        content.String,
-				MetadataJSON:   metadata.String,
-				LayoutName:     layoutName.String,
+				Title:          pg.Title.String,
+				Content:        pg.Content.String,
+				MetadataJSON:   pg.Metadata.String,
+				LayoutName:     pg.LayoutName.String,
 				PageAssetPaths: loadPageAssetPaths(projectDB.Reader(), "/404"),
 				RouteParams:    nil,
 			})
@@ -235,16 +232,11 @@ func (h *Handler) serve404(w http.ResponseWriter, project *models.Project) {
 		// No content yet: show the "factory at work" placeholder instead of
 		// a bare 404 when this project has zero published pages. Distinguishes
 		// "site under construction" from "this URL is wrong".
-		var pageCount int
-		if err := projectDB.QueryRow(
-			"SELECT COUNT(1) FROM of_files WHERE kind = 'page' AND status = 'published' AND is_deleted = 0",
-		).Scan(&pageCount); err == nil && pageCount == 0 {
+		if pageCount, err := store.CountPublishedPages(projectDB.Reader()); err == nil && pageCount == 0 {
 			// Light the matching public step on the placeholder. The current
 			// stage is the latest of_runs row's stage. A read failure leaves
 			// stage empty, which lights nothing rather than guessing.
-			var stage string
-			_ = projectDB.QueryRow("SELECT stage FROM of_runs ORDER BY started_at DESC, id DESC LIMIT 1").Scan(&stage)
-			serveBuildingPage(w, stage)
+			serveBuildingPage(w, store.LatestRunStage(projectDB.Reader()))
 			return
 		}
 	}
@@ -254,14 +246,7 @@ func (h *Handler) serve404(w http.ResponseWriter, project *models.Project) {
 
 // checkRedirect looks up a redirect for the given path.
 func checkRedirect(projectDB *sql.DB, path string) (target string, statusCode int, found bool) {
-	err := projectDB.QueryRow(
-		"SELECT redirect_to, status_code FROM of_redirects WHERE redirect_from = ?",
-		path,
-	).Scan(&target, &statusCode)
-	if err != nil {
-		return "", 0, false
-	}
-	return target, statusCode, true
+	return store.LookupRedirect(projectDB, path)
 }
 
 // homeFallbacks returns alternate paths to try when an exact page path isn't found.
@@ -281,22 +266,16 @@ func homeFallbacks(path string) []string {
 	}
 }
 
-// publishedPageSelectSQL fetches a published page row by exact path. Kept
-// in one place so every page lookup uses the same status/is_deleted gate.
-const publishedPageSelectSQL = "SELECT json_extract(metadata, '$.title'), body, metadata, json_extract(metadata, '$.layout') FROM of_files WHERE kind = 'page' AND path = ? AND status = 'published' AND is_deleted = 0"
-
-// resolveParamPage tries a parameterized-route match against requestPath
-// and, on hit, loads the template's page row into the supplied destinations.
-// Returns the resolved template path and extracted route params; ok=false
-// when no template matches or the row load fails.
 func resolveParamPage(projectDB *sql.DB, requestPath string, title, content, metadata, layoutName *sql.NullString) (string, map[string]string, bool) {
 	templatePath, params, err := findParamPage(projectDB, requestPath)
 	if err != nil {
 		return "", nil, false
 	}
-	if err := projectDB.QueryRow(publishedPageSelectSQL, templatePath).Scan(title, content, metadata, layoutName); err != nil {
+	pg, err := store.LoadPublishedPage(projectDB, templatePath)
+	if err != nil {
 		return "", nil, false
 	}
+	*title, *content, *metadata, *layoutName = pg.Title, pg.Content, pg.Metadata, pg.LayoutName
 	return templatePath, params, true
 }
 
@@ -309,13 +288,10 @@ func resolveParamPage(projectDB *sql.DB, requestPath string, title, content, met
 // depending on DB row order - so a post route ":slug" could shadow static routes like
 // /about or /dashboard and serve them as a missing post.
 func findParamPage(projectDB *sql.DB, requestPath string) (templatePath string, params map[string]string, err error) {
-	rows, err := projectDB.Query(
-		"SELECT path FROM of_files WHERE kind = 'page' AND path LIKE '%:%' AND status = 'published' AND is_deleted = 0",
-	)
+	candidates, err := store.ListParamPagePaths(projectDB)
 	if err != nil {
 		return "", nil, err
 	}
-	defer rows.Close()
 
 	reqParts := strings.Split(requestPath, "/")
 
@@ -323,11 +299,7 @@ func findParamPage(projectDB *sql.DB, requestPath string) (templatePath string, 
 	var bestParts []string
 	var bestParams map[string]string
 
-	for rows.Next() {
-		var candidate string
-		if rows.Scan(&candidate) != nil {
-			continue
-		}
+	for _, candidate := range candidates {
 
 		candParts := strings.Split(candidate, "/")
 		if len(candParts) != len(reqParts) {
@@ -353,9 +325,6 @@ func findParamPage(projectDB *sql.DB, requestPath string) (templatePath string, 
 			bestParts = candParts
 			bestParams = extracted
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", nil, err
 	}
 	if bestPath == "" {
 		return "", nil, fmt.Errorf("no matching parameterized page")
@@ -403,8 +372,5 @@ func (h *Handler) trackPageView(projectID int, pagePath string, r *http.Request)
 	referrer := r.Referer()
 	ua := r.UserAgent()
 
-	_, _ = projectDB.ExecWrite( // best-effort analytics; never affects page delivery
-		"INSERT INTO of_analytics (page_path, visitor_hash, referrer, user_agent) VALUES (?, ?, ?, ?)",
-		pagePath, visitorHash, referrer, ua,
-	)
+	store.RecordPageView(projectDB, pagePath, visitorHash, referrer, ua)
 }

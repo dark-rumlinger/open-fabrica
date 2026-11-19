@@ -98,11 +98,60 @@
 /* The point of the revamp: the prompt box reads as the thing to use, not as
    one field among several. */
 .home-hero .prompt-input {
-  min-height: 168px;
+  min-height: 136px;
   font-size: var(--text-lg);
   line-height: 1.6;
   padding: var(--space-4);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.prompt-box {
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+  overflow: hidden;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.prompt-box:focus-within,
+.prompt-box.is-dragover {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+.prompt-box__dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--text-primary) 2%, transparent);
+}
+
+.image-attach__btn--labeled {
+  width: auto;
+  padding: 0 10px;
+  gap: 6px;
+  font-size: var(--text-xs);
+}
+
+.image-attach__icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.prompt-box__dropzone .image-attach__strip {
+  margin-bottom: 0;
+}
+
+.prompt-box__dropzone .image-attach__thumb {
+  width: 38px;
+  height: 38px;
 }
 
 .home-hero .prompt-chips {

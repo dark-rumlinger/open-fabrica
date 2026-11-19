@@ -14,6 +14,47 @@ import (
 // item to an ephemeral plan copy so the model works it last, on the finished app.
 const userFlowsTaskID = buildstate.UserFlowsTaskID
 
+// testingOmitFlows omits user-flow actions from manage_testing during normal build,
+// repair, and flow-disabled live sessions so regular probing and user flows never mix.
+var testingOmitFlows = map[string]map[string]bool{
+	"manage_testing": {"write_flows": true, "test_flows": true},
+}
+
+// testingOmitRegularProbes omits regular probe actions from manage_testing during the
+// post-build flow gate so the flow session stays focused on write_flows / test_flows.
+var testingOmitRegularProbes = map[string]map[string]bool{
+	"manage_testing": {
+		"test_endpoint":  true,
+		"test_url":       true,
+		"test_auth_flow": true,
+		"test_page":      true,
+		"explore":        true,
+		"test_module":    true,
+		"test_websocket": true,
+	},
+}
+
+func buildTestingOmitActions(isFlowGate bool) map[string]map[string]bool {
+	if isFlowGate {
+		return testingOmitRegularProbes
+	}
+	return testingOmitFlows
+}
+
+func userFlowsHiddenGuides(base map[string]bool, allowUserFlows bool) map[string]bool {
+	if allowUserFlows {
+		return base
+	}
+	out := make(map[string]bool, len(base)+1)
+	for k, v := range base {
+		if v {
+			out[k] = true
+		}
+	}
+	out["user_flows"] = true
+	return out
+}
+
 // planHasUserFlowsTask reports whether a plan already carries the user-flow item. The
 // main build never does; the flow gate's ephemeral plan copy does, which is what turns
 // on the build frame's `when:flows` block and the user_flows guide prefetch for that
@@ -52,7 +93,7 @@ func ensureUserFlowsTask(plan *Plan) bool {
 		ID:    userFlowsTaskID,
 		Title: "User flows: write of_test.js and replay it",
 		Intent: "Save the journeys a real person takes through this project with manage_testing action=write_flows " +
-			"(recall the user_flows guide's writing-flows section first: the step verbs, what to cover, and how to handle a red flow); it replays them as it saves, so fix what that reveals, then replay once with action=test_flows to check the fixes together, not after each one. " +
+			"(recall the user_flows guide's writing-flows section first: the step verbs, what to cover, and how to handle a red flow); it replays them as it saves — if all flows pass, do not call action=test_flows, mark this item complete; otherwise fix what that reveals, then replay once with action=test_flows to check the fixes together, not after each one. " +
 			"Keep it small: at most 5 flows. Follow the user_flows guide when a flow stays red; " +
 			"the post-build validation replays of_test.js once more and reports any that stay red to the owner as checks that did not pass.",
 		DoneWhen: "of_test.js is saved and replayed at least once, with the bugs it clearly revealed fixed; " +
@@ -100,6 +141,9 @@ func dropUserFlowsTasks(plan *Plan) bool {
 // userFlowsEnabled reports whether the owner turned user-flow tests on for this project.
 // An unreadable project row counts as off, the platform default.
 func (w *Worker) userFlowsEnabled() bool {
+	if w == nil || w.deps == nil || w.deps.DB == nil || w.deps.DB.DB == nil {
+		return false
+	}
 	proj, err := models.GetProjectByID(w.deps.DB.DB, w.projectID)
 	if err != nil {
 		return false

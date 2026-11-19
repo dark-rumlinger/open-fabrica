@@ -3,7 +3,6 @@ package public
 import (
 	"bytes"
 	"crypto/sha256"
-	"database/sql"
 	"fmt"
 	"html"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"openfabrica/internal/httpx"
+	"openfabrica/internal/mediatype"
 	"openfabrica/store"
 )
 
@@ -35,38 +35,26 @@ func (h *Handler) Sitemap(w http.ResponseWriter, r *http.Request) {
 		baseURL = "https://" + *project.Domain
 	}
 
-	rows, err := projectDB.Query(
-		"SELECT path, updated_at FROM of_files WHERE kind = 'page' AND status = 'published' AND is_deleted = 0 ORDER BY path",
-	)
+	pages, err := store.ListPublishedPagesForSitemap(projectDB.Reader())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load sitemap")
 		return
 	}
-	defer rows.Close()
 
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` + "\n")
 
-	for rows.Next() {
-		var path string
-		var updatedAt time.Time
-		if err := rows.Scan(&path, &updatedAt); err != nil {
-			continue
-		}
+	for _, p := range pages {
 		// A parameterized route (/blog/:slug) is a pattern, not a URL a crawler can
 		// fetch; listing it literally would advertise a dead address.
-		if strings.ContainsAny(path, ":{") {
+		if strings.ContainsAny(p.Path, ":{") {
 			continue
 		}
 		b.WriteString("  <url>\n")
-		b.WriteString("    <loc>" + html.EscapeString(baseURL+path) + "</loc>\n")
-		b.WriteString("    <lastmod>" + updatedAt.Format("2006-01-02") + "</lastmod>\n")
+		b.WriteString("    <loc>" + html.EscapeString(baseURL+p.Path) + "</loc>\n")
+		b.WriteString("    <lastmod>" + p.UpdatedAt.Format("2006-01-02") + "</lastmod>\n")
 		b.WriteString("  </url>\n")
-	}
-	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load sitemap")
-		return
 	}
 
 	b.WriteString("</urlset>\n")
@@ -119,15 +107,12 @@ func (h *Handler) ServeManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var storage, body, diskPath sql.NullString
-	err = projectDB.QueryRow(
-		"SELECT storage, body, disk_path FROM of_files WHERE kind = 'file' AND path = 'manifest.json' AND is_deleted = 0",
-	).Scan(&storage, &body, &diskPath)
+	f, err := store.LoadPublicFile(projectDB.Reader(), "manifest.json")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	data, readErr := store.ReadArtifactBytes(storage, body, diskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
+	data, readErr := store.ReadArtifactBytes(f.Storage, f.Body, f.DiskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
 	if readErr != nil {
 		http.NotFound(w, r)
 		return
@@ -152,15 +137,12 @@ func (h *Handler) ServeServiceWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var storage, body, swPath sql.NullString
-	err = projectDB.QueryRow(
-		"SELECT storage, body, disk_path FROM of_files WHERE kind = 'file' AND path = 'service-worker.js' AND is_deleted = 0",
-	).Scan(&storage, &body, &swPath)
+	f, err := store.LoadPublicFile(projectDB.Reader(), "service-worker.js")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	swData, readErr := store.ReadArtifactBytes(storage, body, swPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
+	swData, readErr := store.ReadArtifactBytes(f.Storage, f.Body, f.DiskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
 	if readErr != nil {
 		http.NotFound(w, r)
 		return
@@ -203,19 +185,8 @@ func (h *Handler) ServeFavicon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var filename string
-	err = projectDB.QueryRow(
-		`SELECT path FROM of_files
-		 WHERE kind = 'file' AND is_deleted = 0
-		   AND path IN ('favicon.ico', 'favicon.svg', 'favicon.png')
-		 ORDER BY CASE path
-		   WHEN 'favicon.ico' THEN 1
-		   WHEN 'favicon.svg' THEN 2
-		   ELSE 3
-		 END
-		 LIMIT 1`,
-	).Scan(&filename)
-	if err != nil || filename == "" {
+	filename := store.FindFaviconPath(projectDB.Reader())
+	if filename == "" {
 		serveDefaultFavicon(w)
 		return
 	}
@@ -235,48 +206,7 @@ func serveDefaultFavicon(w http.ResponseWriter) {
 // mimeByExtension returns the correct MIME type for common web file extensions.
 // This is the source of truth, the DB content_type may be wrong if the LLM set it incorrectly.
 func mimeByExtension(filename string) string {
-	switch strings.ToLower(filepath.Ext(filename)) {
-	case ".css":
-		return "text/css"
-	case ".js":
-		return "application/javascript"
-	case ".svg":
-		return "image/svg+xml"
-	case ".json":
-		return "application/json"
-	case ".html", ".htm":
-		return "text/html"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	case ".woff":
-		return "font/woff"
-	case ".woff2":
-		return "font/woff2"
-	case ".ttf":
-		return "font/ttf"
-	case ".otf":
-		return "font/otf"
-	case ".ico":
-		return "image/x-icon"
-	case ".xml":
-		return "application/xml"
-	case ".pdf":
-		return "application/pdf"
-	case ".mp4":
-		return "video/mp4"
-	case ".webm":
-		return "video/webm"
-	case ".mp3":
-		return "audio/mpeg"
-	default:
-		return ""
-	}
+	return mediatype.ContentTypeByFilename(filename)
 }
 
 // ServeFile serves everything under /files/<path>, every kind='file'
@@ -307,17 +237,13 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var storage, body, diskPath, contentType sql.NullString
-	err = projectDB.QueryRow(
-		"SELECT storage, body, disk_path, content_type FROM of_files WHERE kind = 'file' AND path = ? AND is_deleted = 0",
-		filename,
-	).Scan(&storage, &body, &diskPath, &contentType)
+	f, err := store.LoadPublicFile(projectDB.Reader(), filename)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 
-	data, err := store.ReadArtifactBytes(storage, body, diskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
+	data, err := store.ReadArtifactBytes(f.Storage, f.Body, f.DiskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -325,7 +251,7 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request) {
 
 	ct := mimeByExtension(filename)
 	if ct == "" {
-		ct = contentType.String
+		ct = f.ContentType.String
 	}
 	if ct == "" {
 		ct = "application/octet-stream"

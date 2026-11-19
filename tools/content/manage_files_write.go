@@ -213,6 +213,9 @@ func artifactActionSave(ctx *tools.ToolContext, act *ArtSave) (*tools.Result, er
 		"version":     version,
 		"total_lines": lineCount(body),
 	}
+	if kind == "file" {
+		data["url"] = "/files/" + path
+	}
 	addParseStatus(data, kind, path, body)
 	addImportStatus(data, pendingImports)
 	if len(autoImports) > 0 {
@@ -451,6 +454,15 @@ func resolveWrittenImports(ctx *tools.ToolContext, kind, path, prevBody, body, a
 	return outBody, autoImports, normalizedSpecs, pending, rejImports
 }
 
+// patchUnchanged and patchAtomicNote are the load-bearing facts every patch-REFUSAL
+// message states: the file did NOT change, and a batch never half-applies. Single-homed so
+// the model reads them identically wherever a patch is refused (a drifted "unchanged"
+// promise is what sends it to re-read a file it need not), and a reword lands in one place.
+const (
+	patchUnchanged  = "NO change was applied and the file is UNCHANGED"
+	patchAtomicNote = "patch is atomic - it never half-edits a file"
+)
+
 // insertShapeNote teaches the insert shape on the no-op reject. Patch has no
 // locate-only step, so a hunk that repeats its anchor unchanged does nothing.
 const insertShapeNote = " Patch has no locate-only step: a hunk never just marks a place. To ADD text, use the insert form, which names the anchor once and the new lines once: {\"insert_after\": \"load();\", \"text\": \"setInterval(load, 5000);\"} (or insert_before, or {\"append\": ...} / {\"prepend\": ...} for the end or start of the file). To CHANGE text, send search and replace with different text."
@@ -506,7 +518,7 @@ func fuzzyDeletionResult(kind, path string, pr PatchResult, total int) *tools.Re
 		Success: false,
 		Code:    "patch_fuzzy_deletion",
 		Error: fmt.Sprintf(
-			"patch refused, so NO change was applied and the file is UNCHANGED: %d of %d edit(s) would DELETE a span located only by an approximate (fuzzy) match - the pattern that silently truncates a file: %s. Re-send each with an exact `search` copied verbatim from the file, or use `save` to rewrite the file.%s%s",
+			"patch refused, so "+patchUnchanged+": %d of %d edit(s) would DELETE a span located only by an approximate (fuzzy) match - the pattern that silently truncates a file: %s. Re-send each with an exact `search` copied verbatim from the file, or use `save` to rewrite the file.%s%s",
 			len(pr.Refused), total, strings.Join(quotedLabels(pr.Refused), ", "), consumedSuffix, noopSuffix),
 		Data: data,
 	}
@@ -696,7 +708,7 @@ func artifactActionPatch(ctx *tools.ToolContext, kind, path string, patchesArg [
 			Success: false,
 			Code:    "patch_anchor_not_found",
 			Error: fmt.Sprintf(
-				"%d of %d patch anchors were not found, so NO change was applied and the file is UNCHANGED (patch is atomic - it never half-edits a file). Any anchors that DID match are in `matched_rolled_back` - they were undone, not saved, so do not assume any hunk landed or patch against a half-edited file. Unmatched search text: %s. That text is not in the current file (an anchor copied from your own draft can miss when %s). To fix: `get` the exact region and copy the anchor verbatim into `search`, then patch again; or, if you do not hold the file's current bytes, re-save the whole corrected body with `save` (it carries your own complete text and cannot drift).%s%s%s%s%s%s",
+				"%d of %d patch anchors were not found, so "+patchUnchanged+" ("+patchAtomicNote+"). Any anchors that DID match are in `matched_rolled_back` - they were undone, not saved, so do not assume any hunk landed or patch against a half-edited file. Unmatched search text: %s. That text is not in the current file (an anchor copied from your own draft can miss when %s). To fix: `get` the exact region and copy the anchor verbatim into `search`, then patch again; or, if you do not hold the file's current bytes, re-save the whole corrected body with `save` (it carries your own complete text and cannot drift).%s%s%s%s%s%s",
 				len(absent), total, strings.Join(labels, ", "), driftCause, hintSuffix, staleSuffix, consumedSuffix, noopSuffix, refusedSuffix, loopSuffix),
 			Data: data,
 		}, nil
@@ -1073,6 +1085,11 @@ func artifactActionBulkReplace(ctx *tools.ToolContext, act *ArtBulkReplace) (*to
 	if len(skipped) > 0 {
 		data["files_skipped"] = len(skipped)
 		data["skipped"] = skipped
+	}
+	if !preview && len(changed) == 0 && len(skipped) > 0 {
+		data["note"] = fmt.Sprintf("bulk_replace matched %d file(s) but all were skipped/rejected (0 files changed); inspect skipped and fix with action=patch instead of repeating bulk_replace", len(skipped))
+	} else if totalApplied == 0 && len(skipped) == 0 {
+		data["note"] = "0 matches across scanned files; do not repeat the same pattern — verify path_prefix/path_glob or read the target file first."
 	}
 	return tools.Ok(data), nil
 }

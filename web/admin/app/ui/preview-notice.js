@@ -1,6 +1,6 @@
 /**
- * Early release messaging, kept in one place so the setup step, the shell
- * banner and the About dialog all say the same thing.
+ * Early release messaging, kept in one place so the setup step and the About
+ * dialog say the same thing.
  */
 
 import { t } from '../core/i18n.js';
@@ -15,10 +15,3 @@ export const PREVIEW_POINTS = [
   t('preview.point2'),
   t('preview.point3'),
 ];
-
-/** One-line summary for the banner and the About dialog. */
-export function previewSummary(version) {
-  return version
-    ? t('preview.summaryVersion', { version })
-    : t('preview.summary');
-}

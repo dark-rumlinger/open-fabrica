@@ -197,6 +197,8 @@ export function flowsView(action, args, result, status) {
   const messages = list(d.failures);
 
   // The live event may carry only the error text ("2 of 4 flows failed: a, b").
+  // head[1] is the authoritative count from Go; splitting head[3] on commas can
+  // over-count when a flow name itself contains commas.
   let failed = failedNames;
   let total = passed.length + failed.length;
   const head = FAILED_HEAD.exec(error);
@@ -204,7 +206,7 @@ export function flowsView(action, args, result, status) {
     failed = head[3] ? head[3].split(/,\s*/) : [];
     total = Number(head[2]);
   }
-  const failedCount = failed.length || (head ? Number(head[1]) : 0);
+  const failedCount = failedNames.length || (head ? Number(head[1]) : failed.length);
 
   const saved = writing && typeof d.saved === 'string'
     ? { flows: scriptNames.length || null, steps: typeof d.steps === 'number' ? d.steps : null }
@@ -228,6 +230,9 @@ export function flowsView(action, args, result, status) {
     const reasonKey = code === 'diagnostic_suite' || code === 'flows_dropped' ? `fv.reason.${code}` : '';
     const sub = (reasonKey && t(reasonKey)) || clip(error.split('\n')[0], 160) || t('fv.refused');
     return view('rejected', 'warning', writing ? t('fv.notSaved') : t('fv.notReplayed'), sub, { ...extra, expanded: true });
+  }
+  if (d.already_passed) {
+    return view('already_passed', 'neutral', t('fv.alreadyPassed'), t('fv.alreadyPassedSub'), { ...extra, rows: [] });
   }
   if (d.budget_exhausted) {
     return view('limit', 'warning', t('fv.limitTitle'), t('fv.limitSub'), { ...extra, expanded: true });

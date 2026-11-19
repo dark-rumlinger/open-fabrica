@@ -107,7 +107,7 @@ func EmbedTexts(ctx context.Context, globalDB *sql.DB, enc *security.Encryptor, 
 		if perr != nil {
 			continue
 		}
-		ep, ok := prov.(EmbeddingProvider)
+		ep, ok := As[EmbeddingProvider](prov)
 		if !ok {
 			continue
 		}

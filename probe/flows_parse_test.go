@@ -287,8 +287,8 @@ func TestSitePath(t *testing.T) {
 	for in, want := range map[string]string{
 		"/f/x7Kq":                              "/f/x7Kq",
 		"https://drop.example/f/x7Kq?dl=1#top": "/f/x7Kq?dl=1#top",
-		"coral-yarrow.localhost:5733/f/x7Kq":   "/f/x7Kq",
-		"http://coral-yarrow.localhost:5733":   "/",
+		"app.localhost:5733/f/x7Kq":            "/f/x7Kq",
+		"http://app.localhost:5733":            "/",
 		"  https://drop.example/manage/abc  ":  "/manage/abc",
 	} {
 		got, ok := sitePath(in)
@@ -730,5 +730,40 @@ func TestParseFlowSource_BrowserStateVerbs(t *testing.T) {
 	}
 	if _, err := ParseFlowSource(`export default { flows: [{ name: "a", viewport: "watch", steps: [{ goto: "/" }] }] }`); err == nil {
 		t.Error("an unknown viewport must be rejected")
+	}
+}
+
+func TestLintAsyncPresence(t *testing.T) {
+	suite, err := ParseFlowSource(`export default { flows: [
+		{ name: "page load wait", steps: [
+			{ goto: "/" },
+			{ waitFor: ".join-card", timeout: 15000 },
+			{ expectVisible: ".join-title" },
+			{ click: ".join-btn" },
+			{ waitFor: ".hud", timeout: 20000 },
+			{ expectVisible: ".shard-counter" },
+		] },
+		{ name: "count confirms", steps: [
+			{ goto: "/" },
+			{ click: "#join" },
+			{ waitFor: ".roster-row", timeout: 12000 },
+			{ expectCount: ".roster-row", count: 2 },
+		] },
+		{ name: "unconfirmed reply", steps: [
+			{ goto: "/" },
+			{ click: "#send" },
+			{ waitFor: ".reply-card", timeout: 15000 },
+			{ click: "#next" },
+		] },
+	] }`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ws := strings.Join(suite.Lint(), "\n")
+	if strings.Contains(ws, "page load wait") || strings.Contains(ws, "count confirms") {
+		t.Errorf("page-load wait and count/sub-element confirmation must not warn:\n%s", ws)
+	}
+	if !strings.Contains(ws, "unconfirmed reply") {
+		t.Errorf("unconfirmed slow wait after click must still warn, got:\n%s", ws)
 	}
 }

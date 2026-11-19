@@ -15,6 +15,7 @@ import * as state from '../core/state.js';
 import { formGroup, segmented } from './helpers.js';
 import { createModelPicker } from './model-picker.js';
 import { promptChips } from './project-examples.js';
+import { createImageAttach } from './image-attach.js';
 
 const AMBITION_LEVELS = ['off', 'low', 'medium', 'high'];
 const AMBITION_KEY = 'of:ambitionLevel';
@@ -255,9 +256,21 @@ export async function createPromptComposer() {
     setAdvanced(!advancedOpen);
   });
 
+  const attach = createImageAttach({ label: t('chat.attachImage') });
+  attach.bindPaste(descInput);
+  const promptBox = h('div', { className: 'prompt-box' }, [
+    descInput,
+    h('div', { className: 'prompt-box__dropzone' }, [
+      attach.fileInput,
+      attach.button,
+      attach.strip,
+    ]),
+  ]);
+  attach.bindDrop(promptBox);
+
   const element = h('div', { className: 'prompt-composer' }, [
     h('div', { className: 'form-group prompt-group' }, [
-      descInput,
+      promptBox,
       chips,
     ]),
     advancedToggle,
@@ -280,6 +293,7 @@ export async function createPromptComposer() {
         ambition: ambitionControl._value,
         userFlows: userFlowsCheck.checked,
         model: picker.getSelectedModel(),
+        images: attach.images(),
       };
     },
 

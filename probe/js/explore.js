@@ -235,14 +235,18 @@
         var all = document.body.getElementsByTagName('*'), hits = [];
         for (var i = 0; i < all.length && i < 4000; i++) {
           var el = all[i], r = el.getBoundingClientRect();
-          if (r.width > 0 && r.right > vw + 2 && visible(el)) hits.push(el);
+          if (r.width <= 0 || !visible(el)) continue;
+          var cs = getComputedStyle(el);
+          var scrollable = cs.overflowX === 'auto' || cs.overflowX === 'scroll';
+          var contentRight = scrollable ? r.right : Math.max(r.right, r.left + el.scrollWidth);
+          if (contentRight > vw + 2) hits.push({ el: el, right: contentRight });
         }
         // Report the innermost offenders: an element whose child also overflows
         // only overflows because of that child.
         for (var j = 0; j < hits.length && off.length < 3; j++) {
           var leaf = true;
-          for (var k = 0; k < hits.length; k++) if (k !== j && hits[j].contains(hits[k])) { leaf = false; break; }
-          if (leaf) off.push(path(hits[j]) + ' ends at ' + Math.round(hits[j].getBoundingClientRect().right) + 'px');
+          for (var k = 0; k < hits.length; k++) if (k !== j && hits[j].el.contains(hits[k].el)) { leaf = false; break; }
+          if (leaf) off.push(path(hits[j].el) + ' ends at ' + Math.round(hits[j].right) + 'px');
         }
       }
       var text = document.body ? (document.body.innerText || '').replace(/\s+/g, ' ').trim().length : 0;

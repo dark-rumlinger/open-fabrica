@@ -2,6 +2,7 @@ package public
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"openfabrica/db/models"
 	"openfabrica/internal/endpoints"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 // Dynamic API Handler
@@ -19,7 +21,7 @@ import (
 //   - dynamic_api_rls.go     buildAPIRequestContext, CORS helpers (security-critical)
 //   - dynamic_api_crud.go    apiList / apiGetOne / apiInsert / apiUpdate / apiDelete
 //   - dynamic_api_stats.go   apiStats aggregation handler
-//   - dynamic_api_helpers.go loadEndpoint, validateProjectToken, scan/strip,
+//   - dynamic_api_helpers.go loadEndpoint, scan/strip,
 //                            parseFilterParam, parseFieldsParam, columnExists, ...
 
 // apiRequestContext holds per-request context for row-level security.
@@ -156,10 +158,16 @@ func (h *Handler) DynamicAPI(w http.ResponseWriter, r *http.Request) {
 		if whole, werr := h.loadEndpoint(projectDB.Reader(), fullPath); werr == nil {
 			ep = whole
 			endpointPath, rowID = fullPath, ""
+		} else if errors.Is(werr, errEndpointMisconfigured) {
+			err = werr
 		}
 	}
-	if ep == nil {
+	if ep == nil && err == nil {
 		ep, err = h.loadEndpoint(projectDB.Reader(), endpointPath)
+	}
+	if errors.Is(err, errEndpointMisconfigured) {
+		writeError(w, http.StatusInternalServerError, "endpoint misconfigured")
+		return
 	}
 	if err != nil {
 		// Nothing serves this (path, method). If some kind owns the route for a
@@ -201,14 +209,14 @@ func (h *Handler) DynamicAPI(w http.ResponseWriter, r *http.Request) {
 	// Per-endpoint rate limit (requests/min per IP), configured via manage_api.
 	// Applied uniformly to reads and writes; the OPTIONS preflight already
 	// returned above so it is not counted. rate_limit=0 disables the cap.
-	if !checkEndpointRateLimit("api:"+projectKeyOf(r)+":"+endpointPath+":"+middleware.RateLimitIdentity(r), ep.RateLimit) {
+	if !h.checkEndpointRateLimit("api:"+projectKeyOf(r)+":"+endpointPath+":"+middleware.RateLimitIdentity(r), ep.RateLimit) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
 
 	// Auth + row-level security context. On failure the helper has already
 	// written the response body, so just return.
-	rc, _, ok := h.buildAPIRequestContext(w, r, project, ep)
+	rc, ok := h.buildAPIRequestContext(w, r, project, ep)
 	if !ok {
 		return
 	}
@@ -276,37 +284,11 @@ func (h *Handler) DynamicAPI(w http.ResponseWriter, r *http.Request) {
 // the given method in the of_endpoints spine, or "" when none does. A stored
 // method of '*' matches any request method (WebSocket upgrade, auth namespace).
 func (h *Handler) resolveSpineKind(reader *sql.DB, path, subSegment, method string) string {
-	var kind string
-	err := reader.QueryRow(
-		"SELECT kind FROM of_endpoints WHERE path = ? AND sub_segment = ? AND (method = ? OR method = '*') LIMIT 1",
-		path, subSegment, strings.ToUpper(method),
-	).Scan(&kind)
-	if err != nil {
-		return ""
-	}
-	return kind
+	return store.ResolveSpineEndpointKind(reader, path, subSegment, method)
 }
 
-// spinePathExists reports whether any kind owns a route at this URL for ANY
-// method - the same (path, sub_segment) pairs resolveSpineKind tries, minus the
-// method predicate. It separates "no such endpoint" (404) from "wrong method on
-// an endpoint that exists" (405).
 func (h *Handler) spinePathExists(reader *sql.DB, fullPath, endpointPath, rowID string) bool {
-	var n int
-	if rowID != "" {
-		if err := reader.QueryRow(
-			"SELECT COUNT(*) FROM of_endpoints WHERE path = ? AND sub_segment = ?",
-			endpointPath, rowID,
-		).Scan(&n); err == nil && n > 0 {
-			return true
-		}
-	}
-	if err := reader.QueryRow(
-		"SELECT COUNT(*) FROM of_endpoints WHERE path = ? AND sub_segment = ''", fullPath,
-	).Scan(&n); err == nil && n > 0 {
-		return true
-	}
-	return false
+	return store.SpinePathExists(reader, fullPath, endpointPath, rowID)
 }
 
 // dispatchViaSpine resolves the request against the of_endpoints spine and

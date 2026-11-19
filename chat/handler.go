@@ -1,20 +1,27 @@
 package chat
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"openfabrica/internal/httpx"
 	"openfabrica/internal/safego"
+	"openfabrica/providers/llm"
 )
 
-const maxChatBodySize = 1 << 20 // 1 MB
+const (
+	maxChatBodySize = 16 << 20 // 16 MB
+	maxImageCount   = 4
+	maxImageBytes   = 4 << 20 // 4 MB per decoded image
+)
 
 const sessionMaxIdle = 2 * time.Hour
 
@@ -71,9 +78,41 @@ func (h *ChatHandler) cleanupLoop() {
 	}
 }
 
+// ImageInput is a base64-encoded image attachment in a chat or project request.
+type ImageInput struct {
+	MIMEType string `json:"mime_type"`
+	Data     string `json:"data"`
+}
+
+// DecodeImageInputs validates and decodes up to maxImageCount base64 images.
+func DecodeImageInputs(inputs []ImageInput) ([]llm.MessageImage, error) {
+	if len(inputs) > maxImageCount {
+		return nil, fmt.Errorf("at most %d images are allowed", maxImageCount)
+	}
+	var out []llm.MessageImage
+	for _, in := range inputs {
+		mime := strings.ToLower(strings.TrimSpace(in.MIMEType))
+		switch mime {
+		case "image/png", "image/jpeg", "image/webp", "image/gif":
+		default:
+			return nil, fmt.Errorf("unsupported image type %q", in.MIMEType)
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(in.Data))
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 image data: %w", err)
+		}
+		if len(raw) == 0 || len(raw) > maxImageBytes {
+			return nil, fmt.Errorf("image size must be between 1 byte and %d bytes", maxImageBytes)
+		}
+		out = append(out, llm.MessageImage{MIMEType: mime, Data: raw})
+	}
+	return out, nil
+}
+
 // sendRequest is the JSON body sent by the client to the send endpoint.
 type sendRequest struct {
-	Message string `json:"message"`
+	Message string       `json:"message"`
+	Images  []ImageInput `json:"images,omitempty"`
 }
 
 // writeChatError sends the shared {"error": msg} envelope (internal/httpx) so
@@ -113,9 +152,17 @@ func (h *ChatHandler) HandleSend(w http.ResponseWriter, r *http.Request) {
 		writeChatError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Message == "" {
+	if strings.TrimSpace(req.Message) == "" && len(req.Images) == 0 {
 		writeChatError(w, http.StatusBadRequest, "message is required")
 		return
+	}
+	images, err := DecodeImageInputs(req.Images)
+	if err != nil {
+		writeChatError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		req.Message = "Please inspect the attached image(s)."
 	}
 
 	// Open creates a database for any id it is given; a stale tab chatting into a
@@ -140,7 +187,7 @@ func (h *ChatHandler) HandleSend(w http.ResponseWriter, r *http.Request) {
 	// so the caller would see a network error for work that finished.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) // best-effort; some writers have no deadline
 
-	result, sendErr := session.Send(r.Context(), req.Message)
+	result, sendErr := session.SendWithImages(r.Context(), req.Message, images)
 	if sendErr != nil {
 		logger.Error("session send error", "error", sendErr)
 		writeChatError(w, http.StatusInternalServerError, sendErr.Error())

@@ -11,6 +11,7 @@ import (
 
 	"openfabrica/analysis"
 	"openfabrica/db/models"
+	"openfabrica/store"
 )
 
 // stampInlineScriptNonce adds nonce="<nonce>" to every inline <script> (no src=,
@@ -50,13 +51,6 @@ func stampInlineScriptNonce(doc, nonce string) string {
 	return b.String()
 }
 
-// currentPlanJSONQuery returns the project's current plan_json: the most recent
-// of_runs row carrying one (written at PLAN). Mirrors the query in
-// tools/project/manage_libraries.go and engine.latestCompletedPlan.
-const currentPlanJSONQuery = `SELECT plan_json FROM of_runs
-	WHERE plan_json IS NOT NULL AND plan_json != ''
-	ORDER BY started_at DESC, id DESC LIMIT 1`
-
 type layoutData struct {
 	Template string
 }
@@ -75,31 +69,14 @@ func loadLayout(projectDB *sql.DB, name string) *layoutData {
 			return &layoutData{Template: body}
 		}
 	}
-	var fallbackBody sql.NullString
-	err := projectDB.QueryRow(
-		`SELECT body FROM of_files
-		 WHERE kind = 'layout' AND is_deleted = 0 AND body != ''
-		 ORDER BY updated_at DESC LIMIT 1`,
-	).Scan(&fallbackBody)
-	if err != nil || !fallbackBody.Valid || fallbackBody.String == "" {
-		return nil
+	if body := store.LoadFallbackLayoutBody(projectDB); body != "" {
+		return &layoutData{Template: body}
 	}
-	return &layoutData{Template: fallbackBody.String}
+	return nil
 }
 
 func readLayoutBody(projectDB *sql.DB, name string) string {
-	if name == "" {
-		return ""
-	}
-	var body sql.NullString
-	err := projectDB.QueryRow(
-		"SELECT body FROM of_files WHERE kind = 'layout' AND path = ? AND is_deleted = 0",
-		name,
-	).Scan(&body)
-	if err != nil || !body.Valid {
-		return ""
-	}
-	return body.String
+	return store.LoadLayoutBody(projectDB, name)
 }
 
 // assetVersions maps each live file artifact's path to its cache-busting query
@@ -113,27 +90,14 @@ type assetVersions map[string]string
 // loadAssetVersions reads the version suffix of every live file artifact. A failed
 // query yields no suffixes, which disables cache-busting and nothing more.
 func loadAssetVersions(projectDB *sql.DB) assetVersions {
-	rows, err := projectDB.Query(
-		`SELECT f.path, f.id, COALESCE(f.size,0), COALESCE(f.updated_at,''),
-		        COALESCE((SELECT MAX(h.version_number) FROM of_file_history h WHERE h.kind = f.kind AND h.path = f.path), 0)
-		   FROM of_files f
-		  WHERE f.kind = 'file' AND f.is_deleted = 0`)
+	rows, err := store.ListFileVersions(projectDB)
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 	out := assetVersions{}
-	for rows.Next() {
-		var path, updated string
-		var id, size, version int64
-		if rows.Scan(&path, &id, &size, &updated, &version) != nil {
-			continue
-		}
-		h := sha256.Sum256([]byte(fmt.Sprintf("%d|%d|%s|%d", id, size, updated, version)))
-		out[path] = fmt.Sprintf("?v=%x", h[:4])
-	}
-	if rows.Err() != nil {
-		return nil
+	for _, r := range rows {
+		h := sha256.Sum256([]byte(fmt.Sprintf("%d|%d|%s|%d", r.ID, r.Size, r.UpdatedAt, r.Version)))
+		out[r.Path] = fmt.Sprintf("?v=%x", h[:4])
 	}
 	return out
 }
@@ -153,26 +117,15 @@ const serviceWorkerPath = "service-worker.js"
 // the browser de-dupes module loads by URL, so a tag for an also-imported file is
 // harmless and is required when an entry sits in an import cycle.
 func autoInjectAssets(projectDB *sql.DB, versions assetVersions) (cssLinks, jsScripts, iconLinks string) {
-	rows, err := projectDB.Query(
-		`SELECT path FROM of_files
-		 WHERE kind = 'file' AND is_deleted = 0 AND scope = 'global'
-		   AND (path LIKE '%.css' OR path LIKE '%.js' OR path LIKE '%.mjs'
-		        OR path IN ('favicon.svg', 'favicon.png', 'favicon.ico', 'apple-touch-icon.png'))
-		 ORDER BY path`,
-	)
+	paths, err := store.ListGlobalAssetPaths(projectDB)
 	if err != nil {
 		return "", "", ""
 	}
-	defer rows.Close()
 
 	var css, js, icons strings.Builder
 	// Emit favicons in preference order: SVG -> ICO -> PNG, then apple-touch-icon.
 	var hasSVG, hasICO, hasPNG, hasApple bool
-	for rows.Next() {
-		var fn string
-		if rows.Scan(&fn) != nil {
-			continue
-		}
+	for _, fn := range paths {
 		lower := strings.ToLower(fn)
 		switch {
 		case strings.HasSuffix(lower, ".css"):
@@ -191,10 +144,6 @@ func autoInjectAssets(projectDB *sql.DB, versions assetVersions) (cssLinks, jsSc
 		case lower == "apple-touch-icon.png":
 			hasApple = true
 		}
-	}
-	// A failed iteration is handled like a failed query: no injected tags.
-	if rows.Err() != nil {
-		return "", "", ""
 	}
 	if hasSVG {
 		icons.WriteString(`  <link rel="icon" type="image/svg+xml" href="` + versions.url("favicon.svg") + `">` + "\n")
@@ -223,8 +172,7 @@ func loadImportMap(projectDB *sql.DB, versions assetVersions) string {
 	}
 	imports := map[string]string{}
 	// External module-kind libraries from the plan.
-	var planJSON sql.NullString
-	if err := projectDB.QueryRow(currentPlanJSONQuery).Scan(&planJSON); err == nil && planJSON.Valid && planJSON.String != "" {
+	if planJSON := store.LoadCurrentPlanJSON(projectDB); planJSON != "" {
 		var shell struct {
 			ExternalLibraries []struct {
 				URL        string `json:"url"`
@@ -232,7 +180,7 @@ func loadImportMap(projectDB *sql.DB, versions assetVersions) string {
 				ModuleName string `json:"module_name"`
 			} `json:"external_libraries"`
 		}
-		if json.Unmarshal([]byte(planJSON.String), &shell) == nil {
+		if json.Unmarshal([]byte(planJSON), &shell) == nil {
 			for _, lib := range shell.ExternalLibraries {
 				if !strings.EqualFold(strings.TrimSpace(lib.Kind), "module") {
 					continue
@@ -266,30 +214,16 @@ func loadImportMap(projectDB *sql.DB, versions assetVersions) string {
 // importable by bare name through the importmap; only the service worker (fetched
 // by the browser's registration machinery, never imported) is excluded.
 func projectModuleFilePaths(projectDB *sql.DB) []string {
-	rows, err := projectDB.Query(
-		`SELECT path
-		   FROM of_files
-		  WHERE kind = 'file' AND is_deleted = 0
-		    AND (path LIKE '%.js' OR path LIKE '%.mjs')`,
-	)
+	raw, err := store.ListJSModulePaths(projectDB)
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 	var paths []string
-	for rows.Next() {
-		var p string
-		if rows.Scan(&p) != nil {
-			continue
-		}
+	for _, p := range raw {
 		if p == serviceWorkerPath {
 			continue
 		}
 		paths = append(paths, p)
-	}
-	// A failed iteration is handled like a failed query: no module paths.
-	if rows.Err() != nil {
-		return nil
 	}
 	return paths
 }
@@ -327,15 +261,14 @@ func loadExternalLibTags(projectDB *sql.DB, alreadyPresent string) string {
 	if projectDB == nil {
 		return ""
 	}
-	var planJSON sql.NullString
-	err := projectDB.QueryRow(currentPlanJSONQuery).Scan(&planJSON)
-	if err != nil || !planJSON.Valid || planJSON.String == "" {
+	planJSON := store.LoadCurrentPlanJSON(projectDB)
+	if planJSON == "" {
 		return ""
 	}
 	var shell struct {
 		ExternalLibraries []externalLibSpec `json:"external_libraries"`
 	}
-	if err := json.Unmarshal([]byte(planJSON.String), &shell); err != nil {
+	if err := json.Unmarshal([]byte(planJSON), &shell); err != nil {
 		return ""
 	}
 	return buildExternalLibTags(shell.ExternalLibraries, alreadyPresent)
@@ -380,16 +313,20 @@ func buildExternalLibTags(libs []externalLibSpec, alreadyPresent string) string 
 		}
 		// Cross-origin assets need crossorigin="anonymous" for SRI to take effect;
 		// integrity= alone is silently ignored by browsers without it.
+		// Without integrity=, classic <script> / <link rel="stylesheet"> tags must
+		// NOT force crossorigin="anonymous": it switches the fetch to CORS mode and
+		// breaks CDNs that omit Access-Control-Allow-Origin (e.g. cdn.tailwindcss.com).
+		// Font-provider dynamic CSS and font preloads keep crossorigin="anonymous"
+		// (providers send ACAO: *, and <link rel="preload" as="font"> requires CORS).
 		extraAttrs := ""
 		if analysis.CrossOriginURL(url) {
-			extraAttrs = ` crossorigin="anonymous"`
-			// integrity= is emitted only for assets whose bytes are stable. Font-
-			// provider stylesheet endpoints content-negotiate on the User-Agent and
-			// change over time, so a build-time hash never matches and the browser
-			// blocks the load; suppress integrity for them (crossorigin stays, the
-			// providers send ACAO: *).
-			if integ := strings.TrimSpace(lib.Integrity); integ != "" && !analysis.ExternalURLIsDynamicCSS(url) {
-				extraAttrs += ` integrity="` + integ + `"`
+			integ := strings.TrimSpace(lib.Integrity)
+			dynamicCSS := analysis.ExternalURLIsDynamicCSS(url)
+			switch {
+			case integ != "" && !dynamicCSS:
+				extraAttrs = ` crossorigin="anonymous" integrity="` + integ + `"`
+			case dynamicCSS || analysis.ExternalURLIsFontFile(url):
+				extraAttrs = ` crossorigin="anonymous"`
 			}
 		}
 		switch {
@@ -420,26 +357,7 @@ func buildExternalLibTags(libs []externalLibSpec, alreadyPresent string) string 
 // loadPageAssetPaths returns the ordered list of artifact paths linked to a
 // page via of_page_assets. Empty slice (not nil) if no links exist.
 func loadPageAssetPaths(projectDB *sql.DB, pagePath string) []string {
-	rows, err := projectDB.Query(
-		`SELECT file_path FROM of_page_assets WHERE page_path = ? ORDER BY position, file_path`,
-		pagePath,
-	)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var p string
-		if rows.Scan(&p) == nil {
-			out = append(out, p)
-		}
-	}
-	// A failed iteration is handled like a failed query: no linked assets.
-	if rows.Err() != nil {
-		return nil
-	}
-	return out
+	return store.ListPageAssetPaths(projectDB, pagePath)
 }
 
 // splitAssetPathsByType groups artifact paths into CSS and JS URL lists for

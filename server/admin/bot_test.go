@@ -17,6 +17,7 @@ import (
 	"openfabrica/events"
 	"openfabrica/security"
 	sdeps "openfabrica/server/deps"
+	"openfabrica/store"
 )
 
 func newBotTestDeps(t *testing.T) *Deps {
@@ -192,7 +193,7 @@ func TestSecretsListFlagsEmptyValues(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "cipher-blob") {
 		t.Fatal("the stored value leaked into the list")
 	}
-	var got []secretEntry
+	var got []store.SecretEntry
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
 	}

@@ -20,6 +20,7 @@ import (
 //   `arg:"name[,required]"`
 //   `desc:"LLM-facing description (mandatory)"`
 //   `enum:"a,b,c"`
+//   `sensitive:"true"` (a credential: redacted from LLM logs)
 
 // actionFieldInfo captures the per-field metadata extracted from struct tags.
 type actionFieldInfo struct {
@@ -37,6 +38,22 @@ type actionFieldInfo struct {
 	HasMin     bool
 	HasMax     bool
 	ItemsType  string // element type from `items:"..."` (array args only); overrides the Go-kind guess
+	Sensitive  bool   // `sensitive:"true"`: the value is a credential and is redacted from LLM logs
+}
+
+// secretArgName reports whether an arg is named like a credential. Such an arg
+// must carry `sensitive:"true"`, so a new one cannot reach the logs by omission.
+func secretArgName(name string) bool {
+	switch name {
+	case "password", "token", "secret", "api_key":
+		return true
+	}
+	for _, suffix := range []string{"_password", "_secret", "_token", "_api_key"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // itemsTypes are the values an `items:"..."` tag may name: a JSON Schema element type,
@@ -124,6 +141,10 @@ func extractActionFields(t reflect.Type) ([]actionFieldInfo, error) {
 		if err != nil {
 			return nil, err
 		}
+		sensitive := f.Tag.Get("sensitive") == "true"
+		if secretArgName(name) && !sensitive {
+			return nil, fmt.Errorf("%s.%s: arg %q names a credential and needs sensitive:\"true\"", t.Name(), f.Name, name)
+		}
 		out = append(out, actionFieldInfo{
 			GoField:    f.Name,
 			ArgName:    name,
@@ -139,6 +160,7 @@ func extractActionFields(t reflect.Type) ([]actionFieldInfo, error) {
 			HasMin:     hasMin,
 			HasMax:     hasMax,
 			ItemsType:  itemsType,
+			Sensitive:  sensitive,
 		})
 	}
 	return out, nil
@@ -297,6 +319,7 @@ func fieldsToParams(t reflect.Type, fields []actionFieldInfo) []Param {
 			Max:         fi.Max,
 			HasMin:      fi.HasMin,
 			HasMax:      fi.HasMax,
+			Sensitive:   fi.Sensitive,
 		})
 	}
 	return out

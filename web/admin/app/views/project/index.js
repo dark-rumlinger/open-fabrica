@@ -153,9 +153,7 @@ async function mountProjectDetail(scope, container, params) {
     ...(project.domain ? [createHostingChip(projectId, { scope })] : []),
     h('div', { className: 'project-context__controls' }, [
       phaseHost,
-      // Start, Pause and Resume are admin-only routes; a non-admin would only
-      // ever get a 403 from this button.
-      ...(state.isAdmin() ? [actionBtn] : []),
+      actionBtn,
     ]),
   ]);
   setProjectContext(context);

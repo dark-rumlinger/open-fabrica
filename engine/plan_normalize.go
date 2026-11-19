@@ -55,20 +55,3 @@ func normalizeEntryExports(p *Plan) []string {
 	}
 	return applied
 }
-
-// planModuleClaimed reports whether any task OWNs (paths) or EDITS the client module
-// at normalized path norm - i.e. the path is already spoken for, so a normalization
-// must not add it to a different task.
-func planModuleClaimed(p *Plan, norm string) bool {
-	for _, t := range p.Tasks {
-		for _, pth := range t.Paths {
-			if normPlanPath(pth) == norm {
-				return true
-			}
-		}
-		if taskEditsModule(t, norm) {
-			return true
-		}
-	}
-	return false
-}

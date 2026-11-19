@@ -521,10 +521,17 @@ type ScheduleRunNow struct {
 
 func (a *ScheduleRunNow) ActionName() string { return "run_schedule_now" }
 func (a *ScheduleRunNow) Doc() string {
-	return "Force a scheduled task to run on the next scheduler tick (enabled tasks only)"
+	return "Run an enabled scheduled task immediately (native actions run synchronously and return their result; prompt-only tasks queue for the next tick)"
 }
 func (a *ScheduleRunNow) Example() any { return &ScheduleRunNow{ID: 1} }
 func (a *ScheduleRunNow) Run(ctx *tools.ToolContext) (*tools.Result, error) {
+	if ctx.RunScheduleNowFunc != nil {
+		out, err := ctx.RunScheduleNowFunc(ctx.Context(), a.ID)
+		if err != nil {
+			return tools.FailErr(err), nil
+		}
+		return tools.Ok(out), nil
+	}
 	res, err := ctx.DB.Exec(
 		"UPDATE of_scheduled_tasks SET next_run = CURRENT_TIMESTAMP WHERE id = ? AND is_enabled = 1",
 		a.ID,

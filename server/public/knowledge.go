@@ -3,14 +3,13 @@ package public
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"fmt"
 	"log/slog"
 	"math"
 	"sort"
 	"strings"
 
 	"openfabrica/providers/llm"
+	"openfabrica/store"
 )
 
 // retrieveKnowledgeContext returns the top-K most relevant chunk texts for a
@@ -24,8 +23,8 @@ func (h *Handler) retrieveKnowledgeContext(ctx context.Context, projectID int, r
 		return ""
 	}
 
-	var table string
-	if err := readDB.QueryRow("SELECT table_name FROM of_knowledge_bases WHERE name = ?", baseName).Scan(&table); err != nil {
+	table := store.LoadKnowledgeTable(readDB, baseName)
+	if table == "" {
 		return ""
 	}
 
@@ -39,35 +38,18 @@ func (h *Handler) retrieveKnowledgeContext(ctx context.Context, projectID int, r
 	}
 	queryEmb := embeddings[0]
 
-	// table comes from our own registry (sanitized at create_base), safe to use.
-	rows, err := readDB.Query(fmt.Sprintf("SELECT text, _embedding FROM %s WHERE _embedding != '' AND _embedding IS NOT NULL", table))
-	if err != nil {
+	chunks, err := store.LoadKnowledgeChunks(readDB, table)
+	if err != nil || len(chunks) == 0 {
 		return ""
 	}
-	defer rows.Close()
 
 	type scored struct {
 		text string
 		sim  float64
 	}
-	var ranked []scored
-	for rows.Next() {
-		var text, embStr string
-		if rows.Scan(&text, &embStr) != nil || embStr == "" {
-			continue
-		}
-		var emb []float32
-		if json.Unmarshal([]byte(embStr), &emb) != nil {
-			continue
-		}
-		ranked = append(ranked, scored{text: text, sim: cosineSim(queryEmb, emb)})
-	}
-	// A failed iteration degrades to plain chat, like any other miss.
-	if rows.Err() != nil {
-		return ""
-	}
-	if len(ranked) == 0 {
-		return ""
+	ranked := make([]scored, 0, len(chunks))
+	for _, c := range chunks {
+		ranked = append(ranked, scored{text: c.Text, sim: cosineSim(queryEmb, c.Embedding)})
 	}
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].sim > ranked[j].sim })
 	if topK <= 0 {

@@ -11,6 +11,7 @@ package ollama
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -118,7 +119,7 @@ func ollamaNumCtx() int {
 // ContextWindow reports the window the operator configured with
 // OPENFABRICA_OLLAMA_NUM_CTX, or 0 when unset (the model's own default is then in
 // force and not known here). The engine sizes its context rollover from it.
-func (c *Client) ContextWindow() int { return ollamaNumCtx() }
+func (c *Client) ContextWindow() int { return c.numCtx }
 
 // SupportsStructuredOutput reports true: Complete below routes to the
 // native /api/chat endpoint when ResponseSchema is set, which Ollama
@@ -173,6 +174,9 @@ func (c *Client) completeNative(ctx context.Context, req llm.CompletionRequest) 
 		}
 	}
 
+	if llm.Caps.Learned(c.CapKey(req.Model), llm.CapVision) == llm.No {
+		req, _ = llm.StripImages(req)
+	}
 	body := map[string]any{
 		"model":    req.Model,
 		"messages": nativeMessages(req),
@@ -253,6 +257,10 @@ func (c *Client) completeNative(ctx context.Context, req llm.CompletionRequest) 
 		if !llm.Caps.Allowed(c.CapKey(req.Model), llm.CapNativeThinkField) {
 			delete(body, "think")
 		}
+		if llm.Caps.Learned(c.CapKey(req.Model), llm.CapVision) == llm.No {
+			stripped, _ := llm.StripImages(req)
+			body["messages"] = nativeMessages(stripped)
+		}
 		return c.postNativeChat(ctx, chatURL, body, schemaSet)
 	})
 }
@@ -287,7 +295,19 @@ func nativeMessages(req llm.CompletionRequest) []map[string]any {
 		case m.Role == llm.RoleTool:
 			msgs = append(msgs, map[string]any{"role": "tool", "content": m.Content})
 		default:
-			msgs = append(msgs, map[string]any{"role": string(m.Role), "content": m.Content})
+			entry := map[string]any{"role": string(m.Role), "content": m.Content}
+			if m.Role == llm.RoleUser && len(m.Images) > 0 {
+				imgs := make([]string, 0, len(m.Images))
+				for _, img := range m.Images {
+					if len(img.Data) > 0 {
+						imgs = append(imgs, base64.StdEncoding.EncodeToString(img.Data))
+					}
+				}
+				if len(imgs) > 0 {
+					entry["images"] = imgs
+				}
+			}
+			msgs = append(msgs, entry)
 		}
 	}
 	return msgs

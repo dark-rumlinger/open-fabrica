@@ -27,7 +27,7 @@ func TestParkOnAnswersAnnouncesNeedsYouThenBuildingOnResume(t *testing.T) {
 	worker, _ := newStopTestWorker(t)
 	snapshot := captureEvents(t, worker, nil)
 
-	run, err := createRun(worker.pdb, RunKindBuild, StagePlan, "")
+	run, err := createRun(worker.pdb, RunKindBuild, StagePlan, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestOwnerStopAnnouncesPausedWithReason(t *testing.T) {
 	worker, _ := newStopTestWorker(t)
 	snapshot := captureEvents(t, worker, nil)
 
-	run, err := createRun(worker.pdb, RunKindBuild, StageBuild, "")
+	run, err := createRun(worker.pdb, RunKindBuild, StageBuild, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

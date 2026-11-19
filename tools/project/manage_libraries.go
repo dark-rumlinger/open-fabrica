@@ -22,19 +22,7 @@ func init() {
 		MaxResult: 8000,
 		Category:  "project",
 		OneLiner:  "Declare or remove an external CDN library the platform auto-injects as a <script>/<link> tag.",
-		WhenToUse: `Call add_library when an artifact save is rejected with "cross-origin
-<script src>/<link rel=\"stylesheet\"> not allowed": declare the URL here and the
-renderer injects the tag (with crossorigin + integrity when supplied) into every
-page, then retry the save without the hand-written tag. Pin the version; never @latest.
-add_library is an UPSERT keyed on name: re-add a declared library with a changed
-url/module_name to BUMP its version in place (the fix for a core/addons version
-mismatch) - the result names exactly what changed. Re-adding identical values is a
-no-op. Call remove_library to drop a declared library ENTIRELY - the fix for one
-added by mistake, no longer used, or pointing at a nonexistent URL whose injected
-tag 404s on every page (for a merely wrong url/version, prefer add_library, which
-bumps in place rather than removing). Use get_plan to read the current plan JSON
-back. This tool manages external libraries only; the build checklist/tasks live in
-manage_tasks.`,
+		WhenToUse: `Use add_library when a save is rejected for a cross-origin <script>/<link> tag: declare the pinned URL here (never @latest) and retry without the tag. add_library upserts by name (updates url/module_name in place); remove_library drops an unused/404ing library; get_plan reads the plan JSON.`,
 		Actions: []tools.Action{
 			&LibraryAdd{},
 			&LibraryRemove{},
@@ -69,7 +57,7 @@ func loadPlanMap(ctx *tools.ToolContext) (map[string]any, error) {
 // LibraryAdd appends an external CDN library to plan.external_libraries,
 // deduping by name. The renderer injects the tag from the URL at request time.
 type LibraryAdd struct {
-	Library map[string]any `arg:"library,required" desc:"Library spec: {\"name\":\"marked\", \"url\":\"https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js\"}. Optional: \"kind\":\"classic\"|\"module\" (default classic = UMD/IIFE <script src>; module = ES module via importmap, requires \"module_name\" = the bare specifier used in import statements), \"integrity\":\"sha384-...\", \"purpose\":\"brief note\". A classic library MUST also carry \"global_name\" = the exact window global it defines (\"marked\", \"Chart\", \"qrcode\") - without it the platform cannot tell that global from a typo and every module's undefined-reference check drops to non-blocking, so a forgotten import ships as a live ReferenceError. Pin the version; never @latest."`
+	Library map[string]any `arg:"library,required" desc:"Pinned library spec: {\"name\",\"url\", optional \"kind\":\"classic\"|\"module\" (default classic), \"global_name\" (required for classic, e.g. \"marked\"), \"module_name\" (required for module), \"integrity\", \"purpose\"}. Never @latest."`
 }
 
 func (a *LibraryAdd) ActionName() string { return "add_library" }

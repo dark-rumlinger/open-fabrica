@@ -204,9 +204,8 @@ func TestSave_WindowBridge_ReservedGlobalNotFlagged(t *testing.T) {
 // its platform source. If one is renamed or removed there, this fails - forcing the
 // allowlist to be updated in lockstep so it never silently shields a name the platform
 // no longer provides (which would let a real project bridge through the gate). The
-// platform helper APIs (auth/ofnet/e2ee) are ES modules imported by specifier now, so
-// they are no longer window globals and are not covered here; platformWindowGlobals is
-// empty by design.
+// platform helper APIs (auth/ofnet/e2ee) are ES modules imported by specifier, so
+// they are not window globals and are not covered here.
 func TestReservedWindowGlobals_StillInjected(t *testing.T) {
 	assertInjected := func(src, token string) {
 		t.Helper()
@@ -231,13 +230,6 @@ func TestReservedWindowGlobals_StillInjected(t *testing.T) {
 			continue
 		}
 		assertInjected(src, "__"+name)
-	}
-
-	// The platform bare-global set is empty by design (all platform helpers are ES
-	// modules imported by specifier). If a bare platform window global is ever
-	// reintroduced, add its injection-source assertion here.
-	if store.PlatformWindowGlobalCount() != 0 {
-		t.Errorf("platform bare window globals expected empty (helpers are ESM modules), got %d entries - add drift-guard coverage for the new bare global", store.PlatformWindowGlobalCount())
 	}
 }
 
@@ -270,19 +262,19 @@ export function tick(){ return 2; }`,
 // A save that closes SEVERAL fresh bridges at once must name every symbol AND every
 // file reading each, in one reject - so the model relocates the whole shared surface in
 // a single turn instead of tripping the gate once per symbol (the relocate-one-at-a-time
-// loop). Here state.js reads two globals; the terrain save that also reads both closes
+// loop). Here state.js reads two globals; the view save that also reads both closes
 // both bridges together.
 func TestSave_WindowBridge_NamesAllFreshSymbolsAndReaders(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
-	seedJS(t, db, "state.js", `window.__terrainEdits = [];
+	seedJS(t, db, "state.js", `window.__sharedEdits = [];
 window.__seed = 42;
 export function boot(){ return 1; }`)
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "terrain.js",
-		Body: `export function edit(){ return window.__terrainEdits.length; }
+		FilePath: "view.js",
+		Body: `export function edit(){ return window.__sharedEdits.length; }
 export function s(){ return window.__seed; }`,
 	}).Run(ctx)
 	if err != nil {
@@ -292,11 +284,11 @@ export function s(){ return window.__seed; }`,
 		t.Fatalf("a save closing two fresh bridges must be rejected as window_global_bridge, got %+v", res)
 	}
 	// Both bridged symbols named in the one reject.
-	if !contains(res.Error, "window.__terrainEdits") || !contains(res.Error, "window.__seed") {
+	if !contains(res.Error, "window.__sharedEdits") || !contains(res.Error, "window.__seed") {
 		t.Errorf("reject must name EVERY fresh bridged symbol, got: %s", res.Error)
 	}
 	// Every file reading them named, so all readers get converted in one turn.
-	if !contains(res.Error, "state.js") || !contains(res.Error, "terrain.js") {
+	if !contains(res.Error, "state.js") || !contains(res.Error, "view.js") {
 		t.Errorf("reject must list every file reading the bridged symbols, got: %s", res.Error)
 	}
 	// The one-leaf invariant the model most often misses.

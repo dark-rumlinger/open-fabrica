@@ -310,14 +310,22 @@ export function createQuestionGroup(questions) {
       itemEl.appendChild(h('p', { className: 'text-sm text-secondary', style: { paddingInlineStart: '32px', marginBottom: '8px' } }, ctx));
     }
 
+    const item = { id, data: qData, getValue: null, hasValue: null, numberEl, deferred: false, itemEl, secret: qData.type === 'secret' };
+
     const { inputEl, getValue, hasValue } = buildQuestionInput(qData, {
       onInput: updateProgress,
+      onOptionSelect: () => {
+        // Auto-submit when there is only one question in the group so a
+        // pre-made single-choice answer (e.g. Yes / No) takes one click.
+        if (items.length === 1 && !item.deferred) submitAll();
+      },
       wrapClass: 'question-group__input',
     });
+    item.getValue = getValue;
+    item.hasValue = () => item.deferred || hasValue();
 
     itemEl.appendChild(inputEl);
 
-    const item = { id, data: qData, getValue, hasValue, numberEl, deferred: false, itemEl, secret: qData.type === 'secret' };
     // Deferred items count as filled for the Submit-All gate and as their
     // own "answer" at submit time; the per-row Skip flips the input to a
     // muted placeholder so the owner sees the choice they made.
@@ -341,16 +349,15 @@ export function createQuestionGroup(questions) {
     itemEl.appendChild(h('div', { className: 'question-group__item-actions' }, [skipBtn]));
 
     list.appendChild(itemEl);
-
-    // Override hasValue so deferred items count as filled.
-    item.hasValue = () => item.deferred || hasValue();
     items.push(item);
 
     countBadge.textContent = tn('qc.count', items.length);
     updateProgress();
   }
 
+  let submitting = false;
   async function submitAll() {
+    if (submitting) return;
     const answers = [];
     for (const item of items) {
       if (item.deferred) {
@@ -362,6 +369,7 @@ export function createQuestionGroup(questions) {
       answers.push({ questionId: item.id, answer: val, displayAnswer: item.secret ? t('qc.hidden') : val });
     }
 
+    submitting = true;
     submitBtn.disabled = true;
     submitBtn.textContent = t('qc.submitting');
 
@@ -387,6 +395,7 @@ export function createQuestionGroup(questions) {
       if (failed > 0) {
         toast.error(tn('qc.someFailed', failed));
         if (succeeded === 0) {
+          submitting = false;
           submitBtn.disabled = false;
           submitBtn.textContent = t('qc.submitAll');
           return;
@@ -427,6 +436,7 @@ export function createQuestionGroup(questions) {
 
       toast.success(tn('questions.answersSubmitted', answers.length));
     } catch (err) {
+      submitting = false;
       submitBtn.disabled = false;
       submitBtn.textContent = t('qc.submitAll');
       toast.error(t('qc.submitAnswersFailed', { error: humanizeError(err.message) }));

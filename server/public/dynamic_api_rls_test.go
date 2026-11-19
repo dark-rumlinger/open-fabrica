@@ -48,17 +48,15 @@ func TestApiUpdateRejectsOwnerTenantReassignment(t *testing.T) {
 	}
 }
 
-// TestApiUpdateProjectKeyMayAssignOwner confirms the strip is identity-scoped:
-// a project API key (no user/tenant identity, owner-level access) is still
-// allowed to set owner_id/tenant_id, mirroring apiInsert's stamping condition.
-func TestApiUpdateProjectKeyMayAssignOwner(t *testing.T) {
+// A caller with no identity cannot assign a row's owner either: the scope
+// columns are never taken from the body.
+func TestApiUpdateNeverAssignsOwnerFromBody(t *testing.T) {
 	db := setupRowIDColumnDB(t,
 		`CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT, owner_id INTEGER, tenant_id INTEGER)`,
 		`INSERT INTO notes (id, body, owner_id, tenant_id) VALUES (1, 'orig', 1, 1)`)
 
 	h := &Handler{deps: &Deps{}}
 	ep := &apiEndpoint{OwnerColumn: "owner_id", TenantColumn: "tenant_id"}
-	// Project key: no owner/tenant filter, no identity (AuthUserID/AuthTenantID 0).
 	rc := &apiRequestContext{}
 
 	req := httptest.NewRequest("PUT", "/", strings.NewReader(`{"body":"x","owner_id":777}`))
@@ -72,8 +70,8 @@ func TestApiUpdateProjectKeyMayAssignOwner(t *testing.T) {
 	if err := db.QueryRow(`SELECT owner_id FROM notes WHERE id = 1`).Scan(&owner); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if owner != 777 {
-		t.Errorf("project key could not assign owner_id; got %d, want 777", owner)
+	if owner != 1 {
+		t.Errorf("owner_id = %d after an update that named 777, want 1", owner)
 	}
 }
 
@@ -86,7 +84,7 @@ func TestBuildAPIRequestContextScopedAnonymousDenied(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/", nil) // no Authorization header
 	rec := httptest.NewRecorder()
-	_, _, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
+	_, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
 
 	if ok {
 		t.Fatal("scoped endpoint served an anonymous request; expected denial")
@@ -105,7 +103,7 @@ func TestBuildAPIRequestContextPublicReadAllowsAnonymous(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
-	rc, _, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
+	rc, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
 
 	if !ok {
 		t.Fatalf("public_read endpoint denied an anonymous read (status %d)", rec.Code)
@@ -125,7 +123,7 @@ func TestBuildAPIRequestContextPublicWriteAllowsAnonymousPost(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"name":"a"}`)) // no Authorization header
 	rec := httptest.NewRecorder()
-	_, _, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
+	_, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
 
 	if !ok {
 		t.Fatalf("public_write endpoint denied an anonymous POST (status %d)", rec.Code)
@@ -141,7 +139,7 @@ func TestBuildAPIRequestContextPublicWriteGatesRead(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/", nil) // no Authorization header
 	rec := httptest.NewRecorder()
-	_, _, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
+	_, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep)
 
 	if ok {
 		t.Fatal("public_write endpoint served an anonymous GET; reads must stay gated")

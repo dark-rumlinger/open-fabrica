@@ -17,13 +17,13 @@ import (
 func TestSave_RelativeSpecifier_NormalizedToBare(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
-	seedJS(t, db, "js/world.state.js", `export let net = null;
+	seedJS(t, db, "js/app.state.js", `export let net = null;
 export function setNet(n){ net = n; }`)
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "js/world.hud.js",
-		Body: `import { net } from './world.state.js';
+		FilePath: "js/app.ui.js",
+		Body: `import { net } from './app.state.js';
 export function draw(){ return net; }`,
 	}).Run(ctx)
 	if err != nil {
@@ -34,11 +34,11 @@ export function draw(){ return net; }`,
 	}
 	data, _ := res.Data.(map[string]any)
 	rws, _ := data["normalized_specifiers"].([]string)
-	if len(rws) != 1 || !contains(rws[0], "'./world.state.js' -> 'world.state'") {
+	if len(rws) != 1 || !contains(rws[0], "'./app.state.js' -> 'app.state'") {
 		t.Fatalf("echo should report the specifier rewrite, got %+v", data["normalized_specifiers"])
 	}
-	got, _ := store.ArtifactGet(db, "file", "js/world.hud.js")
-	if got == nil || !contains(got.Body, "from 'world.state'") || contains(got.Body, "./world.state.js") {
+	got, _ := store.ArtifactGet(db, "file", "js/app.ui.js")
+	if got == nil || !contains(got.Body, "from 'app.state'") || contains(got.Body, "./app.state.js") {
 		t.Fatalf("stored body should carry the bare specifier, got:\n%v", got)
 	}
 }
@@ -52,8 +52,8 @@ func TestSave_RelativeSpecifier_PendingSiblingStaysRelative(t *testing.T) {
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "js/world.hud.js",
-		Body: `import { net } from './world.state.js';
+		FilePath: "js/app.ui.js",
+		Body: `import { net } from './app.state.js';
 export function draw(){ return net; }`,
 	}).Run(ctx)
 	if err != nil {
@@ -62,8 +62,8 @@ export function draw(){ return net; }`,
 	if res == nil || !res.Success {
 		t.Fatalf("a pending-sibling import is advisory, the save should land, got %+v", res)
 	}
-	got, _ := store.ArtifactGet(db, "file", "js/world.hud.js")
-	if got == nil || !contains(got.Body, "from './world.state.js'") {
+	got, _ := store.ArtifactGet(db, "file", "js/app.ui.js")
+	if got == nil || !contains(got.Body, "from './app.state.js'") {
 		t.Fatalf("a pending-sibling relative import must stay as written, got:\n%v", got)
 	}
 }
@@ -78,7 +78,7 @@ func TestSave_RelativeSpecifier_CollisionStaysRelative(t *testing.T) {
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "a/game.js",
+		FilePath: "a/app.js",
 		Body: `import { one } from './state.js';
 export function run(){ return one; }`,
 	}).Run(ctx)
@@ -88,7 +88,7 @@ export function run(){ return one; }`,
 	if res == nil || !res.Success {
 		t.Fatalf("save should land, got %+v", res)
 	}
-	got, _ := store.ArtifactGet(db, "file", "a/game.js")
+	got, _ := store.ArtifactGet(db, "file", "a/app.js")
 	if got == nil || !contains(got.Body, "from './state.js'") {
 		t.Fatalf("a colliding-basename import must stay relative, got:\n%v", got)
 	}
@@ -99,16 +99,16 @@ export function run(){ return one; }`,
 func TestPatch_RelativeSpecifier_Normalized(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
-	seedJS(t, db, "js/world.state.js", `export let net = null;
+	seedJS(t, db, "js/app.state.js", `export let net = null;
 export function setNet(n){ net = n; }`)
-	seedJS(t, db, "js/world.hud.js", `export function draw(){ return 1; }`)
+	seedJS(t, db, "js/app.ui.js", `export function draw(){ return 1; }`)
 
 	res, err := (&ArtPatch{
 		Kind:     "file",
-		FilePath: "js/world.hud.js",
+		FilePath: "js/app.ui.js",
 		Patches: []map[string]any{{
 			"search":  "export function draw(){ return 1; }",
-			"replace": "import { net } from './world.state.js';\nexport function draw(){ return net; }",
+			"replace": "import { net } from './app.state.js';\nexport function draw(){ return net; }",
 		}},
 	}).Run(ctx)
 	if err != nil {
@@ -122,11 +122,11 @@ export function setNet(n){ net = n; }`)
 	if len(rws) != 1 {
 		t.Fatalf("patch echo should report the specifier rewrite, got %+v", data["normalized_specifiers"])
 	}
-	got, _ := store.ArtifactGet(db, "file", "js/world.hud.js")
-	if got == nil || !contains(got.Body, "from 'world.state'") {
+	got, _ := store.ArtifactGet(db, "file", "js/app.ui.js")
+	if got == nil || !contains(got.Body, "from 'app.state'") {
 		t.Fatalf("patched body should carry the bare specifier, got:\n%v", got)
 	}
-	if strings.Contains(got.Body, "./world.state.js") {
+	if strings.Contains(got.Body, "./app.state.js") {
 		t.Fatalf("relative specifier must be gone after normalization, got:\n%s", got.Body)
 	}
 }

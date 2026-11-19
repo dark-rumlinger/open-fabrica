@@ -15,119 +15,32 @@ decisions: [rendering approach/phaser, rendering engine/phaser, rendering approa
 
 ## Choose: the pinned Phaser entry (copy into `external_libraries` EXACTLY)
 
-Phaser is a `kind:"classic"` UMD library defining the `window.Phaser` global. Pin the
-3.x line - Phaser 4 is a different renderer with a different API surface, and the API
-you know is v3. Never substitute a release remembered from elsewhere - this is the
-platform's verified pin:
+Phaser is `kind:"classic"` (`window.Phaser`). Pin v3 (Phaser 4 has a different API; `global_name` is mandatory for the undefined-reference gate, and Arcade physics is built in):
 
 ```json
 {"name":"phaser", "kind":"classic", "global_name":"Phaser", "url":"https://cdn.jsdelivr.net/npm/phaser@3.90.0/dist/phaser.min.js"}
 ```
 
-`global_name` is mandatory for every classic library (the undefined-reference gate
-keys on it). Arcade physics ships inside this build - never add a separate physics
-library for a 2D game.
+## Platform mount & runtime textures
 
-## Boot inside a fragment-injected page (platform-specific)
-
-Page bodies here are HTML fragments injected into the layout, and your linked module
-runs at end-of-body. Never pass a parent id string you hope exists - create the mount
-yourself, then hand the element to the config:
-
-```js
-const mount = document.getElementById('game');   // the <div id="game"> your page fragment declares (never a second root on body)
-const game = new Phaser.Game({
-  type: Phaser.AUTO,
-  parent: mount,
-  backgroundColor: '#1a1c2c',
-  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: 960, height: 540 },
-  physics: { default: 'arcade', arcade: { gravity: { y: 900 } } },
-  scene: [BootScene, PlayScene, UIScene],
-});
-```
-
-`Scale.FIT` + `autoCenter` is the responsive default: the canvas letterboxes into
-whatever space the page gives it, desktop and phone alike. Top-down games set
-`gravity: { y: 0 }`.
-
-## Generate textures at runtime
-
-`manage_files` writes text only, so the build cannot author a PNG or spritesheet; a
-`this.load.image` of a file that was never saved 404s and Phaser renders a green placeholder
-square. (A generated or stock image that manage_image_gen / manage_stockphotos saved under
-`/files/` does load.) All art is
-generated in a Boot scene, then used by key everywhere else:
-
-```js
-class BootScene extends Phaser.Scene {
-  create() {
-    const g = this.add.graphics();
-    g.fillStyle(0xffd166).fillRoundedRect(0, 0, 28, 36, 6);   // draw the hero
-    g.fillStyle(0x1a1c2c).fillRect(6, 10, 5, 5).fillRect(17, 10, 5, 5); // eyes
-    g.generateTexture('hero', 28, 36);                        // -> usable as 'hero'
-    g.clear().fillStyle(0x06d6a0).fillRect(0, 0, 48, 16).generateTexture('platform', 48, 16);
-    g.destroy();
-    this.scene.start('play');
-  }
-}
-```
-
-This is the platform's sprite pipeline: rects, circles, triangles and rounded shapes
-composed per texture, tinted (`setTint`) and scaled for variety. Text and emoji
-(`this.add.text(x, y, '🌵', { fontSize: '32px' })`) are legitimate sprites too.
-Realise the plan's art direction with these tools - palette, silhouette and motion
-carry the look, not asset fidelity.
-
-## Field traps (silent in every gate, only visible in play)
-
-- **Move a physics body with velocity, never `x +=`.** A direct coordinate write
-  teleports the body and tunnels straight through colliders.
-- **Camera follow needs BOTH world and camera bounds set**, or the view never
-  scrolls (or shows void past the edge): `this.physics.world.setBounds(...)` AND
-  `this.cameras.main.setBounds(...).startFollow(...)`.
-
-## Particles changed in 3.60 - the old API throws
-
-Models trained on older Phaser write `this.add.particles('tex').createEmitter({...})`.
-That API is GONE in 3.60+: `createEmitter` is not a function and the game dies at the
-first juice call. The current shape creates the emitter directly:
-
-```js
-const burst = this.add.particles(0, 0, 'spark', {
-  speed: { min: 60, max: 160 }, lifespan: 400, scale: { start: 1, end: 0 }, emitting: false,
-});
-burst.explode(12, x, y);   // one burst at the impact point
-```
-
-Juice per the game_feel guide rides built-ins: `this.tweens.add` for squash/stretch
-and score pops, `this.cameras.main.shake(80, 0.004)` / `.flash(60)` on impact - and
-sound is synthesized with raw WebAudio (Phaser's sound manager needs loaded audio
-files, which this platform does not have).
+- **Mount into a fragment container:** pages are HTML fragments injected into the layout and linked modules run at end-of-body. Pass `parent: document.getElementById('game')` with `scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: 960, height: 540 }`.
+- **Generate textures in a Boot scene:** `manage_files` writes text only, so `this.load.image` of an unsaved path 404s (use `manage_image_gen`/`manage_stockphotos` or `this.add.graphics().generateTexture(key, w, h)` / emoji text sprites):
+  ```js
+  const g = this.add.graphics();
+  g.fillStyle(0xffd166).fillRoundedRect(0, 0, 28, 36, 6).generateTexture('hero', 28, 36);
+  g.destroy();
+  ```
+- **Field traps:** move physics bodies with velocity (never `x +=`), set both `this.physics.world.setBounds(...)` and `this.cameras.main.setBounds(...).startFollow(...)`, synthesize sound with WebAudio (no audio asset files), and use the **Phaser 3.60+ particle API** (`createEmitter` was removed):
+  ```js
+  const burst = this.add.particles(0, 0, 'spark', { speed: { min: 60, max: 160 }, lifespan: 400, scale: { start: 1, end: 0 }, emitting: false });
+  burst.explode(12, x, y);
+  ```
 
 <!-- extended -->
 
-## Touch and mobile
-> when: the game must play on phones - virtual controls, pointer-driven movement.
+## Touch, pause, and Matter physics
+> when: mobile touch controls, pause/timers, or angular 2D physics.
 
-Pointer input works untranslated (`this.input.on('pointerdown', ...)`; a pointer is
-finger or mouse). For a platformer add on-canvas virtual buttons: semi-transparent
-generated-texture sprites fixed to the camera (`setScrollFactor(0)`), each
-`setInteractive()` with `pointerdown`/`pointerup` toggling the same flags the
-keyboard sets. Test with the smaller FIT viewport in mind: 44px+ touch targets,
-controls in the bottom corners.
-
-## Pause, focus and timing
-> when: wiring pause menus or debugging "the game jumps after tab-switch".
-
-Phaser auto-pauses its loop on a hidden tab and resumes on focus; `update` deltas
-stay sane, so no manual clamp is needed. An explicit pause is
-`this.scene.pause('play')` plus an overlay scene; `this.time.addEvent` timers pause
-with their scene, `setTimeout` does not - use scene timers for anything gameplay.
-
-## Matter physics
-> when: the brief genuinely needs angular/soft-body 2D physics - stacking, seesaws, ragdolls, wrecking balls.
-
-The full Phaser build bundles Matter.js: set `physics: { default: 'matter' }` and
-bodies gain rotation, friction, constraints and compound shapes. Arcade stays the
-default for platformers and top-down movement (simpler, faster, AABB-only); switch
-only when rotation-driven dynamics ARE the game.
+- **Touch:** add `setScrollFactor(0).setInteractive()` sprites in bottom corners with 44px+ targets.
+- **Pause/timers:** use `this.scene.pause('play')` and `this.time.addEvent` (pauses with the scene; `setTimeout` does not).
+- **Matter.js:** bundled in this build (`physics: { default: 'matter' }`) — use only when rotation/soft-body/stacking is core; keep Arcade for platformers/top-down.

@@ -1,10 +1,9 @@
 package admin
 
 import (
-	"database/sql"
 	"testing"
 
-	_ "modernc.org/sqlite"
+	"openfabrica/internal/dbtest"
 )
 
 // The Builds cost panel (web/admin builds.js renderCostPanel) reads the run-wide
@@ -13,29 +12,12 @@ import (
 // the top level, or the whole panel (token usage + cache %) silently vanishes.
 // This pins that contract.
 func TestBuildTokenSummary_NestsTotalsForCostPanel(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE of_llm_calls (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		source TEXT, run_id TEXT, stage TEXT, provider_type TEXT,
-		provider_name TEXT DEFAULT '', model TEXT DEFAULT '',
-		input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-		cache_read_input_tokens INTEGER DEFAULT 0,
-		cache_creation_input_tokens INTEGER DEFAULT 0,
-		stable_prefix_bytes INTEGER DEFAULT 0,
-		total_request_bytes INTEGER DEFAULT 0
-	)`); err != nil {
-		t.Fatalf("create of_llm_calls: %v", err)
-	}
+	db := dbtest.ProjectWriterDB(t).Writer()
 	seed := func(stage, providerType string, in, out, cacheRead, cacheCreate int) {
 		if _, err := db.Exec(
 			`INSERT INTO of_llm_calls
-			 (source, run_id, stage, provider_type, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens)
-			 VALUES ('engine','run_1',?,?,?,?,?,?)`,
+			 (source, run_id, model, stage, provider_type, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens)
+			 VALUES ('engine','run_1','m',?,?,?,?,?,?)`,
 			stage, providerType, in, out, cacheRead, cacheCreate,
 		); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -45,7 +27,7 @@ func TestBuildTokenSummary_NestsTotalsForCostPanel(t *testing.T) {
 	seed("build", "anthropic", 2000, 500, 1500, 200)
 	seed("build", "openai-chat", 1000, 300, 900, 0)
 	// A chat-source call (and a different run) must not leak into the engine totals.
-	if _, err := db.Exec(`INSERT INTO of_llm_calls (source, run_id, stage, input_tokens) VALUES ('chat','run_1','',9999)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO of_llm_calls (source, run_id, model, stage, input_tokens) VALUES ('chat','run_1','m','',9999)`); err != nil {
 		t.Fatalf("seed chat: %v", err)
 	}
 

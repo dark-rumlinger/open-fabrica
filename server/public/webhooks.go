@@ -14,6 +14,7 @@ import (
 
 	"openfabrica/events"
 	"openfabrica/security"
+	"openfabrica/store"
 )
 
 // webhookTimestampHeader opts a sender into replay protection. When present, the
@@ -65,18 +66,12 @@ func (h *Handler) IncomingWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up the webhook.
-	var webhookID int
-	var sealed string
-	var isEnabled bool
-	err := projectDB.QueryRow(
-		"SELECT id, secret_encrypted, is_enabled FROM of_webhooks WHERE name = ? AND COALESCE(direction, 'incoming') = 'incoming'",
-		webhookName,
-	).Scan(&webhookID, &sealed, &isEnabled)
+	wh, err := store.LoadIncomingWebhook(projectDB, webhookName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "webhook not found")
 		return
 	}
+	webhookID, sealed, isEnabled := wh.ID, wh.SecretEncrypted, wh.IsEnabled
 	secret, err := h.deps.Encryptor.OpenOptional(sealed)
 	if err != nil {
 		// A secret that cannot be decrypted (the key was replaced) cannot verify any
@@ -145,20 +140,12 @@ func (h *Handler) IncomingWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update last_triggered. Bookkeeping only; a verified webhook still fires.
-	if _, err := projectDB.ExecWrite(
-		"UPDATE of_webhooks SET last_triggered = CURRENT_TIMESTAMP WHERE id = ?",
-		webhookID,
-	); err != nil {
+	if err := store.TouchIncomingWebhookTriggered(projectDB, webhookID); err != nil {
 		h.deps.Logger.Warn("webhook last_triggered update failed",
 			"webhook", webhookName, "project_id", project.ID, "error", err)
 	}
 
-	// Log the webhook receipt.
-	if _, err := projectDB.ExecWrite(
-		"INSERT INTO of_webhook_logs (webhook_id, direction, event_type, payload, success) VALUES (?, 'incoming', 'webhook.received', ?, 1)",
-		webhookID, string(body),
-	); err != nil {
+	if err := store.RecordIncomingWebhookLog(projectDB, webhookID, string(body)); err != nil {
 		h.deps.Logger.Warn("webhook receipt log failed",
 			"webhook", webhookName, "project_id", project.ID, "error", err)
 	}

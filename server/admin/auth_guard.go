@@ -8,12 +8,13 @@ import (
 )
 
 // adminAuthGuard runs after the JWT Authenticator on every protected admin
-// route. It enforces two things the signature check alone does not:
+// route, and is the only authorization the admin API has: the panel has one
+// kind of account, the admin. It enforces three things the signature check
+// alone does not:
 //
-//  1. The token must be a platform-admin token (ProjectID == 0). Admin and
-//     project users are signed with the same key, and a project's own user can
-//     carry role "admin" within that project, so without this check a project
-//     end-user's token would satisfy RequireRole("admin") on the platform API.
+//  1. The token must be an admin token (Claims.ForAdmin). Admin and project
+//     users are signed with the same key, and a project's own user can carry
+//     role "admin" within that project.
 //  2. The token's embedded version must still match the user's current
 //     token_version. A password change or explicit sign-out-everywhere bumps the
 //     stored version, instantly invalidating tokens minted before it.
@@ -27,7 +28,7 @@ func adminAuthGuard(deps *Deps) func(http.Handler) http.Handler {
 			}
 			// Reject project-scoped tokens outright: the admin API is never
 			// reachable with a project user's credentials.
-			if claims.ProjectID != 0 {
+			if !claims.ForAdmin() {
 				writeError(w, http.StatusForbidden, "project-scoped token cannot access the admin API")
 				return
 			}
@@ -39,6 +40,10 @@ func adminAuthGuard(deps *Deps) func(http.Handler) http.Handler {
 			if claims.TokenVersion != current {
 				security.ClearAuthCookie(w)
 				writeError(w, http.StatusUnauthorized, "session expired, please sign in again")
+				return
+			}
+			if claims.Role != "admin" {
+				writeError(w, http.StatusForbidden, "insufficient permissions")
 				return
 			}
 			next.ServeHTTP(w, r)

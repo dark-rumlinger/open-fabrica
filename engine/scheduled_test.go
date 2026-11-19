@@ -379,3 +379,32 @@ func TestScheduledTaskDedup(t *testing.T) {
 		t.Fatalf("post-execution send = %v, want accepted", err)
 	}
 }
+
+// TestRunScheduleNow_SyncNativeAction executes a native_action synchronously and
+// returns its result immediately without waiting for the scheduler tick.
+func TestRunScheduleNow_SyncNativeAction(t *testing.T) {
+	w, pdb := scheduledTestWorker(t, nil)
+	res, err := pdb.ExecWrite(
+		`INSERT INTO of_scheduled_tasks (name, native_action, interval_seconds, is_enabled) VALUES ('sync-count', '{"type":"count_rows","table":"of_memory"}', 3600, 1)`,
+	)
+	if err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	taskID, _ := res.LastInsertId()
+
+	out, err := runScheduleNow(w.deps, w.completeDeps(), pdb, w.projectID, w.logger, taskID)
+	if err != nil {
+		t.Fatalf("runScheduleNow: %v", err)
+	}
+	if out["status"] != "completed" {
+		t.Fatalf("status = %v, want completed", out["status"])
+	}
+	if out["result"] != "table of_memory has 0 rows" {
+		t.Fatalf("result = %v, want table of_memory has 0 rows", out["result"])
+	}
+	var runCount int
+	_ = pdb.QueryRow("SELECT run_count FROM of_scheduled_tasks WHERE id = ?", taskID).Scan(&runCount)
+	if runCount != 1 {
+		t.Fatalf("run_count = %d, want 1", runCount)
+	}
+}

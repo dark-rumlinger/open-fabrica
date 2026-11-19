@@ -378,91 +378,85 @@ func (h *wsHub) moveClient(c *wsClient, fromKey, fromName, toKey, toName string,
 	return oldEmpty, true
 }
 
-// broadcast sends msg to all clients in the room except the sender.
-func (h *wsHub) broadcast(roomKey, senderID string, msg []byte, binary bool) {
+// trySend delivers m to a client without blocking; false when the client's buffer is full.
+// One home for the non-blocking send every broadcast/send path uses, so the drop semantics
+// are identical across them (each caller decides what a dropped message means).
+func trySend(c *wsClient, m wsMessage) bool {
+	select {
+	case c.ch <- m:
+		return true
+	default:
+		return false
+	}
+}
+
+// roomClientsSnapshot returns a snapshot of a room's clients taken under the read lock, so a
+// broadcast can iterate and send without holding it. Nil when the room does not exist.
+func (h *wsHub) roomClientsSnapshot(roomKey string) []*wsClient {
 	h.mu.RLock()
+	defer h.mu.RUnlock()
 	room := h.rooms[roomKey]
 	if room == nil {
-		h.mu.RUnlock()
-		return
+		return nil
 	}
-	targets := make([]*wsClient, 0, len(room.clients))
+	out := make([]*wsClient, 0, len(room.clients))
 	for _, c := range room.clients {
-		if c.id != senderID {
-			targets = append(targets, c)
-		}
+		out = append(out, c)
 	}
-	h.mu.RUnlock()
+	return out
+}
 
+// broadcast sends msg to all clients in the room except the sender.
+func (h *wsHub) broadcast(roomKey, senderID string, msg []byte, binary bool) {
 	m := wsMessage{data: msg, binary: binary}
-	for _, c := range targets {
-		select {
-		case c.ch <- m:
-		default:
+	for _, c := range h.roomClientsSnapshot(roomKey) {
+		if c.id == senderID {
+			continue
+		}
+		if !trySend(c, m) {
 			slog.Warn("ws: message dropped (channel full)", "room", roomKey, "client", c.id)
 			h.sendError(c, "buffer full, message dropped")
 		}
 	}
 }
 
-// broadcastAll sends msg to ALL clients in the room (including sender).
+// broadcastAll sends msg to ALL clients in the room (including sender). A full buffer is
+// dropped silently: these are system messages, not application data.
 func (h *wsHub) broadcastAll(roomKey string, msg []byte, binary bool) {
-	h.mu.RLock()
-	room := h.rooms[roomKey]
-	if room == nil {
-		h.mu.RUnlock()
-		return
-	}
-	targets := make([]*wsClient, 0, len(room.clients))
-	for _, c := range room.clients {
-		targets = append(targets, c)
-	}
-	h.mu.RUnlock()
-
 	m := wsMessage{data: msg, binary: binary}
-	for _, c := range targets {
-		select {
-		case c.ch <- m:
-		default:
-			// Don't warn for system messages on full buffers.
-		}
+	for _, c := range h.roomClientsSnapshot(roomKey) {
+		trySend(c, m)
 	}
 }
 
-// sendTo sends msg to a specific client in a room. Returns false if client not found.
+// sendTo sends msg to a specific client in a room. Returns false if the client is not found
+// or its buffer is full.
 func (h *wsHub) sendTo(roomKey, targetID string, msg []byte, binary bool) bool {
 	h.mu.RLock()
 	room := h.rooms[roomKey]
-	if room == nil {
-		h.mu.RUnlock()
-		return false
+	var target *wsClient
+	if room != nil {
+		target = room.clients[targetID]
 	}
-	target := room.clients[targetID]
 	h.mu.RUnlock()
-
 	if target == nil {
 		return false
 	}
-	select {
-	case target.ch <- wsMessage{data: msg, binary: binary}:
+	if trySend(target, wsMessage{data: msg, binary: binary}) {
 		return true
-	default:
-		slog.Warn("ws: direct message dropped (channel full)", "room", roomKey, "target", targetID)
-		return false
 	}
+	slog.Warn("ws: direct message dropped (channel full)", "room", roomKey, "target", targetID)
+	return false
 }
 
-// sendError sends a system error message to a single client.
+// sendError sends a system error message to a single client. Dropped silently on a full
+// buffer: there is nothing more to do if even the error cannot be delivered.
 func (h *wsHub) sendError(c *wsClient, msg string) {
 	errMsg, _ := json.Marshal(map[string]any{
 		"_type":    "error",
 		"_message": msg,
 	})
-	select {
-	case c.ch <- wsMessage{data: errMsg}:
-	default:
-		// Can't send error if buffer is full, nothing more to do.
-	}
+	trySend(c, wsMessage{data: errMsg})
 }
 
 // roomClients returns the list of client IDs in a room.

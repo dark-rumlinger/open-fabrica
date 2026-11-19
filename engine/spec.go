@@ -68,10 +68,8 @@ type SessionSpec struct {
 	// Effort tunes how much the model deliberates per turn ("low".."max"). Empty =
 	// use the provider default. Set per stage in DefaultSpec.
 	//
-	// Only the anthropic transport reads it today (output_config.effort); the
-	// openai-chat client ignores it and takes its reasoning cue from Thinking
-	// instead. So on an openai-chat model these values are inert, and tuning
-	// per-turn latency there means Thinking, not this.
+	// Wired to Anthropic (`output_config.effort`), OpenRouter (`reasoning.effort`),
+	// and OpenAI-compatible gateways (`reasoning_effort`, auto-demoted on 400).
 	Effort string
 	// Timeout is the per-LLM-call deadline.
 	Timeout time.Duration
@@ -83,6 +81,19 @@ type SessionSpec struct {
 	// Guard, when non-nil, runs before (screen) and after (observe) every
 	// tool call. nil = no screening.
 	Guard *RepeatGuard
+
+	// BlockFlowActions rejects manage_testing write_flows/test_flows during
+	// pre-flow-gate build/repair sessions so user-flow authoring stays in runFlowGate.
+	BlockFlowActions bool
+
+	// OmitToolActions hides listed actions per tool from the wire schema, routing
+	// prose, and execution for this session (e.g. separating regular probes from
+	// user-flow actions).
+	OmitToolActions map[string]map[string]bool
+
+	// ExtraHiddenGuides names additional guide slugs hidden from manage_guides in
+	// this session (e.g. "user_flows" when disabled or outside the flow gate).
+	ExtraHiddenGuides map[string]bool
 
 	// OnTurnEnd, when non-nil, runs after each iteration's tool execution.
 	// A non-empty inject is appended as a user message; a non-nil stop ends
@@ -249,8 +260,10 @@ const (
 	// defaultRolloverInputTokens triggers a segment rollover when a call's TOTAL context
 	// (uncached + cache-read + cache-creation, see session.go's lastContextTokens) exceeds it
 	// and the spec allows reseeding. Against total, not the uncached portion, so a cache
-	// eviction cannot spuriously trip it.
-	defaultRolloverInputTokens = 200_000
+	// eviction cannot spuriously trip it. Sized to bound quadratic per-turn token growth on
+	// large-window (e.g. 1M-context) models while keeping prompt-cached segments long enough
+	// to amortize reseed cost.
+	defaultRolloverInputTokens = 75_000
 	// minUsableWindow is the smallest context window the rollover will size itself
 	// from. Below it the build prompt alone does not fit, so a lower trigger would only
 	// roll over on every call; the default stays and the model's own limit applies.
@@ -354,25 +367,23 @@ func DefaultSpec(stage string) SessionSpec {
 	case StageLive:
 		return SessionSpec{
 			Stage: StageLive,
-			// Headroom for locate-before-read: a live fix front-loads discovery
-			// (manage_codebase resolve/where_used/grep) before the read+patch+test, which at
-			// 10 could exhaust the budget mid-fix and exit before the closing summary.
-			// Kept generous so a retried patch (anchor miss / no-op) does not starve
-			// the pass before it finishes.
-			// Snapshot is baseline then deltas, as in BUILD: a live fix edits several
-			// times, and a full re-send per edit repeats the whole project state for a
-			// few changed rows.
-			MaxIterations:    28,
-			MaxTokens:        16384,
-			Temperature:      f64(0.2),
-			Timeout:          15 * time.Minute,
-			Snapshot:         SnapshotBaselineDelta,
-			Thinking:         &thinkingOff,
-			ThinkingStage:    StageLive,
-			Effort:           effortLive,
-			NoReplayCache:    true,
-			SuppressProgress: true,
-			Policy:           policyLive,
+			// Progress-gated rather than tightly step-capped: ReadOnlyNudge / ReadOnlyForceStop
+			// catch passive read-only spirals, while any edit or probe resets the streak so
+			// legitimate multi-file changes can take as many turns as they need (bounded by
+			// MaxIterations=200 as a safety fuse, plus Timeout, maxSegments, and DailyTokenBudget).
+			MaxIterations:     200,
+			MaxTokens:         16384,
+			Temperature:       f64(0.2),
+			Timeout:           15 * time.Minute,
+			Snapshot:          SnapshotBaselineDelta,
+			Thinking:          &thinkingOff,
+			ThinkingStage:     StageLive,
+			Effort:            effortLive,
+			ReadOnlyNudge:     8,
+			ReadOnlyForceStop: 16,
+			NoReplayCache:     true,
+			SuppressProgress:  true,
+			Policy:            policyLive,
 		}
 	default:
 		return SessionSpec{Stage: stage, MaxIterations: 5, MaxTokens: 8192, Thinking: &thinkingOff, Policy: policyBuild}

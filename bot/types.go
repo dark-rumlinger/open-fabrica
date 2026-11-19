@@ -44,6 +44,11 @@ type Provider interface {
 	SendDocument(chatID, filename string, data []byte, caption string) error
 }
 
+// PhotoSender is an optional capability for providers that can upload an inline image.
+type PhotoSender interface {
+	SendPhoto(chatID, filename string, data []byte, caption string) error
+}
+
 // OnMessageFunc is the callback providers call when a message arrives.
 // messageID is the platform message id (used to scrub a pasted secret).
 type OnMessageFunc func(provider, chatID, userID string, messageID int, text string)
@@ -61,10 +66,6 @@ type BotDeps struct {
 	Bus              *events.Bus
 	Encryptor        *security.Encryptor
 	Logger           *slog.Logger
-	// AdminBaseURL is the externally reachable admin UI origin (e.g.
-	// "https://host:port"), used to build "Open in admin" deep links. Empty
-	// disables deep links.
-	AdminBaseURL string
 	// TLSDisabled mirrors the server setting; when true no project is served over
 	// HTTPS, so the bot does not offer public links.
 	TLSDisabled bool

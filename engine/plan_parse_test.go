@@ -431,3 +431,15 @@ func TestParsePlanToleratesIDListDrift(t *testing.T) {
 		t.Errorf("nested strings are kept and non-strings dropped: deps=%v covers=%v", b.Deps, b.Covers)
 	}
 }
+
+// A shorthand copied into a task's `tools` becomes the one tool that realizes it.
+func TestPlanTaskToolsResolveShorthand(t *testing.T) {
+	var spec PlanTaskSpec
+	if err := json.Unmarshal([]byte(`{"title":"x","tools":["create_auth","manage_api","create_websocket","create_auth"]}`), &spec); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"manage_auth", "manage_api", "create_websocket"}
+	if strings.Join(spec.Tools, ",") != strings.Join(want, ",") {
+		t.Fatalf("tools = %v, want %v (create_websocket spans several tools and stays)", spec.Tools, want)
+	}
+}

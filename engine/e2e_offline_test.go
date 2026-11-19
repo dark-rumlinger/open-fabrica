@@ -27,6 +27,8 @@ import (
 var userFlowsStep = enginetest.Calls(
 	llm.ToolCall{ID: "cf1", Name: "manage_testing",
 		Arguments: `{"action":"write_flows","source":"export default { flows: [{ name: \"home\", steps: [{ goto: \"/\" }, { expectText: \"Tip calculator\" }] }] }"}`},
+	llm.ToolCall{ID: "cf2", Name: "manage_tasks",
+		Arguments: `{"action":"complete","task_id":"user-flows","result":"wrote of_test.js"}`},
 )
 
 const planJSON = `{
@@ -72,10 +74,11 @@ func TestOfflineEndToEndBuild(t *testing.T) {
 		// The page-probe nudge fires once the checklist resolves with no probe run; the
 		// offline run has no browser, so the model just acknowledges it and the build stops.
 		enginetest.Text("The page probe is skipped in this offline run."),
-		// Post-build flow gate (user flows on + the project has a page): write of_test.js,
-		// then a plain-text turn ends the gate (it adds no checklist item to resolve).
+		// Spec audit (stage=review) runs after the build.
+		enginetest.Text(`{"gaps":[]}`),
+		// Post-build flow gate (user flows on + the project has a page): write of_test.js
+		// and complete the user-flows task, which ends the gate.
 		userFlowsStep,
-		enginetest.Text("Flows saved."),
 	}}
 
 	deps := &Deps{
@@ -203,19 +206,19 @@ func TestOfflineEndToEndBuild(t *testing.T) {
 		}
 	}
 
-	// The LLM log marks no hits (first run is all fresh). Nine calls: the PLAN
+	// The LLM log marks no hits (first run is all fresh). Eight calls: the PLAN
 	// guide-selection pre-pass, the brief-feature extraction, the PLAN call, the three
 	// build calls (the last answers the page-probe nudge), the spec audit after the build,
-	// and the two flow-gate calls (write_flows, then the plain-text turn that ends it).
+	// and the one flow-gate call (write_flows + complete user-flows).
 	// The replay cache holds all but the audit, which always judges the code afresh.
 	var cached int
-	if err := pdb.QueryRow("SELECT COUNT(*) FROM of_llm_cache").Scan(&cached); err != nil || cached != 8 {
-		t.Fatalf("replay cache rows = %d (%v), want 8", cached, err)
+	if err := pdb.QueryRow("SELECT COUNT(*) FROM of_llm_cache").Scan(&cached); err != nil || cached != 7 {
+		t.Fatalf("replay cache rows = %d (%v), want 7", cached, err)
 	}
 	var calls, hits int
 	_ = pdb.QueryRow("SELECT COUNT(*), COALESCE(SUM(cache_hit),0) FROM of_llm_calls WHERE source='engine'").Scan(&calls, &hits)
-	if calls != 9 || hits != 0 {
-		t.Fatalf("llm calls=%d hits=%d, want 9/0", calls, hits)
+	if calls != 8 || hits != 0 {
+		t.Fatalf("llm calls=%d hits=%d, want 8/0", calls, hits)
 	}
 }
 

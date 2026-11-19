@@ -35,4 +35,28 @@ func TestRejectCrossSite(t *testing.T) {
 			t.Errorf("%s: status %d, want %d", c.name, rec.Code, c.want)
 		}
 	}
+
+	// Untrusted peer cannot spoof X-Forwarded-Host to bypass Origin check.
+	untrusted := httptest.NewRequest("POST", "http://localhost:5734/admin/api/projects", nil)
+	untrusted.Host = "localhost:5734"
+	untrusted.RemoteAddr = "203.0.113.10:12345"
+	untrusted.Header.Set("Origin", "https://evil.example")
+	untrusted.Header.Set("X-Forwarded-Host", "evil.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, untrusted)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("untrusted peer X-Forwarded-Host spoof: status %d, want 403", rec.Code)
+	}
+
+	// Loopback (trusted) proxy rewriting Host is accepted.
+	trusted := httptest.NewRequest("POST", "http://127.0.0.1:5734/admin/api/projects", nil)
+	trusted.Host = "127.0.0.1:5734"
+	trusted.RemoteAddr = "127.0.0.1:54321"
+	trusted.Header.Set("Origin", "https://app.example")
+	trusted.Header.Set("X-Forwarded-Host", "app.example")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, trusted)
+	if rec.Code != http.StatusOK {
+		t.Errorf("trusted proxy X-Forwarded-Host: status %d, want 200", rec.Code)
+	}
 }

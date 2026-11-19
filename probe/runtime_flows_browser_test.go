@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"openfabrica/internal/browser"
 	"openfabrica/internal/replayid"
-	"openfabrica/store"
 )
 
 // These drive RunFlowTests against a REAL headless Chrome over fixture pages: the
@@ -322,7 +322,7 @@ document.getElementById('up').addEventListener('click', function () {
 func runFlowFixture(t *testing.T, src string) FlowResult {
 	t.Helper()
 	base := flowSite(t)
-	if _, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{}); err != nil {
+	if _, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{}); err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	} else {
 		cancel()
@@ -651,7 +651,7 @@ func TestFlowsBrowser_UploadDropsOntoDropZone(t *testing.T) {
 // needs; when that flow fails first, the dependent flow is blocked, not failed.
 func TestFlowsBrowser_RememberDependencies(t *testing.T) {
 	base := flowSite(t)
-	if _, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{}); err != nil {
+	if _, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{}); err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	} else {
 		cancel()
@@ -919,7 +919,7 @@ func TestFlowsBrowser_CrossOriginModuleLibraryLoads(t *testing.T) {
 </body></html>`))
 	}))
 	t.Cleanup(app.Close)
-	if _, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{}); err != nil {
+	if _, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{}); err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	} else {
 		cancel()
@@ -960,7 +960,7 @@ func TestFlowsBrowser_BlockedCDNModuleExplainsItself(t *testing.T) {
 </body></html>`))
 	}))
 	t.Cleanup(app.Close)
-	if _, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{}); err != nil {
+	if _, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{}); err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	} else {
 		cancel()

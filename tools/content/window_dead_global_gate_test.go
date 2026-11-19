@@ -41,22 +41,22 @@ func seedDoc(t *testing.T, db dbh.Handle, kind, path, body string) {
 func TestSave_WindowDeadGlobal_GuardedDanglingReadRejected(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
-	seedJS(t, db, "world.state.js", `export const SHARED_STATE = {};
-export function getPlayer(){ return null; }`)
-	seedJS(t, db, "world.js", `import { SHARED_STATE } from 'world.state';
+	seedJS(t, db, "app.state.js", `export const SHARED_STATE = {};
+export function getUser(){ return null; }`)
+	seedJS(t, db, "app.js", `import { SHARED_STATE } from 'app.state';
 export function boot(){ return SHARED_STATE; }`)
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "world.chat.js",
-		Body: `import { SHARED_STATE } from 'world.state';
-function worldToScreen(x, y, z) {
-  if (window.__projectWorld3D) {
-    return window.__projectWorld3D(x, y, z);
+		FilePath: "app.panel.js",
+		Body: `import { SHARED_STATE } from 'app.state';
+function computeLayout(x, y, z) {
+  if (window.__computeLayout) {
+    return window.__computeLayout(x, y, z);
   }
   return null;
 }
-export function initChat(){ return worldToScreen(0, 0, 0) || SHARED_STATE; }`,
+export function initPanel(){ return computeLayout(0, 0, 0) || SHARED_STATE; }`,
 	}).Run(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -67,10 +67,10 @@ export function initChat(){ return worldToScreen(0, 0, 0) || SHARED_STATE; }`,
 	if res.Code != "window_dead_global" {
 		t.Fatalf("Code = %q, want window_dead_global", res.Code)
 	}
-	if !contains(res.Error, "window.__projectWorld3D") {
+	if !contains(res.Error, "window.__computeLayout") {
 		t.Errorf("reject should name the dead symbol, got: %s", res.Error)
 	}
-	if !contains(res.Error, "world.state.js") {
+	if !contains(res.Error, "app.state.js") {
 		t.Errorf("reject should name the zero-import store module to move it into, got: %s", res.Error)
 	}
 	if !contains(res.Error, "zero-import store module") {
@@ -81,7 +81,7 @@ export function initChat(){ return worldToScreen(0, 0, 0) || SHARED_STATE; }`,
 	if !contains(res.Error, "do NOT fix it by adding") {
 		t.Errorf("reject must block the add-the-assignment fix, got: %s", res.Error)
 	}
-	if !contains(res.Error, "setProjectWorld3D") {
+	if !contains(res.Error, "setComputeLayout") {
 		t.Errorf("reject should carry the live-binding setter idiom, got: %s", res.Error)
 	}
 }

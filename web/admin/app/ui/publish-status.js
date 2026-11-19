@@ -77,32 +77,30 @@ export function createPublishStrip(projectId, opts = {}) {
     if (ps.key === 'live' || ps.key === 'unverified' || ps.key === 'tls-off' || ps.key === 'local' || ps.key === 'lan') {
       actions.push(h('a', { className: 'btn btn--primary btn--sm', href: url, target: '_blank', rel: 'noopener' }, t('ps.openSite')));
     }
-    if (state.isAdmin()) {
-      const published = project.published;
-      const toggle = async () => {
-          toggleBtn.disabled = true;
-          try {
-            const updated = await put(`/admin/api/projects/${projectId}/published`, { published: !published });
-            toast.success(updated.published ? t('ps.nowPublished') : t('ps.nowUnpublished'));
-            const projects = await get('/admin/api/projects').catch(() => null);
-            if (projects) state.set('projects', projects);
-            await load();
-          } catch (err) {
-            toast.error(t(published ? 'ps.unpublishFailed' : 'ps.publishFailed', { error: humanizeError(err.message) }));
-            toggleBtn.disabled = false;
-          }
-      };
-      const toggleBtn = h('button', {
-        className: `btn ${published ? 'btn--danger' : 'btn--success'} btn--sm`,
-        // Unpublishing takes the site offline for every visitor, so it asks first.
-        onClick: () => (published
-          ? modal.confirmDanger(t('ps.unpublishTitle'),
-            t('ps.unpublishBody'),
-            toggle, t('ps.unpublishBtn'))
-          : toggle()),
-      }, published ? t('ps.unpublishBtn') : t('ps.publishBtn'));
-      actions.push(toggleBtn);
-    }
+    const published = project.published;
+    const toggle = async () => {
+        toggleBtn.disabled = true;
+        try {
+          const updated = await put(`/admin/api/projects/${projectId}/published`, { published: !published });
+          toast.success(updated.published ? t('ps.nowPublished') : t('ps.nowUnpublished'));
+          const projects = await get('/admin/api/projects').catch(() => null);
+          if (projects) state.set('projects', projects);
+          await load();
+        } catch (err) {
+          toast.error(t(published ? 'ps.unpublishFailed' : 'ps.publishFailed', { error: humanizeError(err.message) }));
+          toggleBtn.disabled = false;
+        }
+    };
+    const toggleBtn = h('button', {
+      className: `btn ${published ? 'btn--danger' : 'btn--success'} btn--sm`,
+      // Unpublishing takes the site offline for every visitor, so it asks first.
+      onClick: () => (published
+        ? modal.confirmDanger(t('ps.unpublishTitle'),
+          t('ps.unpublishBody'),
+          toggle, t('ps.unpublishBtn'))
+        : toggle()),
+    }, published ? t('ps.unpublishBtn') : t('ps.publishBtn'));
+    actions.push(toggleBtn);
 
     root.append(
       h('div', { className: 'card__header' }, [

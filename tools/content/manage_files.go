@@ -43,7 +43,7 @@ type ArtSave struct {
 	FilePath    string         `arg:"file_path,required" desc:"Path identifier: a page route as a clean URL with no file extension (\"/\" for home, \"/about\" not \"/about.html\"), an asset path, or a file name. For kind=layout, save the primary layout at path \"default\" - pages with no explicit metadata.layout resolve there automatically, so any other name forces every page to set it. Do not also save the same layout under another name."`
 	Body        string         `arg:"body,required"          desc:"Full artifact body, up to 48 KB (client-side JS modules up to 36 KB); build a larger file by splitting it into smaller files, or by saving a smaller complete first version and growing it in focused follow-up edits. See the action docstring for the page/layout body-shape contract."`
 	ContentType string         `arg:"content_type"           desc:"MIME type override."`
-	Scope       string         `arg:"scope"                  desc:"Asset visibility, a TOP-LEVEL arg - never nest it inside metadata. Usually omit it: JS/CSS files default to \"page\" (a single-page split) and a re-save keeps the existing scope. Pass \"global\" only for assets genuinely shared across every page (sitewide analytics/helpers)." enum:"page,global"`
+	Scope       string         `arg:"scope"                  desc:"Asset visibility, a TOP-LEVEL arg - never nest it inside metadata. Usually omit it: JS/CSS files default to \"page\" (a single-page split) and a re-save keeps the existing scope. Pass \"global\" for assets shared across every page (the shared design-system CSS, shell JS, sitewide helpers) — global CSS/JS auto-injects into the layout's {{assets}} without <link>/<script> tags." enum:"page,global"`
 	Metadata    map[string]any `arg:"metadata"               desc:"Free-form metadata stored with the artifact. On a kind=page, {title: \"Contact\"} sets the page <title>; omit it and the plan's per-page title is used automatically (never the project name)."`
 	AttachTo    string         `arg:"attach_to"              desc:"kind=file only: page route this file attaches to, linked in this same call so no follow-up action=attach is needed. Pass it on every page entry JS and every page CSS. Leave it OFF a leaf module an entry imports - the import graph reaches those, and attaching them is wrong."`
 	Position    int            `arg:"position"               desc:"Page-scope attach order, used with attach_to only (default 0, lower loads first; CSS cascade order - JS modules resolve through imports, not tag order)."`
@@ -52,7 +52,7 @@ type ArtSave struct {
 
 func (a *ArtSave) ActionName() string { return "save" }
 func (a *ArtSave) Doc() string {
-	return "Create or overwrite an artifact (page = HTML fragment, layout = the shell; see the page/layout law). Attach page-scope JS/CSS with attach_to, never a hand-written <script>/<link>. A malformed save is rejected with the exact fix."
+	return "Create or overwrite an artifact (page = HTML fragment, layout = the shell with {{content}} and {{assets}}; see the page/layout law). Attach page-scope JS/CSS with attach_to, and use scope=global for shared CSS/shell JS (auto-injected into {{assets}}) - never write same-origin <script>/<link> tags in a page or layout. A malformed save is rejected with the exact fix."
 }
 func (a *ArtSave) Example() any {
 	return &ArtSave{Kind: "page", FilePath: "/", Body: "<h1>Home</h1>"}
@@ -230,7 +230,7 @@ type ArtGet struct {
 
 func (a *ArtGet) ActionName() string { return "get" }
 func (a *ArtGet) Doc() string {
-	return "Read an artifact body, or a from_line/to_line range (paginates via next_from_line). The 'N| ' gutter is display-only - never copy it into patch search text. A bare get of a large file returns its OUTLINE; pass a range for real source."
+	return "Read an artifact body, or a from_line/to_line range (paginates via next_from_line). Omit from_line/to_line to read small files in full in one call; large files auto-return their outline, and from_line/to_line is only for targeted slices of large files. The 'N| ' gutter is display-only - never copy it into patch search text."
 }
 func (a *ArtGet) ReadOnly() bool { return true }
 func (a *ArtGet) Example() any {

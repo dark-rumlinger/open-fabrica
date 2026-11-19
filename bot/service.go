@@ -16,6 +16,7 @@ import (
 	"openfabrica/events"
 	"openfabrica/internal/projectident"
 	"openfabrica/internal/safego"
+	"openfabrica/providers/llm"
 )
 
 // pendingActionTTL bounds how long a multi-step flow (/new etc.) stays armed
@@ -48,14 +49,18 @@ type BotService struct {
 	// would drop the earlier one.
 	usersMu sync.Mutex
 
-	subOnce sync.Once
+	subOnce  sync.Once
+	reloadMu sync.Mutex // serializes ReloadTelegram across concurrent settings events
 	// resendOnce re-sends the questions still waiting once per process, after the
 	// first provider is up.
 	resendOnce sync.Once
 
 	// notifyQueue serialises the outbound event notifications (see queued).
-	notifyOnce  sync.Once
-	notifyQueue chan func()
+	notifyOnce   sync.Once
+	notifyMu     sync.RWMutex
+	notifyQueue  chan func()
+	notifyClosed bool
+	notifyDone   chan struct{}
 
 	// live holds the per-project live status cards.
 	live liveHub
@@ -93,6 +98,7 @@ func (s *BotService) RegisterProvider(p Provider) {
 		tp.SetUserSeen(s.noteUser)
 		tp.SetLanguageSeen(s.noteLanguage)
 		tp.SetUnsupported(s.replyUnsupported)
+		tp.SetPhotoHandler(s.HandleIncomingPhoto)
 	}
 	s.mu.Lock()
 	s.providers[p.Name()] = p
@@ -137,6 +143,9 @@ func (s *BotService) SaveOffset(offset int) {
 // telegram_bot_token: starts it when a token appears, stops it when removed, and
 // restarts it when the token value rotates. Safe to call at any time.
 func (s *BotService) ReloadTelegram(ctx context.Context) {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
 	// A token added while the app is running must still receive engine events, so
 	// make sure the bus subscriptions exist regardless of how Start went.
 	s.subscribe()
@@ -235,6 +244,33 @@ func (s *BotService) Start(ctx context.Context) {
 		})
 	}
 	s.scheduleResend()
+}
+
+// Stop halts all registered providers and waits (bounded) for their poll loops
+// to exit, so no new incoming commands arrive while the server is draining.
+func (s *BotService) Stop() {
+	s.mu.RLock()
+	providers := make([]Provider, 0, len(s.providers))
+	for _, p := range s.providers {
+		providers = append(providers, p)
+	}
+	s.mu.RUnlock()
+
+	for _, p := range providers {
+		_ = p.Stop()
+	}
+
+	s.notifyMu.Lock()
+	var done chan struct{}
+	if s.notifyQueue != nil && !s.notifyClosed {
+		s.notifyClosed = true
+		close(s.notifyQueue)
+		done = s.notifyDone
+	}
+	s.notifyMu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 // isAllowed checks the telegram_allowed_users setting. If no users are
@@ -631,6 +667,19 @@ func (s *BotService) handleChat(state *UserState, text string) {
 		}
 	}
 
+	// Persist to the project chat history before waking the engine so the owner's
+	// message appears on the web timeline ahead of the assistant reply.
+	if s.deps.ProjectDBManager != nil {
+		if pdb := s.deps.ProjectDBManager.Get(state.ActiveProjectID); pdb != nil {
+			if _, err := pdb.ExecWrite(
+				"INSERT INTO of_chat_messages (session_id, role, content) VALUES ('admin', 'user', ?)",
+				text,
+			); err != nil {
+				s.logger.Debug("bot chat message persist failed", "error", err)
+			}
+		}
+	}
+
 	cmd := engine.Command{
 		Type:    engine.CommandChat,
 		Payload: map[string]any{"message": text},
@@ -640,6 +689,47 @@ func (s *BotService) handleChat(state *UserState, text string) {
 		return
 	}
 	// The card now sits above this exchange; show the message landed right away.
+	state.LiveCardStale.Store(true)
+	s.cardUpdate(state.ActiveProjectID, func(st *cardState) {
+		st.thinking = true
+		st.stopped = false
+	})
+}
+
+// HandleIncomingPhoto forwards a Telegram photo (and optional caption) into the
+// active project's LIVE chat session.
+func (s *BotService) HandleIncomingPhoto(provider, chatID, userID string, _ int, caption string, images []llm.MessageImage) {
+	if !s.isAllowed(userID) || !s.allowRate(userID) {
+		return
+	}
+	state := s.getOrCreateUser(provider, userID)
+	v := s.voice(state)
+	if state.ActiveProjectID == 0 || s.deps.Engine == nil {
+		s.send(state, v.tr("Select a project first (/menu) before sending an image."))
+		return
+	}
+	text := strings.TrimSpace(caption)
+	if text == "" {
+		text = "Please inspect the attached image."
+	}
+	if s.deps.ProjectDBManager != nil {
+		if pdb := s.deps.ProjectDBManager.Get(state.ActiveProjectID); pdb != nil {
+			if _, err := pdb.ExecWrite(
+				"INSERT INTO of_chat_messages (session_id, role, content) VALUES ('admin', 'user', ?)",
+				text,
+			); err != nil {
+				s.logger.Debug("bot photo message persist failed", "error", err)
+			}
+		}
+	}
+	cmd := engine.Command{
+		Type:    engine.CommandChat,
+		Payload: map[string]any{"message": text, "images": images},
+	}
+	if err := s.deps.Engine.Send(state.ActiveProjectID, cmd); err != nil {
+		s.send(state, v.trh("Failed to send message: %s", err))
+		return
+	}
 	state.LiveCardStale.Store(true)
 	s.cardUpdate(state.ActiveProjectID, func(st *cardState) {
 		st.thinking = true

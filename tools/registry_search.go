@@ -249,9 +249,18 @@ func (r *Registry) resolveAvailable(names []string, caps llm.Capabilities, stage
 // which inputs resolved by comparing returned Names against the input list.
 // stage gates by per-tool Stages (empty = no stage filter).
 func (r *Registry) LookupFull(names []string, caps llm.Capabilities, stage string) []llm.ToolDef {
+	return r.LookupFullFiltered(names, caps, stage, nil)
+}
+
+// LookupFullFiltered is LookupFull with per-tool omitted actions removed from each
+// returned wire schema.
+func (r *Registry) LookupFullFiltered(names []string, caps llm.Capabilities, stage string, omitActions map[string]map[string]bool) []llm.ToolDef {
 	defs := r.resolveAvailable(names, caps, stage)
 	out := make([]llm.ToolDef, 0, len(defs))
 	for _, t := range defs {
+		if omit := omitActions[t.Name]; len(omit) > 0 {
+			t = t.WithoutActions(omit)
+		}
 		out = append(out, llm.ToolDef{
 			Name:        t.Name,
 			Description: t.OneLiner,
@@ -275,9 +284,18 @@ type ToolDoc struct {
 // same capability + stage gating as LookupFull (via resolveAvailable) so the
 // docs slice lines up one-for-one with the schemas slice.
 func (r *Registry) LookupDocs(names []string, caps llm.Capabilities, stage string) []ToolDoc {
+	return r.LookupDocsFiltered(names, caps, stage, nil)
+}
+
+// LookupDocsFiltered is LookupDocs with per-tool omitted actions excluded from
+// the returned examples and schema notes.
+func (r *Registry) LookupDocsFiltered(names []string, caps llm.Capabilities, stage string, omitActions map[string]map[string]bool) []ToolDoc {
 	defs := r.resolveAvailable(names, caps, stage)
 	out := make([]ToolDoc, 0, len(defs))
 	for _, t := range defs {
+		if omit := omitActions[t.Name]; len(omit) > 0 {
+			t = t.WithoutActions(omit)
+		}
 		out = append(out, ToolDoc{
 			Name:      t.Name,
 			WhenToUse: strings.TrimSpace(t.WhenToUse),

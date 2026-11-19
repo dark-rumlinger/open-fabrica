@@ -3,10 +3,11 @@ package admin
 import (
 	"database/sql"
 	"path/filepath"
-	"strconv"
 	"testing"
 
 	_ "modernc.org/sqlite"
+
+	"openfabrica/store"
 )
 
 // sqlExecWriteAdapter adapts a *sql.DB to the diskPathDB interface (which wants
@@ -21,31 +22,6 @@ func mustExec(t *testing.T, d *sql.DB, query string, args ...any) {
 	t.Helper()
 	if _, err := d.Exec(query, args...); err != nil {
 		t.Fatalf("exec %q: %v", query, err)
-	}
-}
-
-func TestRemapDiskPath(t *testing.T) {
-	cases := []struct {
-		name          string
-		in            string
-		oldID, newID  int
-		wantNormSlash string // expected result, normalised to forward slashes
-	}{
-		{"forward slashes", "data/projects/7/files/logo.png", 7, 12, "data/projects/12/files/logo.png"},
-		{"backslashes", `data\projects\7\files\logo.png`, 7, 12, "data/projects/12/files/logo.png"},
-		{"assets subdir", "data/projects/3/assets/hero.jpg", 3, 9, "data/projects/9/assets/hero.jpg"},
-		{"non-matching prefix left alone", "somewhere/else/x.png", 7, 12, "somewhere/else/x.png"},
-		{"absolute unix path", "/srv/of/data/projects/7/files/logo.png", 7, 12, "data/projects/12/files/logo.png"},
-		{"absolute windows path", `C:\of\data\projects\7\files\logo.png`, 7, 12, "data/projects/12/files/logo.png"},
-		{"different id not touched", "data/projects/99/files/x.png", 7, 12, "data/projects/99/files/x.png"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := remapDiskPath(c.in, c.oldID, filepath.Join("data", "projects", strconv.Itoa(c.newID)))
-			if filepath.ToSlash(got) != c.wantNormSlash {
-				t.Errorf("remapDiskPath(%q, %d, %d) = %q, want (normalised) %q", c.in, c.oldID, c.newID, got, c.wantNormSlash)
-			}
-		})
 	}
 }
 
@@ -118,54 +94,39 @@ func TestRemapProjectDiskPaths(t *testing.T) {
 }
 
 func TestSanitizeExportDB(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "project.db")
-
-	// Build a minimal project DB with the tables the sanitiser touches plus an
-	// artifact that must survive.
+	dbPath := migratedProjectDBPath(t)
 	d, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	schema := []string{
-		`CREATE TABLE of_secrets (id INTEGER PRIMARY KEY, name TEXT, value_encrypted TEXT)`,
-		`CREATE TABLE of_file_history (id INTEGER PRIMARY KEY, path TEXT)`,
-		`CREATE TABLE of_chat_messages (id INTEGER PRIMARY KEY, body TEXT)`,
-		`CREATE TABLE of_files (id INTEGER PRIMARY KEY, path TEXT, body TEXT)`,
-		`CREATE TABLE of_webhooks (id INTEGER PRIMARY KEY, name TEXT, secret_encrypted TEXT, url TEXT)`,
-		`CREATE TABLE of_user_totp (id INTEGER PRIMARY KEY, secret_encrypted TEXT)`,
-		`CREATE TABLE of_magic_tokens (id INTEGER PRIMARY KEY, token TEXT)`,
-		`CREATE TABLE of_ws_room_tokens (id INTEGER PRIMARY KEY, token TEXT)`,
-		`CREATE TABLE of_tenant_invites (id INTEGER PRIMARY KEY, token TEXT)`,
-		`CREATE TABLE of_tenants (id INTEGER PRIMARY KEY, name TEXT)`,
-		`CREATE TABLE of_auth_endpoints (id INTEGER PRIMARY KEY, table_name TEXT)`,
-		// app_users is an end-user account table an auth endpoint points at; posts
-		// is ordinary app content that must be preserved.
+	// app_users is an end-user account table an auth endpoint points at; posts
+	// is ordinary app content that must be preserved.
+	for _, stmt := range []string{
 		`CREATE TABLE app_users (id INTEGER PRIMARY KEY, email TEXT, password TEXT)`,
 		`CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT)`,
-	}
-	for _, s := range schema {
-		if _, err := d.Exec(s); err != nil {
-			t.Fatalf("schema %q: %v", s, err)
+		`INSERT INTO app_users (email, password) VALUES ('user@example.com', 'bcrypt-hash')`,
+		`INSERT INTO posts (title) VALUES ('Hello world')`,
+	} {
+		if _, err := d.Exec(stmt); err != nil {
+			t.Fatalf("stmt %q: %v", stmt, err)
 		}
 	}
-	d.Exec(`INSERT INTO of_secrets (name, value_encrypted) VALUES ('STRIPE_KEY', 'cipher-blob')`)
-	d.Exec(`INSERT INTO of_file_history (path) VALUES ('index.html')`)
-	d.Exec(`INSERT INTO of_chat_messages (body) VALUES ('hello')`)
-	d.Exec(`INSERT INTO of_files (path, body) VALUES ('index.html', '<h1>hi</h1>')`)
-	d.Exec(`INSERT INTO of_webhooks (name, secret_encrypted, url) VALUES ('hook', 'sealed-ciphertext', 'https://example.com')`)
-	d.Exec(`INSERT INTO of_user_totp (secret_encrypted) VALUES ('totp-cipher')`)
-	d.Exec(`INSERT INTO of_magic_tokens (token) VALUES ('magic-tok')`)
-	d.Exec(`INSERT INTO of_ws_room_tokens (token) VALUES ('room-tok')`)
-	d.Exec(`INSERT INTO of_tenant_invites (token) VALUES ('invite-tok')`)
-	d.Exec(`INSERT INTO of_tenants (name) VALUES ('Acme')`)
-	d.Exec(`INSERT INTO of_auth_endpoints (table_name) VALUES ('app_users')`)
-	d.Exec(`INSERT INTO app_users (email, password) VALUES ('user@example.com', 'bcrypt-hash')`)
-	d.Exec(`INSERT INTO posts (title) VALUES ('Hello world')`)
+	insertRow(t, d, "of_secrets", map[string]any{"name": "STRIPE_KEY", "value_encrypted": "cipher-blob"})
+	insertRow(t, d, "of_file_history", map[string]any{"path": "index.html"})
+	insertRow(t, d, "of_chat_messages", map[string]any{"content": "hello"})
+	insertRow(t, d, "of_files", map[string]any{"path": "index.html", "body": "<h1>hi</h1>"})
+	insertRow(t, d, "of_webhooks", map[string]any{"name": "hook", "secret_encrypted": "sealed-ciphertext", "url": "https://example.com"})
+	insertRow(t, d, "of_user_totp", map[string]any{"secret_encrypted": "totp-cipher"})
+	insertRow(t, d, "of_magic_tokens", map[string]any{"token": "magic-tok"})
+	insertRow(t, d, "of_ws_room_tokens", map[string]any{"token": "room-tok"})
+	insertRow(t, d, "of_tenant_invites", map[string]any{"token": "invite-tok"})
+	insertRow(t, d, "of_tenants", map[string]any{"name": "Acme"})
+	insertRow(t, d, "of_auth_endpoints", map[string]any{"table_name": "app_users"})
+	artifactsBefore := rowCount(t, d, "of_files")
 	d.Close()
 
-	if err := sanitizeExportDB(dbPath); err != nil {
-		t.Fatalf("sanitizeExportDB: %v", err)
+	if err := store.SanitizeExportDB(dbPath); err != nil {
+		t.Fatalf("SanitizeExportDB: %v", err)
 	}
 
 	d2, err := sql.Open("sqlite", dbPath)
@@ -195,8 +156,8 @@ func TestSanitizeExportDB(t *testing.T) {
 	if chatCount != 0 {
 		t.Errorf("of_chat_messages count = %d, want 0 (ephemeral cleared)", chatCount)
 	}
-	if artifactCount != 1 {
-		t.Errorf("of_files count = %d, want 1 (authored content preserved)", artifactCount)
+	if artifactCount != artifactsBefore {
+		t.Errorf("of_files count = %d, want %d (authored content preserved)", artifactCount, artifactsBefore)
 	}
 
 	// The webhook config row survives, but its plaintext signing secret is blanked.
@@ -238,7 +199,7 @@ func TestSanitizeExportDB(t *testing.T) {
 // Payment, push, webhook-log and run-transcript rows are end-user data that a
 // shared template must not carry; authored config next to them stays.
 func TestSanitizeExportDBClearsEndUserRecords(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "project.db")
+	dbPath := migratedProjectDBPath(t)
 	d, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -249,17 +210,12 @@ func TestSanitizeExportDBClearsEndUserRecords(t *testing.T) {
 		"of_llm_usage_daily",
 	}
 	for _, tbl := range append([]string{"of_payment_config"}, cleared...) {
-		if _, err := d.Exec(`CREATE TABLE ` + tbl + ` (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
-			t.Fatalf("create %s: %v", tbl, err)
-		}
-		if _, err := d.Exec(`INSERT INTO ` + tbl + ` (v) VALUES ('x')`); err != nil {
-			t.Fatalf("insert %s: %v", tbl, err)
-		}
+		insertRow(t, d, tbl, nil)
 	}
 	d.Close()
 
-	if err := sanitizeExportDB(dbPath); err != nil {
-		t.Fatalf("sanitizeExportDB: %v", err)
+	if err := store.SanitizeExportDB(dbPath); err != nil {
+		t.Fatalf("SanitizeExportDB: %v", err)
 	}
 
 	d2, err := sql.Open("sqlite", dbPath)

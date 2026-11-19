@@ -385,6 +385,46 @@ func TestSessionRepeatGuardForceStops(t *testing.T) {
 	}
 }
 
+// TestSessionFailedDiscardsReplayCache verifies that a session ending in EndFailed
+// (e.g. repeat_stall) evicts its responses from of_llm_cache so a subsequent retry
+// actually re-queries the provider instead of replaying the stalled loop.
+func TestSessionFailedDiscardsReplayCache(t *testing.T) {
+	same := echoCall("cx", "same")
+	p := &enginetest.Provider{Steps: []enginetest.Step{
+		enginetest.Calls(same), enginetest.Calls(same),
+		enginetest.Calls(same), enginetest.Calls(same),
+		enginetest.Calls(echoCall("c2", "ok")),
+		enginetest.Text("recovered on retry"),
+	}}
+	s := testSession(t, p)
+
+	res1, err := s.Run(context.Background(), buildSpecForTest())
+	if err != nil {
+		t.Fatalf("run1: %v", err)
+	}
+	if res1.Ending != EndFailed {
+		t.Fatalf("run1 ending=%s, want %s", res1.Ending, EndFailed)
+	}
+	var cached int
+	if err := s.pdb.QueryRow("SELECT COUNT(*) FROM of_llm_cache").Scan(&cached); err != nil {
+		t.Fatalf("count cache: %v", err)
+	}
+	if cached != 0 {
+		t.Fatalf("of_llm_cache rows after EndFailed = %d, want 0", cached)
+	}
+
+	res2, err := s.Run(context.Background(), buildSpecForTest())
+	if err != nil {
+		t.Fatalf("run2: %v", err)
+	}
+	if res2.Ending != EndDone || res2.Content != "recovered on retry" {
+		t.Fatalf("run2 ending=%s content=%q, want done/'recovered on retry'", res2.Ending, res2.Content)
+	}
+	if p.CallCount() != 6 {
+		t.Fatalf("provider calls = %d, want 6 (retry must not replay cached stall)", p.CallCount())
+	}
+}
+
 // TestSessionRolloverReseeds: crossing the input-token threshold ends the
 // segment and reseeds via spec.Reseed.
 func TestSessionRolloverReseeds(t *testing.T) {
@@ -897,5 +937,34 @@ func TestProbeReadOnlyFollowsTheCall(t *testing.T) {
 		if got := s.isReadOnlyToolCall(call, args); got != tc.want {
 			t.Errorf("%s %s: read-only = %v, want %v", tc.name, tc.args, got, tc.want)
 		}
+	}
+}
+
+// dedupeRepeatRejection collapses identical failed results within one turn to a
+// stub naming the first call, keeping the code so triage still counts each
+// rejection truthfully.
+func TestDedupeRepeatRejection(t *testing.T) {
+	seen := map[string]string{}
+	body := `{"success":false,"code":"missing_arg","error":"missing required argument: action"}`
+
+	first, stubbed := dedupeRepeatRejection(seen, "call_1", "manage_function", body)
+	if stubbed || first != body {
+		t.Fatalf("first occurrence must pass through, got stubbed=%v body=%q", stubbed, first)
+	}
+	stub, stubbed := dedupeRepeatRejection(seen, "call_2", "manage_function", body)
+	if !stubbed {
+		t.Fatal("identical second failure should be stubbed")
+	}
+	if !strings.Contains(stub, "call_1") || !strings.Contains(stub, `"missing_arg"`) {
+		t.Errorf("stub should reference the first call and keep the code, got %s", stub)
+	}
+	// A different tool with the same body keeps its own first full error.
+	if _, stubbed := dedupeRepeatRejection(seen, "call_3", "manage_api", body); stubbed {
+		t.Error("a different tool must not be stubbed on its first failure")
+	}
+	// A different body on the same tool is a new error, not a repeat.
+	other := `{"success":false,"code":"missing_arg","error":"missing required argument: name"}`
+	if _, stubbed := dedupeRepeatRejection(seen, "call_4", "manage_function", other); stubbed {
+		t.Error("a different error body must not be stubbed")
 	}
 }

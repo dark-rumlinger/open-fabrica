@@ -50,7 +50,6 @@ function buildItems() {
   if (active) {
     for (const group of GROUPS) {
       for (const panel of group.panels) {
-        if (panel.adminOnly && !state.isAdmin()) continue;
         items.push({
           group: t('cmdk.thisProject'),
           label: panel.label,

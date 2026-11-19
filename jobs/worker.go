@@ -61,6 +61,7 @@ type Manager struct {
 	deps    *Deps
 	rootCtx context.Context
 	workers map[int]context.CancelFunc
+	client  *http.Client
 	wg      sync.WaitGroup
 	logger  *slog.Logger
 }
@@ -72,6 +73,7 @@ func NewManager(deps *Deps, ctx context.Context) *Manager {
 		deps:    deps,
 		rootCtx: ctx,
 		workers: make(map[int]context.CancelFunc),
+		client:  netguard.SSRFSafeClient(),
 		logger:  slog.With("component", "jobs_manager"),
 	}
 }
@@ -92,6 +94,10 @@ func (m *Manager) StartProject(projectID int) error {
 	}
 
 	ctx, cancel := context.WithCancel(m.rootCtx)
+	client := m.client
+	if client == nil {
+		client = netguard.SSRFSafeClient()
+	}
 	w := &Worker{
 		projectID:     projectID,
 		projectDB:     projectDB,
@@ -102,7 +108,7 @@ func (m *Manager) StartProject(projectID int) error {
 		budgetFn:      m.deps.BudgetFn,
 		callLLM:       m.deps.CallLLM,
 		llmHTTPClient: m.deps.LLMHTTPClient,
-		client:        netguard.SSRFSafeClient(),
+		client:        client,
 		logger:        slog.With("component", "job_worker", "project_id", projectID),
 	}
 	m.workers[projectID] = cancel

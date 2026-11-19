@@ -150,10 +150,12 @@ func GetTableColumns(db dbh.Handle, physicalName string) (map[string]bool, error
 // PRAGMA table_info - the live schema read back from the database rather than
 // the column-defs the caller was handed at create time.
 type ColumnInfo struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	NotNull bool   `json:"not_null,omitempty"`
-	Default string `json:"default,omitempty"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	NotNull    bool   `json:"not_null,omitempty"`
+	Default    string `json:"default,omitempty"`
+	HasDefault bool   `json:"-"`
+	IsPK       bool   `json:"-"`
 }
 
 // GetTableColumnInfo returns the physical columns of a table in definition
@@ -174,7 +176,7 @@ func GetTableColumnInfo(db dbh.Handle, physicalName string) ([]ColumnInfo, error
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
 			return nil, err
 		}
-		ci := ColumnInfo{Name: name, Type: ctype, NotNull: notnull == 1}
+		ci := ColumnInfo{Name: name, Type: ctype, NotNull: notnull == 1, HasDefault: dflt.Valid, IsPK: pk != 0}
 		if dflt.Valid {
 			ci.Default = dflt.String
 		}
@@ -357,22 +359,4 @@ func LoadTableSchema(db *sql.DB, tableName string) (map[string]struct{}, error) 
 		out[col] = struct{}{}
 	}
 	return out, nil
-}
-
-// ProcessSecureValue applies the runtime handling implied by a column's
-// SecureColumnKinds entry: bcrypt for "hash", AES for "encrypt". Returns the raw
-// value unchanged for empty kind so callers can pass every column through without branching.
-func ProcessSecureValue(kind string, value any, enc *security.Encryptor) (any, error) {
-	switch kind {
-	case "hash":
-		s, _ := value.(string)
-		return security.HashPassword(s)
-	case "encrypt":
-		if enc == nil {
-			return nil, fmt.Errorf("encryption requested but encryptor not configured")
-		}
-		s, _ := value.(string)
-		return enc.Encrypt(s)
-	}
-	return value, nil
 }

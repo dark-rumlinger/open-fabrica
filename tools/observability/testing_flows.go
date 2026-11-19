@@ -53,7 +53,7 @@ func (a *DiagWriteFlows) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	if replaybudget.LastRed(budgetScope(ctx)) && rewritesToDiagnostics(saved, suite) {
 		return tools.FailCode("diagnostic_suite",
 			"not saved: this script drops most of the saved flows right after a red replay, which is a rewrite into diagnostics. "+
-				"Keep the saved flows by name and change only the ones that need it. Find the cause in the code (and test_page), not by replacing the suite; "+
+				"Keep the saved flows by name and change only the ones that need it. Find the cause in the code (and the replay's console/network errors), not by replacing the suite; "+
 				"a flow that is wrong is fixed in place."), nil
 	}
 	if left := leftOut(droppedFlows(saved, suite), a.Drop); len(left) > 0 {
@@ -74,10 +74,10 @@ func (a *DiagWriteFlows) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	}, ctx.ChangedBy()); err != nil {
 		return tools.Fail("saving of_test.js failed: %v", err), nil
 	}
-	names := make([]string, 0, len(suite.Flows))
+	replaybudget.MarkDirty(budgetScope(ctx))
+	names := suiteFlowNames(suite)
 	steps := 0
 	for _, f := range suite.Flows {
-		names = append(names, f.Name)
 		steps += len(f.Steps)
 	}
 	// A save is replayed at once: across 14 builds, 41 of 54 flow saves were followed by
@@ -98,7 +98,11 @@ func (a *DiagWriteFlows) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	}
 	data["saved"], data["flows"], data["steps"] = probe.FlowPath, names, steps
 	if envErr == nil && data["budget_exhausted"] == nil && data["stalled"] == nil {
-		data["replayed"] = "of_test.js was saved and replayed at once; call test_flows only to re-run it after an app fix"
+		if out.Success && data["skipped"] == nil {
+			data["replayed"] = "of_test.js was saved and all flows passed on this replay; do NOT call test_flows — mark the user-flows task complete."
+		} else {
+			data["replayed"] = "of_test.js was saved and replayed at once; call test_flows only to re-run it after an app fix"
+		}
 	}
 	warnings := suite.Lint()
 	warnings = append(warnings, suite.UnmatchedReferences(flowCorpus(ctx.DB))...)
@@ -159,11 +163,26 @@ func (a *DiagTestFlows) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 			return tools.Fail("no flow named %q in of_test.js", a.Flow), nil
 		}
 	}
+	if replaybudget.CleanGreen(budgetScope(ctx)) {
+		return tools.Ok(map[string]any{
+			"already_passed": true,
+			"flows":          suiteFlowNames(suite),
+			"note":           "all flows already passed on the last replay and nothing in the app or of_test.js has changed since; do not call test_flows again — complete the task.",
+		}), nil
+	}
 	out, envErr := replayFlows(ctx, suite, a.Flow, false)
 	if envErr != nil {
 		return tools.FailErr(envErr), nil
 	}
 	return out, nil
+}
+
+func suiteFlowNames(suite *probe.FlowSuite) []string {
+	names := make([]string, 0, len(suite.Flows))
+	for _, f := range suite.Flows {
+		names = append(names, f.Name)
+	}
+	return names
 }
 
 // budgetScope maps a tool call to its replay budget: the durable per-run budget
@@ -210,7 +229,7 @@ func replayFlows(ctx *tools.ToolContext, suite *probe.FlowSuite, only string, sa
 	var res probe.FlowResult
 	// Flows also reach past the page: the app's outgoing mail (kept, not sent),
 	// seeded accounts, scheduled tasks and webhooks.
-	replayCtx := probe.WithFlowHooks(ctx.Context(), flowhooks.New(ctx.ProjectID, ctx.DB, ctx.JWTManager, ctx.Encryptor))
+	replayCtx := probe.WithFlowHooks(ctx.Context(), flowhooks.New(ctx.ProjectID, ctx.DB, ctx.JWTManager, ctx.Encryptor, ctx.RunScheduleByNameFunc))
 	skip, restoreErr := flowsnap.Around(replayCtx, func() {
 		res = probe.RunFlowTests(replayCtx, suite, fmt.Sprintf("http://127.0.0.1:%d", port), domain, only)
 	})

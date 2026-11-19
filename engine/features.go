@@ -35,11 +35,13 @@ type PlanFeature struct {
 	Behaviours []string `json:"behaviours,omitempty"`
 }
 
-const featureExtractSystem = `You list the features a project brief asks for, so a plan can be checked for covering every one.
+const featureExtractSystem = `You list the functional features a project brief asks for, so a build plan can be checked for covering every deliverable.
 
-A feature is one user-facing capability: a screen or view, a tool, an interaction loop, a data the user manages, a background behaviour the user relies on. Name it the way the brief does, and give it the specific behaviours the brief describes for it, each a short phrase ("undo the last move", "sold-out items cannot be ordered").
+A feature is one distinct, buildable functional capability that maps to a checklist item: a screen, page, or view; a shared navigation shell; an interactive tool, subsystem, or game loop; a data collection the user manages; or a background automation/webhook. Name it the way the brief does, and give it the specific functional behaviours the brief describes for it, each a short phrase ("undo the last move", "sold-out items cannot be ordered").
 
-List every feature the brief names, in the brief's order. Do not invent features, and do not list visual style, tone, colours, fonts, or technology. Merge two mentions of the same thing into one feature.
+List every functional feature the brief names, in the brief's order. Merge two mentions of the same capability into one feature, and fold sample/seed content or a screen's empty/error/mobile behaviour into the feature that displays it rather than listing it as its own feature.
+
+Do not invent features, and NEVER list cross-cutting quality attributes, motion/polish, or non-functional requirements as features: responsive or mobile layout, page transitions, scroll/reveal or lazy-load animations, keyboard focus states or accessibility, performance/speed, visual style, tone, colours, fonts, or technology. Those apply across the whole site via its design system and layout rather than as separate features.
 
 Reply with JSON only: {"features":[{"name":"...","behaviours":["..."]}]}.`
 
@@ -71,7 +73,8 @@ func featureSchema() *llm.ResponseSchema {
 }
 
 // parseFeatures reads the reply (tolerating fences or prose around the object),
-// drops empty entries, caps the list, and assigns ids in order.
+// drops empty or cross-cutting non-functional entries, caps the list, and assigns
+// ids in order.
 func parseFeatures(content string) ([]PlanFeature, error) {
 	s := jsonrepair.Object(content)
 	var reply struct {
@@ -83,7 +86,7 @@ func parseFeatures(content string) ([]PlanFeature, error) {
 	var out []PlanFeature
 	for _, f := range reply.Features {
 		name := strings.TrimSpace(f.Name)
-		if name == "" {
+		if name == "" || isCrossCuttingQualityFeature(name) {
 			continue
 		}
 		var bs []string
@@ -100,16 +103,69 @@ func parseFeatures(content string) ([]PlanFeature, error) {
 	return out, nil
 }
 
-// minFeaturesFor is how many features a brief of this length should name. A long brief
-// that yields one or two features was read badly (a malformed reply with a single entry
-// is the usual cause), and a plan checked against that list is checked against almost
-// nothing.
-func minFeaturesFor(brief string) int {
-	n := len(strings.Fields(brief)) / 100
-	if n > 6 {
-		n = 6
+// deliverableFeatureNouns are words in a feature name that identify a concrete screen,
+// shell, data resource, interactive subsystem, or background job. A feature whose name
+// contains any of these is kept even when it also mentions mobile, accessibility, or
+// animation ("Mobile checkout page", "Accessibility settings panel").
+var deliverableFeatureNouns = []string{
+	"page", "screen", "view", "section", "bar", "nav", "menu", "header", "footer",
+	"form", "table", "gallery", "list", "detail", "dashboard", "modal", "drawer", "panel",
+	"editor", "canvas", "game", "board", "feed", "api", "endpoint", "webhook", "cron",
+	"schedule", "auth", "login", "signup", "account", "admin", "inbox", "cart", "checkout",
+	"search", "filter", "chart", "map", "player", "chat", "message", "room", "lobby",
+	"settings", "profile", "calculator", "upload", "export", "import", "report",
+}
+
+// crossCuttingQualityCues are headings the extractor emits when it mistakes a
+// closing polish/UX/design paragraph for a standalone feature ("Responsive and smooth
+// experience", "Accessibility focus states", "Reveal and lazy-load animations"). Left in
+// the list, they either force the planner to invent a polish task (which STAGE.md forbids)
+// or bounce the plan for an uncovered-feature retry.
+var crossCuttingQualityCues = []string{
+	"responsive", "mobile layout", "mobile experience", "smooth experience",
+	"smooth transition", "page transition", "view transition",
+	"reveal animation", "scroll reveal", "lazy-load", "lazy load",
+	"focus state", "keyboard accessibility", "accessible focus", "wcag", "a11y",
+	"visual polish", "micro-interaction", "microinteraction",
+	"performance and speed", "fast loading",
+}
+
+// isCrossCuttingQualityFeature reports whether a feature name is a pure cross-cutting
+// quality/polish/motion heading rather than a functional deliverable. Conservative:
+// any concrete deliverable noun in the name keeps the feature.
+func isCrossCuttingQualityFeature(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return false
 	}
-	return n
+	words := strings.FieldsFunc(lower, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	for _, w := range words {
+		for _, noun := range deliverableFeatureNouns {
+			if w == noun || w == noun+"s" {
+				return false
+			}
+		}
+	}
+	for _, cue := range crossCuttingQualityCues {
+		if strings.Contains(lower, cue) {
+			return true
+		}
+	}
+	return false
+}
+
+// minFeaturesFor is the minimum feature count expected from a multi-paragraph brief.
+// A long brief that yields zero or one feature was read badly (a malformed reply with a
+// single entry is the usual cause). Capped at 2 so an expanded brief (which spends several
+// paragraphs on visual direction, sample content, and polish) is never forced to retry and
+// pad a 2- or 3-feature site with non-functional fluff.
+func minFeaturesFor(brief string) int {
+	if len(strings.Fields(brief)) >= 200 {
+		return 2
+	}
+	return 0
 }
 
 // extractFeatures lists the brief's features, asking once more when the first reply is
@@ -132,7 +188,7 @@ func (w *Worker) extractFeatures(ctx context.Context, brief string) []PlanFeatur
 		if err != nil {
 			correction = "\n\nYour previous reply could not be read as JSON. Reply with one valid JSON object only: double quotes, no trailing commas, no commentary."
 		} else {
-			correction = fmt.Sprintf("\n\nYour previous reply listed only %d feature(s), but this brief describes more. Go through the brief paragraph by paragraph and list every screen, tool, loop, data set and background behaviour it names, each with its behaviours.", len(best))
+			correction = fmt.Sprintf("\n\nYour previous reply listed only %d feature(s), but this brief describes more functional deliverables. List every distinct screen/view, tool, interaction loop, data collection, and background automation it names (do not include responsive layout, transitions, animations, focus states, or visual style).", len(best))
 		}
 	}
 	w.logger.Info("brief features extracted", "count", len(best))
@@ -141,29 +197,18 @@ func (w *Worker) extractFeatures(ctx context.Context, brief string) []PlanFeatur
 
 // extractFeaturesOnce is one feature-extraction call.
 func (w *Worker) extractFeaturesOnce(ctx context.Context, brief, correction string) ([]PlanFeature, error) {
-	spec := SessionSpec{
-		Stage:         StagePlan,
-		System:        featureExtractSystem,
-		Seed:          []llm.Message{{Role: llm.RoleUser, Content: "Project brief:\n\n" + strings.TrimSpace(brief) + "\n\nList its features." + correction}},
-		MaxIterations: 1,
-		MaxTokens:     8192,
-		Temperature:   f64(0),
-		Timeout:       2 * time.Minute,
-		Thinking:      &thinkingOff,
-		Policy:        policyPlan,
-	}
-	sess := w.newStageSession(StagePlan)
-	if rp, err := sess.resolver.resolve(); err == nil && supportsStructuredOutput(rp) {
-		spec.ResponseSchema = featureSchema()
-	}
-	res, err := w.runSpec(ctx, sess, spec)
+	features, _, err := runStructuredCall(ctx, w, structuredCallOpts{
+		Stage:       StagePlan,
+		System:      featureExtractSystem,
+		Messages:    []llm.Message{{Role: llm.RoleUser, Content: "Project brief:\n\n" + strings.TrimSpace(brief) + "\n\nList its features." + correction}},
+		Schema:      featureSchema(),
+		MaxTokens:   8192,
+		Timeout:     2 * time.Minute,
+		Temperature: f64(0),
+		Thinking:    &thinkingOff,
+	}, parseFeatures)
 	if err != nil {
 		w.logger.Warn("feature extraction failed", "error", err)
-		return nil, err
-	}
-	features, err := parseFeatures(res.Content)
-	if err != nil {
-		w.logger.Warn("feature list unreadable", "error", err)
 		return nil, err
 	}
 	return features, nil

@@ -517,3 +517,38 @@ func TestParameters_RendersTypedDefaults(t *testing.T) {
 		}
 	}
 }
+
+type fakeObjectArg struct {
+	ColumnDefs map[string]any `arg:"column_defs,required" desc:"Column map."`
+}
+
+func (a *fakeObjectArg) ActionName() string { return "create" }
+func (a *fakeObjectArg) Doc() string        { return "Object-arg fixture." }
+func (a *fakeObjectArg) Example() any {
+	return &fakeObjectArg{ColumnDefs: map[string]any{"title": "TEXT"}}
+}
+func (a *fakeObjectArg) Run(ctx *ToolContext) (*Result, error) {
+	return &Result{Success: true, Data: a.ColumnDefs}, nil
+}
+
+// TestParameters_ObjectAllowsAdditionalProperties verifies that free-form object
+// params emit additionalProperties=true and that column_defs accepts "columns"/"schema" aliases.
+func TestParameters_ObjectAllowsAdditionalProperties(t *testing.T) {
+	def := defineFixture(t, Tool{
+		Name: "manage_obj_fixture", Category: "test",
+		OneLiner: "Object fixture.", WhenToUse: "Test-only.",
+		Actions: []Action{&fakeObjectArg{}},
+	})
+	props, _ := def.Parameters()["properties"].(map[string]any)
+	colProp, _ := props["column_defs"].(map[string]any)
+	if colProp["additionalProperties"] != true {
+		t.Fatalf("column_defs additionalProperties = %v, want true", colProp["additionalProperties"])
+	}
+	res, err := def.Execute(&ToolContext{}, map[string]any{
+		"action":  "create",
+		"columns": map[string]any{"title": "TEXT"},
+	})
+	if err != nil || !res.Success {
+		t.Fatalf("alias columns -> column_defs failed: res=%+v err=%v", res, err)
+	}
+}

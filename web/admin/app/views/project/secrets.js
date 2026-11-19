@@ -37,8 +37,8 @@ function renderSecret(s, projectId, reload) {
     // the owner knows which ones still need filling in. Absent means unknown, not empty.
     badge: s.has_value === false ? h('span', { className: 'badge badge--warning' }, t('sec.needsValue')) : undefined,
     actions: [
-      { label: t('common.edit'), iconName: 'edit', adminOnly: true, onClick: () => showEditModal(projectId, s, reload) },
-      { label: t('common.delete'), iconName: 'trash', kind: 'danger', adminOnly: true, onClick: () => confirmDeleteSecret(projectId, s, reload) },
+      { label: t('common.edit'), iconName: 'edit', onClick: () => showEditModal(projectId, s, reload) },
+      { label: t('common.delete'), iconName: 'trash', kind: 'danger', onClick: () => confirmDeleteSecret(projectId, s, reload) },
     ],
     children: [
       h('div', { className: 'text-xs text-secondary', style: { padding: '0 12px 12px' } },

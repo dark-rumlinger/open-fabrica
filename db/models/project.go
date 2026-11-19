@@ -3,6 +3,7 @@ package models
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -435,6 +436,63 @@ func DeleteProject(db *sql.DB, id int) error {
 		return fmt.Errorf("project %d not found", id)
 	}
 	return nil
+}
+
+// ErrProjectNotFound is returned when a project row does not exist.
+var ErrProjectNotFound = errors.New("project not found")
+
+// DeleteProjectByID deletes a project row using Executor (e.g. DB.ExecWrite),
+// returning ErrProjectNotFound when no row matched.
+func DeleteProjectByID(exec Executor, id int) error {
+	res, err := exec.Exec("DELETE FROM projects WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
+}
+
+// GetProjectModelDisplayName returns the display name of the LLM model assigned to projectID.
+func GetProjectModelDisplayName(db *sql.DB, projectID int) string {
+	var name string
+	_ = db.QueryRow(
+		`SELECT m.display_name FROM projects p
+		   JOIN llm_models m ON m.id = p.llm_model_id
+		  WHERE p.id = ?`,
+		projectID,
+	).Scan(&name)
+	return name
+}
+
+// ListSettings returns all key-value rows from the global settings table.
+func ListSettings(db *sql.DB) map[string]string {
+	out := make(map[string]string)
+	rows, err := db.Query("SELECT key, value FROM settings ORDER BY key")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, value string
+		if rows.Scan(&key, &value) == nil {
+			out[key] = value
+		}
+	}
+	_ = rows.Err()
+	return out
+}
+
+// UpsertSetting inserts or updates a key-value pair in the global settings table.
+func UpsertSetting(exec Executor, key, value string) error {
+	_, err := exec.Exec(
+		`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+		key, value,
+	)
+	return err
 }
 
 // projectConfigReplyLanguageKey holds, inside projects.config, the directive for the

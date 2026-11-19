@@ -1,5 +1,7 @@
 package llm
 
+import "encoding/json"
+
 // StreamChunk represents a single chunk in a streaming response.
 type StreamChunk struct {
 	Delta      string      `json:"delta,omitempty"`
@@ -17,6 +19,11 @@ type StreamChunk struct {
 	// don't care can ignore it; consumers that surface it (logged_provider,
 	// frontend "thinking" indicators) accumulate it like Delta.
 	Reasoning string `json:"reasoning,omitempty"`
+
+	// ReasoningDetails carries opaque provider reasoning blocks (OpenRouter's
+	// `delta.reasoning_details` array) so streaming consumers can preserve them
+	// across multi-turn tool-call loops.
+	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
 // ToolResult represents the result of a tool execution, streamed back to the

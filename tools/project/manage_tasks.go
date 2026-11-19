@@ -42,6 +42,7 @@ func init() {
 		// stages that have no checklist and are told not to expand scope.
 		Stages:             []string{"build"},
 		FullResultInEvents: true,
+		PreservesFlows:     true,
 		MaxResult:          16000, // a high-ambition checklist must list in full, never cut mid-object
 		OneLiner:           "Track the build checklist: complete items, split them, add discovered work, or block one you ship without.",
 		WhenToUse: `The checklist is your working set. split an item too big for one cohesive

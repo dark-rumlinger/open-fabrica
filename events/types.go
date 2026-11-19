@@ -77,7 +77,9 @@ const (
 	// Internal (not project-facing): an authoritative endpoint's reducer was attached or
 	// replaced (manage_authoritative set_reducer). The public server hands every live
 	// room of that endpoint the new code instead of waiting for the next join.
-	EventWSReducerChanged EventType = "ws.reducer_changed"
+	EventWSReducerChanged  EventType = "ws.reducer_changed"
+	EventMQTTConfigChanged EventType = "mqtt.config_changed"
+	EventMQTTPublish       EventType = "mqtt.publish"
 	// Multi-tenancy lifecycle. Projects with manage_tenancy enabled fire these
 	// so manage_triggers can wire welcome emails, audit logs, or third-party
 	// CRM sync without the tool itself needing to grow new outputs.

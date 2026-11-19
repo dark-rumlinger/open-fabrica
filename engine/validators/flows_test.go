@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"openfabrica/internal/browser"
 	"openfabrica/internal/flowsnap"
 	"openfabrica/probe"
+
 	"openfabrica/store"
 )
 
@@ -72,8 +74,8 @@ func TestFlowTests_InvalidStoredScriptIsAnError(t *testing.T) {
 // With of_test.js saved but no Chrome on the host, the validator reports a
 // warning (never an error, so no fix-pass) instead of failing the app.
 func TestFlowTests_NoChromeIsAWarningNotAnError(t *testing.T) {
-	defer probe.SetFlowBrowserLauncherForTest(func(context.Context, store.BrowserConfig) (context.Context, context.CancelFunc, error) {
-		return nil, nil, fmt.Errorf("%w: no chrome", store.ErrBrowserUnavailable)
+	defer probe.SetFlowBrowserLauncherForTest(func(context.Context, browser.BrowserConfig) (context.Context, context.CancelFunc, error) {
+		return nil, nil, fmt.Errorf("%w: no chrome", browser.ErrBrowserUnavailable)
 	})()
 	db := setupAuthPageDB(t)
 	savePageMeta(t, db, "page", "/", `<button id="go">Go</button>`, "{}")

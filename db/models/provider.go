@@ -403,3 +403,41 @@ func DeleteProvider(db *sql.DB, id int) error {
 	_, err := db.Exec("DELETE FROM providers WHERE id = ?", id)
 	return err
 }
+
+// SetProviderAPIKey stores an encrypted API key and enables the provider.
+func SetProviderAPIKey(exec Executor, providerID int, encryptedKey string) error {
+	_, err := exec.Exec(
+		"UPDATE providers SET api_key_encrypted = ?, is_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		encryptedKey, providerID,
+	)
+	return err
+}
+
+// EnableProviderOnSetup enables a provider during first-run setup, updating its
+// encrypted API key only when encryptedKey is non-nil.
+func EnableProviderOnSetup(exec Executor, providerID int, name string, baseURL *string, encryptedKey *string) error {
+	if encryptedKey != nil {
+		_, err := exec.Exec(
+			"UPDATE providers SET name = ?, api_key_encrypted = ?, base_url = ?, is_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+			name, *encryptedKey, baseURL, providerID,
+		)
+		return err
+	}
+	_, err := exec.Exec(
+		"UPDATE providers SET name = ?, base_url = ?, is_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		name, baseURL, providerID,
+	)
+	return err
+}
+
+// SetProviderModelsURL updates a provider's models_url column.
+func SetProviderModelsURL(exec Executor, providerID int, modelsURL string) error {
+	_, err := exec.Exec("UPDATE providers SET models_url = ? WHERE id = ?", modelsURL, providerID)
+	return err
+}
+
+// SetProviderConfig updates a provider's JSON config column.
+func SetProviderConfig(exec Executor, providerID int, configJSON string) error {
+	_, err := exec.Exec("UPDATE providers SET config = ? WHERE id = ?", configJSON, providerID)
+	return err
+}

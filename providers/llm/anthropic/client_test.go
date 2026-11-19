@@ -684,3 +684,26 @@ func TestBuildRequestBody_DropsEmptyAssistantTurn(t *testing.T) {
 		}
 	}
 }
+
+// A stream ends with exactly one Done chunk, with or without a message_stop.
+func TestParseSSEStream_SingleDone(t *testing.T) {
+	for name, tail := range map[string]string{
+		"message_stop": `data: {"type":"message_stop"}`,
+		"done":         `data: [DONE]`,
+		"plain_eof":    ``,
+	} {
+		stream := `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n" + tail + "\n"
+		done := 0
+		c := &Client{}
+		if err := c.parseSSEStream(strings.NewReader(stream), func(chunk llm.StreamChunk) {
+			if chunk.Done {
+				done++
+			}
+		}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if done != 1 {
+			t.Errorf("%s: %d Done chunks, want 1", name, done)
+		}
+	}
+}

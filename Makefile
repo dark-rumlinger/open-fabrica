@@ -48,6 +48,7 @@ build: patch-version generate
 build-linux: generate
 	GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-linux-amd64 ./cmd/openfabrica
 	GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-linux-arm64 ./cmd/openfabrica
+	GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-linux-armv7 ./cmd/openfabrica
 
 build-darwin: generate
 	GOOS=darwin GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-darwin-amd64 ./cmd/openfabrica
@@ -56,6 +57,7 @@ build-darwin: generate
 build-windows: patch-version generate
 	go generate ./cmd/openfabrica
 	GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-windows-amd64.exe ./cmd/openfabrica
+	GOOS=windows GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-windows-arm64.exe ./cmd/openfabrica
 	@$(MAKE) restore-version
 
 build-all: build-linux build-darwin build-windows

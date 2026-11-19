@@ -1,13 +1,17 @@
 package db
 
-import "database/sql"
+import (
+	"database/sql"
+
+	"openfabrica/internal/sqliteretry"
+)
 
 // RunInTx runs fn inside a transaction on the given write pool, committing when fn
 // returns nil and rolling back on any error or panic. Keeps a multi-step write path
 // all-or-nothing without hand-rolling Begin/Rollback/Commit. fn runs its statements
 // on the passed *sql.Tx.
 func RunInTx(writer *sql.DB, fn func(*sql.Tx) error) error {
-	tx, err := writer.Begin()
+	tx, err := sqliteretry.BeginTx(writer)
 	if err != nil {
 		return err
 	}

@@ -151,38 +151,6 @@
   color: var(--text-primary);
 }
 
-/* ---------- Early release banner ----------
-   A slim strip between the bar and the content column. A flex child of
-   .app-layout, so it takes its own height and main shrinks to fit. */
-.preview-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-shrink: 0;
-  padding: var(--space-1) var(--space-4);
-  background: var(--warning-muted);
-  border-bottom: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
-  font-size: var(--text-sm);
-  color: var(--text-primary);
-}
-
-/* display:flex above would otherwise win over the hidden attribute. */
-.preview-banner[hidden] {
-  display: none;
-}
-
-.preview-banner svg {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  color: var(--warning);
-}
-
-.preview-banner__text {
-  flex: 1;
-  min-width: 0;
-}
-
 /* ---------- Global menu popover ---------- */
 
 .topbar__menu-wrap {

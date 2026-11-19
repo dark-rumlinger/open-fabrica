@@ -162,6 +162,22 @@ func TestBuildExternalLibTags_Integrity(t *testing.T) {
 	}
 }
 
+func TestBuildExternalLibTags_NoIntegrityOmitsCrossorigin(t *testing.T) {
+	// Without an integrity hash, classic <script> tags must not force
+	// crossorigin="anonymous": it switches the fetch to CORS mode and breaks
+	// CDNs that omit Access-Control-Allow-Origin (e.g. cdn.tailwindcss.com).
+	libs := []externalLibSpec{{
+		URL: "https://cdn.tailwindcss.com",
+	}}
+	out := buildExternalLibTags(libs, "")
+	if !strings.Contains(out, `<script src="https://cdn.tailwindcss.com"></script>`) {
+		t.Errorf("classic script without integrity should emit plain <script src>, got: %s", out)
+	}
+	if strings.Contains(out, "crossorigin") {
+		t.Errorf("classic script without integrity must not force crossorigin, got: %s", out)
+	}
+}
+
 func TestBuildExternalLibTags_FontIntegritySuppressed(t *testing.T) {
 	// A stale/bogus hash persisted on a font endpoint must NOT be emitted: the
 	// CSS is content-negotiated, so any build-time hash blocks the stylesheet in

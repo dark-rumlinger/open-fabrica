@@ -10,11 +10,11 @@ import (
 // and again at the bottom" shape - and leaves every genuine conflict in place.
 func TestDedupeNamedImports(t *testing.T) {
 	t.Run("exact duplicate collapses to the first, code preserved", func(t *testing.T) {
-		body := "import { gridToWorld } from './terrain.js';\n" +
-			"export function a(){ return gridToWorld(1); }\n" +
-			"import { gridToWorld } from './terrain.js';\n"
+		body := "import { helper } from './util.js';\n" +
+			"export function a(){ return helper(1); }\n" +
+			"import { helper } from './util.js';\n"
 		out, removed := DedupeNamedImports(body)
-		if got := strings.Count(out, "import { gridToWorld } from './terrain.js'"); got != 1 {
+		if got := strings.Count(out, "import { helper } from './util.js'"); got != 1 {
 			t.Fatalf("duplicate import should collapse to one, got %d:\n%s", got, out)
 		}
 		if len(removed) != 1 {

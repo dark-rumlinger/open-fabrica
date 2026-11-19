@@ -41,6 +41,22 @@ export function createGoLiveCard(badge, p) {
   const actions = [goLiveAction('external-link', t('chat.previewLocally'), p.preview_url, true)];
   if (p.settings_url) actions.push(goLiveAction('globe', t('chat.share'), p.settings_url, false));
   const children = [header, h('div', { className: 'golive__actions' }, actions)];
+  if (p.preview_image) {
+    const img = h('img', {
+      src: p.preview_image,
+      alt: t('chat.previewScreenshot'),
+      loading: 'lazy',
+    });
+    const wrap = h('a', {
+      className: 'golive__preview-shot',
+      href: p.preview_url,
+      target: '_blank',
+      rel: 'noopener',
+      title: t('chat.previewScreenshot'),
+    }, [img]);
+    img.addEventListener('error', () => wrap.remove());
+    children.push(wrap);
+  }
 
   // "What's inside" stat tiles - one per non-empty category. The full name list
   // rides along as a title attribute so hovering a tile shows what it counts.

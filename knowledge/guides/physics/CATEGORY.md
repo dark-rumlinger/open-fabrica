@@ -1,0 +1,1 @@
+Physics simulation for 2D and 3D games: rigid-body dynamics (cannon-es, Matter.js), body/render synchronization, fixed-timestep stepping, and when to use sample-and-clamp or server-reducer math instead.

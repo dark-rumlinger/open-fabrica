@@ -18,12 +18,30 @@ export { createToolCall } from './cards/tool-call.js';
 import { stageDividerLabel, stageIcon } from './stage-copy.js';
 import { timestamp } from './timestamp.js';
 
+const USER_IMAGES_MARKER_RE = /\n*<!--of-user-images:(\[[\s\S]*?\])-->\s*$/;
+
 /**
  * Create a user message element.
  * @param {string} text
  * @param {string} [createdAt], ISO timestamp from DB history.
+ * @param {string[]} [previewUrls], inline data/API URLs for attached images.
  */
-export function createUserMessage(text, createdAt) {
+export function createUserMessage(text, createdAt, previewUrls) {
+  let bodyText = typeof text === 'string' ? text : '';
+  let urls = Array.isArray(previewUrls) ? previewUrls.slice() : [];
+  const m = bodyText.match(USER_IMAGES_MARKER_RE);
+  if (m) {
+    bodyText = bodyText.slice(0, m.index).replace(/\s+$/, '');
+    if (urls.length === 0) {
+      try {
+        const parsed = JSON.parse(m[1]);
+        if (Array.isArray(parsed)) urls = parsed.filter((u) => typeof u === 'string');
+      } catch {
+        // Malformed marker; ignore.
+      }
+    }
+  }
+
   const name = displayName() || t('chat.you');
   const badge = h('div', { className: 'message__user-badge' }, [
     createAvatar(name, 'user'),
@@ -31,11 +49,19 @@ export function createUserMessage(text, createdAt) {
     timestamp(createdAt),
   ]);
 
-  const msg = h('div', { className: 'message message--user' }, [
-    badge,
-    h('div', { className: 'message__content' }, text),
-  ]);
-  return msg;
+  const children = [badge];
+  if (bodyText) {
+    children.push(h('div', { className: 'message__content' }, bodyText));
+  }
+  if (urls.length > 0) {
+    children.push(h('div', { className: 'message__images' }, urls.map((u) => {
+      const img = h('img', { src: u, alt: '', loading: 'lazy' });
+      img.addEventListener('error', () => img.remove());
+      return img;
+    })));
+  }
+
+  return h('div', { className: 'message message--user' }, children);
 }
 
 /**
@@ -150,9 +176,6 @@ export function createAutomatedMessage(text, createdAt) {
 // pinned to this file by a test). The marker is stripped and the card's title
 // comes from the catalog, so it is never shown to anyone.
 const BRAIN_EXPAND_MARKER = '**Expanded brief**';
-// No current build writes this one. It is kept so plan summaries saved in
-// older projects still get their panel styling.
-const BRAIN_PLAN_MARKER = "**Here's the plan**";
 
 // Trailing marker the engine appends to the go-live message: a base64-encoded
 // goLivePayload inside an HTML comment (see live_summary.go goLiveMarker). It's a
@@ -161,6 +184,7 @@ const BRAIN_PLAN_MARKER = "**Here's the plan**";
 // is always the real terminator); a malformed payload then fails the base64
 // decode and falls back cleanly, rather than leaking the marker as visible text.
 const GOLIVE_MARKER_RE = /\n*<!--of-golive:([\s\S]*?)-->\s*$/;
+const PREVIEW_MARKER_RE = /^<!--of-preview:([^>\s]+)-->$/;
 
 // Decode a base64 string that holds UTF-8 bytes (project/table names may be
 // non-ASCII, so atob alone - which yields Latin-1 - would corrupt them).
@@ -206,6 +230,17 @@ export function createBrainMessage(text, createdAt) {
   // Go-live summary: render the structured card when the payload is present and
   // parses, else strip the marker and render the plain markdown that precedes it.
   if (typeof text === 'string') {
+    const pm = text.trim().match(PREVIEW_MARKER_RE);
+    if (pm) {
+      const img = h('img', {
+        src: pm[1],
+        alt: t('chat.previewScreenshot'),
+        loading: 'lazy',
+      });
+      const wrap = h('div', { className: 'golive__preview-shot' }, [img]);
+      img.addEventListener('error', () => wrap.remove());
+      return h('div', { className: 'message message--brain' }, [badge, wrap]);
+    }
     const gl = parseGoLiveMarker(text);
     if (gl) {
       if (gl.payload && gl.payload.kind === 'golive') {
@@ -224,11 +259,7 @@ export function createBrainMessage(text, createdAt) {
   const body = h('div', { className: 'message__body' });
   body.innerHTML = renderMarkdown(text);
 
-  const msg = h('div', { className: 'message message--brain' }, [badge, body]);
-  if (typeof text === 'string' && text.startsWith(BRAIN_PLAN_MARKER)) {
-    msg.classList.add('message--plan');
-  }
-  return msg;
+  return h('div', { className: 'message message--brain' }, [badge, body]);
 }
 
 /**

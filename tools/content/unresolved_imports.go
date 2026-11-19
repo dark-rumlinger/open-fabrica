@@ -31,17 +31,28 @@ func isJSModulePath(path string) bool {
 // projectJSBodies loads every live inline JS file artifact as project-path -> body,
 // overlaying the in-flight (focusPath, focusBody) so resolution reflects what THIS write
 // stores. Disk-stored artifacts are skipped (JS is always inline). The focus path is
-// canonical (post requireKindPath), matching the stored artifact paths.
-func projectJSBodies(ctx *tools.ToolContext, focusPath, focusBody string) map[string]string {
+// canonical (post requireKindPath), matching the stored artifact paths. A listing
+// error is returned: a set holding only the focus file would pass every
+// cross-module gate.
+func projectJSBodies(ctx *tools.ToolContext, focusPath, focusBody string) (map[string]string, error) {
 	bodies := map[string]string{}
-	arts, _ := store.ArtifactList(ctx.DB, store.ArtifactListOpts{Kind: "file", IncludeBody: true})
+	arts, err := store.ArtifactList(ctx.DB, store.ArtifactListOpts{Kind: "file", IncludeBody: true})
+	if err != nil {
+		return nil, fmt.Errorf("list project modules: %w", err)
+	}
 	for _, a := range arts {
 		if a.Storage == store.StorageInline && isJSModulePath(a.Path) {
 			bodies[a.Path] = a.Body
 		}
 	}
 	bodies[focusPath] = focusBody
-	return bodies
+	return bodies, nil
+}
+
+// projectUnreadable is the refusal for a save whose project-wide checks could
+// not load the project. Nothing was stored.
+func projectUnreadable(err error) *tools.Result {
+	return tools.Fail("Could not read the project's files to check this save (%v). Nothing was saved; retry the call.", err)
 }
 
 // rejectIfUnresolvedImports gates a JS-artifact write against the project's cross-module
@@ -57,7 +68,10 @@ func rejectIfUnresolvedImports(ctx *tools.ToolContext, kind, path, oldBody, newB
 	if kind != "file" || !isJSModulePath(path) || newBody == oldBody {
 		return nil, nil
 	}
-	bodies := projectJSBodies(ctx, path, newBody)
+	bodies, err := projectJSBodies(ctx, path, newBody)
+	if err != nil {
+		return projectUnreadable(err), nil
+	}
 	// One esbuild analysis of the post-write module set, reused by every check below.
 	facts := analysis.AnalyzeModules(bodies)
 
@@ -419,7 +433,10 @@ func otherExporters(srcs []string, self string) []string {
 // leave the reject standing. Deterministic (sources and names sorted), which the replay
 // cache depends on.
 func tryAutoWireImports(ctx *tools.ToolContext, path, oldBody, newBody string) (string, []string, bool) {
-	bodies := projectJSBodies(ctx, path, newBody)
+	bodies, err := projectJSBodies(ctx, path, newBody)
+	if err != nil {
+		return "", nil, false
+	}
 	exportIdx := analysis.ExportIndex(bodies)
 	refs := freshForgottenRefs(path, oldBody, bodies, projectLibraryGlobals(ctx))
 	seen := map[string]bool{}
@@ -521,7 +538,10 @@ func freshMemberRefs(path, oldBody string, bodies map[string]string) []analysis.
 // depends on it).
 func tryRewireWrongSourceImports(ctx *tools.ToolContext, path, oldBody, newBody string) (string, []string, bool) {
 	_ = oldBody
-	bodies := projectJSBodies(ctx, path, newBody)
+	bodies, err := projectJSBodies(ctx, path, newBody)
+	if err != nil {
+		return "", nil, false
+	}
 	issues := analysis.ResolveNamedImportsWith(path, bodies, analysis.AnalyzeModules(bodies))
 	if len(issues) == 0 {
 		return "", nil, false
@@ -1031,15 +1051,18 @@ func addImportStatus(data map[string]any, pending []map[string]any) {
 // projectJSPaths lists every live inline JS module artifact's path. Paths only - the
 // collision question is about names, and loading bodies for it would make a cheap
 // check as expensive as the import-resolution pass.
-func projectJSPaths(ctx *tools.ToolContext) []string {
+func projectJSPaths(ctx *tools.ToolContext) ([]string, error) {
 	var out []string
-	arts, _ := store.ArtifactList(ctx.DB, store.ArtifactListOpts{Kind: "file"})
+	arts, err := store.ArtifactList(ctx.DB, store.ArtifactListOpts{Kind: "file"})
+	if err != nil {
+		return nil, fmt.Errorf("list project modules: %w", err)
+	}
 	for _, a := range arts {
 		if isJSModulePath(a.Path) {
 			out = append(out, a.Path)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // rejectIfCollidingModuleName refuses a JS save whose basename another project module
@@ -1054,7 +1077,10 @@ func rejectIfCollidingModuleName(ctx *tools.ToolContext, path string, exists boo
 	if exists {
 		return nil
 	}
-	existing := projectJSPaths(ctx)
+	existing, err := projectJSPaths(ctx)
+	if err != nil {
+		return projectUnreadable(err)
+	}
 	name := analysis.CollidingModuleName(existing, path)
 	if name == "" {
 		return nil

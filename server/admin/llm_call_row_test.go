@@ -1,48 +1,58 @@
 package admin
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
+
+	"openfabrica/db"
 )
 
-// llmCallColumns must stay a subset of what the writer actually inserts (plus
-// the table's own id/created_at), or the reader breaks the day the log gains a
-// column one side forgets. Reads the writer's source as text, the same way
-// runtime_frames_drift_test pins sibling packages.
-func TestLLMCallColumnsMatchWriter(t *testing.T) {
-	b, err := os.ReadFile("../../providers/llm/db_logger.go")
+// Every column scanLLMCall reads must exist on of_llm_calls. Checks the reader's
+// SELECT list against the real migrated project schema (PRAGMA table_info), so a
+// reader naming a dropped or renamed column fails here instead of at the first
+// build export. Replaces an older guard that parsed the writer's Go source as text.
+func TestLLMCallColumnsMatchSchema(t *testing.T) {
+	mgr := db.NewProjectDBManager(t.TempDir())
+	pdb, err := mgr.Create(1)
 	if err != nil {
-		t.Fatalf("read db_logger.go: %v", err)
+		t.Fatalf("create project db: %v", err)
 	}
-	src := string(b)
-	i := strings.Index(src, "INSERT INTO of_llm_calls")
-	if i < 0 {
-		t.Fatal("db_logger.go lost its of_llm_calls INSERT; update this guard's source pointer")
+	t.Cleanup(mgr.CloseAll)
+
+	cols := map[string]bool{}
+	rows, err := pdb.Query(`PRAGMA table_info(of_llm_calls)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
 	}
-	stmt := src[i:]
-	if j := strings.Index(stmt, ") VALUES"); j >= 0 {
-		stmt = stmt[:j]
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan table_info: %v", err)
+		}
+		cols[name] = true
 	}
-	written := map[string]bool{"id": true, "created_at": true} // table-managed
-	for _, col := range regexp.MustCompile(`[a-z_]+`).FindAllString(stmt, -1) {
-		written[col] = true
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info rows: %v", err)
 	}
 
+	// Each SELECT part is a bare column or a COALESCE(col, <literal>) wrapper; pull
+	// the column name and skip the literal-fallback fragments (0), '', etc.).
 	colRe := regexp.MustCompile(`(?:COALESCE\()?([a-z_]+)`)
 	for _, part := range strings.Split(llmCallColumns, ",") {
 		part = strings.TrimSpace(part)
-		if part == "" || part == "0)" || part == "''" || part == "''\\)" {
+		if part == "" {
 			continue
 		}
 		m := colRe.FindStringSubmatch(part)
 		if m == nil || m[1] == "coalesce" {
 			continue
 		}
-		if !written[m[1]] {
-			t.Errorf("llmCallColumns reads %q but the writer's INSERT never sets it - add it to "+
-				"db_logger.go's column list or drop it from the reader", m[1])
+		if !cols[m[1]] {
+			t.Errorf("llmCallColumns reads %q but of_llm_calls has no such column - update the reader or the schema", m[1])
 		}
 	}
 }

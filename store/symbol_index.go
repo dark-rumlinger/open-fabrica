@@ -10,7 +10,7 @@ import (
 
 // Incremental maintenance of the symbol index. IndexArtifactSymbols runs from the
 // artifact save funnel so symbols re-derive the moment a body changes;
-// BackfillStaleSymbols lazily fills the index for older projects. All writes
+// BackfillStaleSymbols lazily repairs files whose save-time indexing failed. All writes
 // happen on the single project writer connection and never inside an open read cursor.
 
 // symbolFingerprint identifies a body for the index: a re-save with an unchanged

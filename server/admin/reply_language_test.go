@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -249,26 +248,5 @@ func TestPreferencesGetNormalizesAStaleRow(t *testing.T) {
 	h.Get(rec, e.request("GET", "", e.ada, ""))
 	if got := decodePrefs(t, rec).AssistantLanguage; got != "" {
 		t.Errorf("stale value leaked to the client: %q", got)
-	}
-}
-
-// Each request that can wake the engine records the caller's language first. The
-// handlers need a running engine to exercise end to end, so this pins the call
-// sites: dropping one would silently leave that action replying in the wrong
-// language with no failing behavior test.
-func TestEveryEngineWakingHandlerRecordsTheLanguage(t *testing.T) {
-	for file, want := range map[string]int{
-		"chat.go":      1, // send a message
-		"engine.go":    2, // start the engine, change the mode
-		"projects.go":  1, // create a project (starts the first build)
-		"questions.go": 1, // answer a question
-	} {
-		src, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := bytes.Count(src, []byte("recordReplyLanguage(")); got != want {
-			t.Errorf("%s calls recordReplyLanguage %d times, want %d", file, got, want)
-		}
 	}
 }

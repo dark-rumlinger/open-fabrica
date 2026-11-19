@@ -41,10 +41,11 @@ export function isMultiChoiceType(type) {
  * @param {Object} questionData, { fields, options, type, secret_name }
  * @param {Object} [opts]
  * @param {Function} [opts.onInput], called whenever the user changes a value
+ * @param {Function} [opts.onOptionSelect], called when a pre-made single-choice option is clicked
  * @param {string} [opts.wrapClass], CSS class for the outer wrapper div
  * @returns {{ inputEl: HTMLElement, getValue: () => string, hasValue: () => boolean }}
  */
-export function buildQuestionInput(questionData, { onInput, wrapClass } = {}) {
+export function buildQuestionInput(questionData, { onInput, onOptionSelect, wrapClass } = {}) {
   const { fields, options, type, secret_name } = questionData;
   const isSecret = type === 'secret';
 
@@ -205,6 +206,7 @@ export function buildQuestionInput(questionData, { onInput, wrapClass } = {}) {
           otherInput.style.display = 'none';
           otherInput.value = '';
           onInput?.();
+          onOptionSelect?.(label);
         },
       }, label);
       allBtns.push(btn);

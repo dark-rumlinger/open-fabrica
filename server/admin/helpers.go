@@ -1,52 +1,14 @@
 package admin
 
 import (
-	"database/sql"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"openfabrica/db"
 	"openfabrica/internal/httpx"
 )
-
-// collectRows is a package-local alias for db.CollectRows, kept terse for the
-// many admin list handlers. The implementation (and the debug log on a skipped
-// row) lives in one place now; see db.CollectRows.
-func collectRows[T any](rows *sql.Rows, scan func(*sql.Rows) (T, error)) []T {
-	return db.CollectRows(rows, scan)
-}
-
-// colVal pairs a column with the value to write to it in a partial UPDATE.
-type colVal struct {
-	col string
-	val any
-}
-
-// buildUpdate assembles a partial UPDATE from the given column/value pairs:
-//
-//	UPDATE <table> SET c1 = ?, c2 = ? WHERE <whereCol> = ?
-//
-// with args in the same order plus whereVal appended. Callers decide which
-// fields to include (pass a nil val to write SQL NULL). It is the one assembler
-// for a simple partial update, so no handler carries its own setClauses/values
-// slice pair. Returns ok=false when there are no fields to update. Handlers that
-// need literal SET expressions or extra WHERE conditions keep their own assembly.
-func buildUpdate(table string, fields []colVal, whereCol string, whereVal any) (query string, args []any, ok bool) {
-	if len(fields) == 0 {
-		return "", nil, false
-	}
-	sets := make([]string, len(fields))
-	args = make([]any, 0, len(fields)+1)
-	for i, f := range fields {
-		sets[i] = f.col + " = ?"
-		args = append(args, f.val)
-	}
-	args = append(args, whereVal)
-	return "UPDATE " + table + " SET " + strings.Join(sets, ", ") + " WHERE " + whereCol + " = ?", args, true
-}
 
 // writeJSON, writeError and decodeJSON are package-local aliases for the
 // canonical helpers in internal/httpx, kept so the many admin call sites read

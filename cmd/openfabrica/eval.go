@@ -270,7 +270,7 @@ func evalAdminToken(cfg *config.Config) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return security.NewJWTManager(cfg.JWTSecret, 12*time.Hour).Generate(security.TokenRequest{
+		return security.NewJWTManager(cfg.JWTSecret, 12*time.Hour).GenerateAdmin(security.AdminTokenRequest{
 			UserID: u.ID, Username: u.Username, Role: u.Role, TokenVersion: version,
 		})
 	}

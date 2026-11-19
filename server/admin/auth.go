@@ -145,7 +145,7 @@ func (h *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	h.lockout.Reset(lockKey)
 
-	token, err := h.deps.JWTManager.Generate(security.TokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
+	token, err := h.deps.JWTManager.GenerateAdmin(security.AdminTokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
 	if err != nil {
 		h.deps.serverError(w, "failed to generate token", err)
 		return
@@ -404,12 +404,12 @@ func (h *AuthHandler) HandleSetupSyncProvider(w http.ResponseWriter, r *http.Req
 	}
 	h.deps.LLMRegistry.Register(provider.Name, live)
 
-	// defaultEnabled=true: during setup the user picks from the freshly
-	// synced list, so every model should be selectable. The provider-page
-	// "Sync Models" button uses defaultEnabled=false because by then the
-	// admin already has a working setup and a flood of new models would
-	// just noise up the picker.
-	stats, syncErr := syncLLMCatalog(h.deps, providerID, discovered, true)
+	// defaultEnabled=false: newly discovered models start disabled so large
+	// catalogs (e.g. OpenRouter) don't flood project-creation pickers.
+	// HandleSetupSyncProvider still returns all synced rows below for the setup
+	// picker, and HandleSetup enables the single model the user actually picks
+	// via SetDefaultProviderModel.
+	stats, syncErr := syncLLMCatalog(h.deps, providerID, discovered, false)
 	syncResp := map[string]any{
 		"provider_id": providerID,
 		"synced":      syncErr == nil,
@@ -444,10 +444,7 @@ func (h *AuthHandler) persistSetupKey(providerID int, apiKey string) error {
 		h.deps.Logger.Error("setup-sync: encrypt failed", "error", err)
 		return errors.New(msgcat.Mark("failed to encrypt api key"))
 	}
-	if _, err := h.deps.DB.ExecWrite(
-		"UPDATE providers SET api_key_encrypted = ?, is_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-		encrypted, providerID,
-	); err != nil {
+	if err := models.SetProviderAPIKey(h.deps.DB.DB, providerID, encrypted); err != nil {
 		h.deps.Logger.Error("setup-sync: write key failed", "error", err)
 		return errors.New(msgcat.Mark("failed to save api key"))
 	}
@@ -579,8 +576,8 @@ func (h *AuthHandler) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	var count int
-	if err := tx.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
+	count, err := models.CountUsers(tx)
+	if err != nil {
 		tx.Rollback()
 		h.deps.Logger.Error("setup: failed to count users", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to count users")
@@ -610,51 +607,33 @@ func (h *AuthHandler) HandleSetup(w http.ResponseWriter, r *http.Request) {
 			// "reuse the stored key" (e.g. HandleSetupSyncProvider already
 			// persisted it); overwriting with NULL would clear an
 			// already-stored credential and leave the provider keyless.
+			var encKey *string
 			if req.APIKey != "" {
 				encrypted, encErr := h.deps.Encryptor.Encrypt(req.APIKey)
 				if encErr != nil {
 					h.deps.Logger.Error("setup: failed to encrypt api key", "error", encErr)
-				} else if _, err := tx.Exec(
-					"UPDATE providers SET name = ?, api_key_encrypted = ?, base_url = ?, is_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-					provider.Name, encrypted, provider.BaseURL, provider.ID,
-				); err != nil {
+				} else {
+					encKey = &encrypted
+				}
+			}
+			if req.APIKey == "" || encKey != nil {
+				if err := models.EnableProviderOnSetup(tx, provider.ID, provider.Name, provider.BaseURL, encKey); err != nil {
 					h.deps.Logger.Error("setup: failed to update provider", "error", err)
 				}
-			} else if _, err := tx.Exec(
-				"UPDATE providers SET name = ?, base_url = ?, is_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-				provider.Name, provider.BaseURL, provider.ID,
-			); err != nil {
-				h.deps.Logger.Error("setup: failed to update provider", "error", err)
 			}
 
 			// Clear is_default on ALL models first, then set the chosen one.
-			if _, err := tx.Exec("UPDATE llm_models SET is_default = 0"); err != nil {
+			if err := models.ClearAllDefaultModels(tx); err != nil {
 				tx.Rollback()
 				h.deps.Logger.Error("setup: failed to clear model defaults", "error", err)
 				writeError(w, http.StatusInternalServerError, "failed to configure provider")
 				return
 			}
-			if req.ModelID != "" {
-				if _, err := tx.Exec(
-					"UPDATE llm_models SET is_default = 1 WHERE model_id = ? AND provider_id = ?",
-					req.ModelID, provider.ID,
-				); err != nil {
-					tx.Rollback()
-					h.deps.Logger.Error("setup: failed to set default model", "error", err)
-					writeError(w, http.StatusInternalServerError, "failed to configure provider")
-					return
-				}
-			} else {
-				// No specific model chosen, default the first model of this provider.
-				if _, err := tx.Exec(
-					"UPDATE llm_models SET is_default = 1 WHERE id = (SELECT id FROM llm_models WHERE provider_id = ? ORDER BY id LIMIT 1)",
-					provider.ID,
-				); err != nil {
-					tx.Rollback()
-					h.deps.Logger.Error("setup: failed to set default model", "error", err)
-					writeError(w, http.StatusInternalServerError, "failed to configure provider")
-					return
-				}
+			if err := models.SetDefaultProviderModel(tx, provider.ID, req.ModelID); err != nil {
+				tx.Rollback()
+				h.deps.Logger.Error("setup: failed to set default model", "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to configure provider")
+				return
 			}
 
 			h.deps.Logger.Info("setup: configured provider",
@@ -682,11 +661,7 @@ func (h *AuthHandler) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	// same atomic first-run write. Resolved live by the engine (env > this
 	// setting > config/default), so it takes effect without a restart.
 	if req.EngineDailyTokenBudget != nil && *req.EngineDailyTokenBudget >= 0 {
-		if _, err := tx.Exec(
-			`INSERT INTO settings (key, value, updated_at) VALUES ('engine_daily_token_budget', ?, CURRENT_TIMESTAMP)
-			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
-			strconv.Itoa(*req.EngineDailyTokenBudget),
-		); err != nil {
+		if err := models.UpsertSetting(tx, "engine_daily_token_budget", strconv.Itoa(*req.EngineDailyTokenBudget)); err != nil {
 			tx.Rollback()
 			h.deps.Logger.Error("setup: failed to save engine daily token budget", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to complete setup")
@@ -707,7 +682,7 @@ func (h *AuthHandler) HandleSetup(w http.ResponseWriter, r *http.Request) {
 
 	// Generate a token for immediate login. A freshly created user is at
 	// token_version 0.
-	token, err := h.deps.JWTManager.Generate(security.TokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
+	token, err := h.deps.JWTManager.GenerateAdmin(security.AdminTokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
 	if err != nil {
 		h.deps.Logger.Error("setup: failed to generate token", "error", err)
 		writeError(w, http.StatusInternalServerError, "user created but failed to generate token")
@@ -814,7 +789,7 @@ func (h *AuthHandler) reissueSession(w http.ResponseWriter, userID int) {
 		writeError(w, http.StatusUnauthorized, "invalid session")
 		return
 	}
-	token, err := h.deps.JWTManager.Generate(security.TokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
+	token, err := h.deps.JWTManager.GenerateAdmin(security.AdminTokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
 	if err != nil {
 		h.deps.serverError(w, "failed to generate token", err)
 		return

@@ -106,6 +106,14 @@ func TestBuildSharedSeedCarriesPlanToolRoutingProse(t *testing.T) {
 	if strings.Contains(intent, strings.TrimSpace(mustTool(t, "manage_relay").WhenToUse)) {
 		t.Error("the intent block repeats the shared routing prose")
 	}
+	// Tool routing prose must lead buildSharedSeed ahead of the corpus guide cores so
+	// the plan's loaded tools and per-action required args are not buried after tens of
+	// KB of <guide> blocks.
+	toolsPos := strings.Index(shared, "## Tools this plan loaded for you")
+	guidesPos := strings.Index(shared, "## Platform guides for this build")
+	if toolsPos < 0 || guidesPos < 0 || toolsPos > guidesPos {
+		t.Errorf("plan tool routing prose (%d) must precede the guide cores (%d) in buildSharedSeed", toolsPos, guidesPos)
+	}
 }
 
 func mustTool(t *testing.T, name string) *tools.ToolDef {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"openfabrica/store"
+	"openfabrica/internal/browser"
 )
 
 // These cover the kinds of UI the first flow fixtures do not: records in rows that
@@ -86,7 +86,7 @@ func runKindsFlowWith(t *testing.T, pages map[string]string, files map[string]fu
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	if _, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{}); err != nil {
+	if _, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{}); err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	} else {
 		cancel()

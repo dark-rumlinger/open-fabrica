@@ -37,7 +37,7 @@ go run ./cmd/openfabrica
 
 # Produce a stripped, version-stamped binary in ./bin.
 make build            # host platform
-make build-all        # linux and darwin (amd64/arm64), windows (amd64)
+make build-all        # linux (amd64/arm64/armv7), darwin (amd64/arm64), windows (amd64/arm64)
 ```
 
 Then open `http://localhost:5734` and follow the setup wizard. See the
@@ -62,13 +62,8 @@ Individual targets: `make fmt` (rewrite to gofmt canonical form),
 `make fmt-check`, `make vet`. A change should build cleanly, keep `go vet` and
 the linter quiet, and keep the test suite green. New behavior needs new tests.
 
-Two safety nets worth knowing before refactoring the engine or the tools:
+One safety net worth knowing before refactoring the tools:
 
-- **Golden prompt bytes** (`engine/testdata/golden`, `TestGoldenPromptBytes`)
-  pin every request an offline EXPAND → PLAN → BUILD → LIVE run sends. Provider
-  prompt caches key on those bytes, so an unexplained diff is a cost regression.
-  After an intended prompt change, regenerate with
-  `go test ./engine -run TestGoldenPromptBytes -update` and review the diff.
 - **`tools/tooltest`** runs tools through the production `Executor.Invoke` path
   against fully migrated databases; write tool tests with it rather than
   hand-built schemas.

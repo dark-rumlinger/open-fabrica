@@ -106,8 +106,8 @@ func TestSailingWiring_ImportMap(t *testing.T) {
 // every live-binding singleton. Unversioned maps need no such entry (the URLs
 // are already identical).
 func TestImportMap_RelativeImportsCollapseOntoVersionedURL(t *testing.T) {
-	versioned := projectModuleImportEntries([]string{"js/world.state.js", "js/world.net.js"}, assetVersions{"js/world.state.js": "?v=abc123", "js/world.net.js": "?v=abc123"})
-	for _, p := range []string{"js/world.state.js", "js/world.net.js"} {
+	versioned := projectModuleImportEntries([]string{"js/app.state.js", "js/app.net.js"}, assetVersions{"js/app.state.js": "?v=abc123", "js/app.net.js": "?v=abc123"})
+	for _, p := range []string{"js/app.state.js", "js/app.net.js"} {
 		if got := versioned["/files/"+p]; got != "/files/"+p+"?v=abc123" {
 			t.Errorf("importmap[%q] = %q, want the versioned URL", "/files/"+p, got)
 		}
@@ -121,8 +121,8 @@ func TestImportMap_RelativeImportsCollapseOntoVersionedURL(t *testing.T) {
 	if collided["/files/a/state.js"] != "/files/a/state.js?v=1" || collided["/files/b/state.js"] != "/files/b/state.js?v=1" {
 		t.Errorf("colliding modules must keep URL-key remaps, got %v", collided)
 	}
-	unversioned := projectModuleImportEntries([]string{"js/world.state.js"}, nil)
-	if _, ok := unversioned["/files/js/world.state.js"]; ok {
+	unversioned := projectModuleImportEntries([]string{"js/app.state.js"}, nil)
+	if _, ok := unversioned["/files/js/app.state.js"]; ok {
 		t.Error("unversioned map must not carry redundant self-mapping URL keys")
 	}
 }

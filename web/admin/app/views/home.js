@@ -75,7 +75,7 @@ export const renderHome = defineView(async (ctx, container) => {
 
   // A public domain with wide-open defaults (any-origin CORS, permissive CSP):
   // fine for a local box, worth tightening before serving untrusted visitors.
-  if (state.isAdmin() && status && (status.exposure_warnings || []).length > 0) {
+  if (status && (status.exposure_warnings || []).length > 0) {
     const issues = status.exposure_warnings.join('; ');
     const card = warningCard(
       'exposure:' + issues,
@@ -86,12 +86,10 @@ export const renderHome = defineView(async (ctx, container) => {
 
   // One-time reminder that there is no password reset. Shown until
   // dismissed; the setup wizard mentions it once, easy to miss.
-  if (state.isAdmin()) {
-    const card = warningCard(
-      'password-reminder',
-      t('home.passwordReminder'),
-      { kind: 'info', iconName: 'lock' }
-    );
-    if (card) banners.appendChild(card);
-  }
+  const reminder = warningCard(
+    'password-reminder',
+    t('home.passwordReminder'),
+    { kind: 'info', iconName: 'lock' }
+  );
+  if (reminder) banners.appendChild(reminder);
 });

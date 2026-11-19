@@ -23,7 +23,7 @@ type DocumentCreateEndpoint struct {
 	Filename     string `arg:"filename"      desc:"Download filename; may use {{values}} (e.g. \"invoice-{{number}}\"). \".pdf\" is appended." default:"document"`
 	PageSize     string `arg:"page_size"     desc:"Paper size." enum:"A4,Letter,Legal" default:"A4"`
 	Landscape    bool   `arg:"landscape"     desc:"Landscape orientation."`
-	RequiresAuth bool   `arg:"requires_auth" desc:"Require a signed-in user or project key. Leave on unless the document is meant for anonymous visitors." default:"true"`
+	RequiresAuth bool   `arg:"requires_auth" desc:"Require a signed-in user. Leave on unless the document is meant for anonymous visitors." default:"true"`
 	RateLimit    int    `arg:"rate_limit"    desc:"Renders per minute per visitor (each starts a headless browser)." default:"10" min:"1" max:"600"`
 }
 

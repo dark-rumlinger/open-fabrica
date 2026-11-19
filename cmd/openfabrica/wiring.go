@@ -7,36 +7,63 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"time"
 
 	"openfabrica"
 	"openfabrica/bot"
 	"openfabrica/chat"
+	"openfabrica/internal/browser"
+
 	"openfabrica/config"
+
 	"openfabrica/db"
+
 	"openfabrica/db/models"
+
 	"openfabrica/engine"
+
 	"openfabrica/events"
+
 	"openfabrica/internal/backupsched"
+
 	"openfabrica/internal/firewall"
+
 	"openfabrica/internal/msgcat"
+
 	"openfabrica/internal/netinfo"
+
 	"openfabrica/internal/portmap"
+
+	"openfabrica/internal/safego"
+
 	"openfabrica/internal/singleinstance"
+
 	"openfabrica/internal/tokenrevoke"
+
 	"openfabrica/jobs"
+
 	"openfabrica/providers/imagegen"
+
 	"openfabrica/providers/llm"
+
 	"openfabrica/providers/stocksearch"
+
 	"openfabrica/providers/websearch"
+
 	"openfabrica/security"
+
 	"openfabrica/server"
+
 	"openfabrica/server/deps"
-	"openfabrica/store"
+
 	"openfabrica/tlsproxy"
+
 	"openfabrica/tools"
+
 	"openfabrica/triggers"
+
 	"openfabrica/webhooks"
 )
 
@@ -46,12 +73,6 @@ import (
 // problems exit the process directly.
 func bootstrapProcess(configPath string) *config.Config {
 	initLogger("info") // init early so config.LoadFrom() logs use the correct format
-
-	// Stamp every run with the binary that produced it (surfaced in the run export's
-	// `build` block) so a post-mortem reads the engine version/build-time as a field
-	// instead of diffing the binary's mtime against source.
-	engine.BuildVersion = Version
-	engine.BuildBuiltAt = BuildTime
 
 	// Refuse to start if another copy is already running. Without this, a
 	// second double-click silently brings up a second console window and a
@@ -69,6 +90,7 @@ func bootstrapProcess(configPath string) *config.Config {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	browser.SetExecutablePath(cfg.BrowserPath)
 
 	printBanner(cfg)
 	logFile := cfg.LogFile
@@ -89,7 +111,7 @@ func bootstrapProcess(configPath string) *config.Config {
 // primitives and the per-project database manager, in that order. The caller
 // owns the returned handles: main defers database.Close and
 // projectDBMgr.CloseAll so shutdown ordering stays visible in one place.
-func openDataLayer(cfg *config.Config) (*db.DB, *security.Encryptor, *security.JWTManager, *db.ProjectDBManager) {
+func openDataLayer(cfg *config.Config, secureCookies func() bool) (*db.DB, *security.Encryptor, *security.JWTManager, *db.ProjectDBManager) {
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
@@ -107,9 +129,7 @@ func openDataLayer(cfg *config.Config) (*db.DB, *security.Encryptor, *security.J
 		os.Exit(1)
 	}
 
-	jwtMgr := security.NewJWTManager(cfg.JWTSecret, 24*time.Hour)
-	// SecureCookies is set later once we know whether the TLS proxy is
-	// actually running (see startTLSProxy).
+	jwtMgr := security.NewJWTManagerWithSecureCookies(cfg.JWTSecret, 24*time.Hour, secureCookies)
 
 	projectDBMgr := db.NewProjectDBManager(cfg.DataDir)
 	// Say which folder this run uses, so starting from the wrong working directory
@@ -123,25 +143,26 @@ func openDataLayer(cfg *config.Config) (*db.DB, *security.Encryptor, *security.J
 // on its events: the webhook dispatcher, the trigger action runner, and the
 // audit logger. The dispatcher and audit logger self-register; the action runner
 // sends trigger_webhook through the dispatcher and is returned for later wiring.
-func wireEventBus(projectDBMgr *db.ProjectDBManager, encryptor *security.Encryptor, engineCtx context.Context) (*events.Bus, *triggers.Runner) {
+// The returned drain function waits for all three to finish in-flight work.
+func wireEventBus(projectDBMgr *db.ProjectDBManager, encryptor *security.Encryptor, engineCtx context.Context) (*events.Bus, *webhooks.Dispatcher, *triggers.Runner, func()) {
 	bus := events.NewBus()
 	dispatcher := webhooks.NewDispatcher(projectDBMgr, bus, encryptor, engineCtx) // Self-registers on the event bus via side effects.
 	actionRunner := triggers.NewRunner(projectDBMgr, bus, encryptor, engineCtx)   // Server-side actions (email, HTTP, data) on events.
-	actionRunner.SetWebhookSender(dispatcher)
-	triggers.NewAuditLogger(projectDBMgr, bus) // Audit logging for security/data events.
-	return bus, actionRunner
+	auditLogger := triggers.NewAuditLogger(projectDBMgr, bus)                     // Audit logging for security/data events.
+	drain := func() {
+		actionRunner.Stop()
+		dispatcher.Stop()
+		auditLogger.Stop()
+	}
+	return bus, dispatcher, actionRunner, drain
 }
 
-// initRegistries wires the LLM registry into the action runner,
-// drains init()-time registration errors, validates the tool registry, and
-// probes for headless Chrome. A registration or validation failure exits the
-// process.
-func initRegistries(database *db.DB, actionRunner *triggers.Runner) (*llm.Set, *tools.Registry, *tools.Executor) {
+// initRegistries drains init()-time registration errors, validates the tool
+// registry, and probes for headless Chrome. A registration or validation
+// failure exits the process.
+func initRegistries() (*llm.Set, *tools.Registry, *tools.Executor) {
 	llmRegistry := llm.NewRegistry()
 	toolRegistry := tools.DefaultRegistry()
-	// Wire the LLM registry + global DB into the trigger runner so
-	// trigger_type=llm_call / ai_embed can resolve a provider at fire time.
-	actionRunner.SetLLMRegistry(llmRegistry, database.DB)
 	// Drain registration errors first: a duplicate name or missing metadata in
 	// a tool's init() would otherwise be a single panic, hiding any sibling
 	// errors. Same treatment for the provider registries: every problem is
@@ -173,8 +194,10 @@ func initRegistries(database *db.DB, actionRunner *triggers.Runner) (*llm.Set, *
 	// errors from PDF/scrape tools. Deliberately INFO (not WARN) when
 	// missing: for many installs the omission is a conscious choice
 	// (headless server with no PDF use, etc.).
-	if p := store.DetectChromePath(); p != "" {
+	if p := browser.DetectChromePath(); p != "" {
 		slog.Info("headless chrome detected, PDF and scrape tools enabled", "path", p)
+	} else if runtime.GOOS == "linux" {
+		slog.Info("headless chrome not found, PDF and scrape tools will error at use (install chromium and fonts-freefont-ttf, or set OPENFABRICA_CHROME_PATH)")
 	} else {
 		slog.Info("headless chrome not found, PDF and scrape tools will error at use (install Google Chrome, Chromium, or Edge to enable)")
 	}
@@ -192,7 +215,7 @@ const llmIdleConnsPerHost = 16
 // provider seed, and sets up the live daily-token-budget resolver shared by
 // every unattended LLM path. Returns the client, the budget resolver, and the
 // atomic the settings-change subscriber writes to.
-func initLLMClientAndBudget(cfg *config.Config, database *db.DB, encryptor *security.Encryptor, llmRegistry *llm.Set, actionRunner *triggers.Runner) (*http.Client, func() int, *atomic.Int64) {
+func initLLMClientAndBudget(cfg *config.Config, database *db.DB, encryptor *security.Encryptor, llmRegistry *llm.Set) (*http.Client, func() int, *atomic.Int64) {
 	// OPENFABRICA_LLM_TIMEOUT sets this client's socket timeout, and the client IS the
 	// effective per-call deadline for every LLM call (see Deps.LLMHTTPClient). A stage's
 	// SessionSpec.Timeout is a looser outer bound on top: BUILD's is 90 minutes, well
@@ -224,8 +247,6 @@ func initLLMClientAndBudget(cfg *config.Config, database *db.DB, encryptor *secu
 	// an engine-only cap. Reads the live atomic so admin/wizard edits apply
 	// without a restart.
 	budgetFn := func() int { return int(dailyTokenBudget.Load()) }
-	actionRunner.SetBudgetFn(budgetFn)
-	actionRunner.SetLLMHTTPClient(llmHTTPClient)
 
 	return llmHTTPClient, budgetFn, dailyTokenBudget
 }
@@ -248,20 +269,31 @@ type appDeps struct {
 	// callLLM is the engine's call policy (retry + shared per-model limiter),
 	// set once the engine exists and handed to chat, jobs, and triggers.
 	callLLM llm.CallFunc
+	// runScheduleByName runs a project's scheduled task for user-flow replays,
+	// set once the engine exists.
+	runScheduleByName func(ctx context.Context, projectID int, name string) error
 }
 
 // newToolEnv builds the one tools.Env every tool caller shares (engine, live chat,
 // scheduled jobs, event triggers), so each shapes an identical ToolContext.
 func newToolEnv(a *appDeps) *tools.Env {
 	return &tools.Env{
-		GlobalDB:   a.database.DB,
-		Bus:        a.bus,
-		Encryptor:  a.encryptor,
-		JWTManager: a.jwtMgr,
-		PublicPort: a.cfg.PublicPort,
-		DataDir:    a.projectDBMgr.DataDir(),
+		GlobalDB:                a.database.DB,
+		Bus:                     a.bus,
+		Encryptor:               a.encryptor,
+		JWTManager:              a.jwtMgr,
+		PublicPort:              a.cfg.PublicPort,
+		DataDir:                 a.projectDBMgr.DataDir(),
+		ExtraDownloadExtensions: a.cfg.ExtraDownloadExtensions,
+		WebFetchMaxAssetMB:      a.cfg.WebFetchMaxAssetMB,
 		EmbedFunc: func(ctx context.Context, texts []string) ([][]float32, error) {
 			return llm.EmbedTexts(ctx, a.database.DB, a.encryptor, a.llmRegistry, texts)
+		},
+		RunScheduleByNameFunc: func(ctx context.Context, projectID int, name string) error {
+			if a.runScheduleByName == nil {
+				return fmt.Errorf("scheduled tasks cannot be run from this replay (no engine here)")
+			}
+			return a.runScheduleByName(ctx, projectID, name)
 		},
 	}
 }
@@ -285,9 +317,12 @@ func newEngineAndJobs(engineCtx context.Context, a *appDeps) (*engine.Engine, *j
 		StageTimeouts:      engineStageTimeouts(a.cfg),
 		PublicPort:         a.cfg.PublicPort,
 		PublicCSP:          a.cfg.PublicCSP,
+		BuildVersion:       Version,
+		BuildBuiltAt:       BuildTime,
 	}
 	engineMgr := engine.New(engineDeps, engineCtx)
 	a.callLLM = engineMgr.CallLLM
+	a.runScheduleByName = engineMgr.RunScheduleForFlow
 
 	jobsMgr := jobs.NewManager(&jobs.Deps{
 		DB:               a.database,
@@ -359,8 +394,12 @@ func startBackgroundWorkers(engineCtx context.Context, cfg *config.Config, datab
 	botService := startBotService(engineCtx, cfg, database, projectDBMgr, engineMgr, bus, encryptor)
 
 	// Hot-reload bot providers when settings change (no restart needed).
+	// Dispatched asynchronously so ReloadTelegram (which waits for the old
+	// poll loop to exit) never blocks the synchronous event bus publisher.
 	bus.Subscribe(events.EventSettingsChanged, func(e events.Event) {
-		botService.ReloadTelegram(engineCtx)
+		safego.Go("bot-reload-telegram", func() {
+			botService.ReloadTelegram(engineCtx)
+		})
 	})
 
 	// Re-resolve the engine daily token budget when settings change so an edit
@@ -375,13 +414,17 @@ func startBackgroundWorkers(engineCtx context.Context, cfg *config.Config, datab
 	// UI applies within a minute without a restart.
 	go backupsched.New(database, backupsched.Config{DataDir: cfg.DataDir, DBPath: cfg.DBPath, Version: Version}, slog.Default()).Run(engineCtx)
 
+	// Reclaim file descriptors and SQLite page caches for projects that haven't
+	// been touched recently; the next request reopens them on demand.
+	projectDBMgr.StartIdleEviction(engineCtx, 5*time.Minute, 15*time.Minute)
+
 	return bootWarnings, botService
 }
 
 // startTLSProxy constructs the TLS proxy manager, auto-starts it when a
-// domain exists, gates secure cookies on whether TLS is actually bound, and
-// emits the permissive-defaults warning for internet-reachable instances.
-func startTLSProxy(cfg *config.Config, database *db.DB, bus *events.Bus, jwtMgr *security.JWTManager) *tlsproxy.Manager {
+// domain exists, and emits the permissive-defaults warning for
+// internet-reachable instances.
+func startTLSProxy(cfg *config.Config, database *db.DB, bus *events.Bus) *tlsproxy.Manager {
 	tlsMgr := tlsproxy.NewManager(cfg, database.DB, slog.Default())
 	tlsMgr.SubscribeToEvents(bus)
 	if !cfg.TLSDisabled {
@@ -393,8 +436,6 @@ func startTLSProxy(cfg *config.Config, database *db.DB, bus *events.Bus, jwtMgr 
 			// Non-fatal: the admin UI on :AdminPort still works.
 		}
 	}
-	// Now that we know whether TLS is bound, gate secure cookies on it.
-	jwtMgr.SecureCookies = tlsMgr.IsRunning()
 
 	// Nag once at startup if the instance is internet-reachable (has a public
 	// domain) but the public router still serves wide-open defaults. Silent on a
@@ -457,7 +498,7 @@ func (n *networkHelpers) stop() {
 // full dependency set, wires the WebSocket broadcaster into the action
 // runner, logs readiness, and kicks off the browser auto-open when
 // configured. An asset load failure exits the process.
-func newServer(a *appDeps, engineMgr *engine.Engine, jobsMgr *jobs.Manager, chatHandler *chat.ChatHandler, tlsMgr *tlsproxy.Manager, netHelpers *networkHelpers, actionRunner *triggers.Runner, bootWarnings []string, botService *bot.BotService) *server.Server {
+func newServer(a *appDeps, engineMgr *engine.Engine, jobsMgr *jobs.Manager, chatHandler *chat.ChatHandler, tlsMgr *tlsproxy.Manager, netHelpers *networkHelpers, bootWarnings []string, botService *bot.BotService) *server.Server {
 	adminSubFS, err := adminAssets()
 	if err != nil {
 		slog.Error("failed to create admin sub-filesystem", "error", err)
@@ -490,9 +531,6 @@ func newServer(a *appDeps, engineMgr *engine.Engine, jobsMgr *jobs.Manager, chat
 		},
 		AdminFS: adminSubFS,
 	})
-
-	// Wire the WebSocket broadcaster into the Actions Runner so ws_broadcast actions work.
-	actionRunner.SetBroadcaster(srv.WSBroadcaster())
 
 	slog.Debug("Open Fabrica ready",
 		"admin", a.cfg.AdminPort,
@@ -583,9 +621,13 @@ func wireEngineWakeSubscribers(bus *events.Bus, engineMgr *engine.Engine, jobsMg
 			return
 		}
 		content, _ := e.Payload["content"].(string)
+		payload := map[string]any{"message": content}
+		if imgs, ok := e.Payload["images"]; ok {
+			payload["images"] = imgs
+		}
 		if err := engineMgr.Send(e.ProjectID, engine.Command{
 			Type:    engine.CommandChat,
-			Payload: map[string]any{"message": content},
+			Payload: payload,
 		}); err != nil {
 			slog.Debug("failed to wake engine on chat message", "project_id", e.ProjectID, "error", err)
 		}
@@ -597,7 +639,6 @@ func wireEngineWakeSubscribers(bus *events.Bus, engineMgr *engine.Engine, jobsMg
 // starts it on ctx. Returns the service so the caller can hot-reload providers
 // on a settings change.
 func startBotService(ctx context.Context, cfg *config.Config, database *db.DB, projectDBMgr *db.ProjectDBManager, engineMgr *engine.Engine, bus *events.Bus, encryptor *security.Encryptor) *bot.BotService {
-	adminBaseURL, _ := database.GetSetting("admin_base_url")
 	botService := bot.NewBotService(&bot.BotDeps{
 		DB:               database,
 		ProjectDBManager: projectDBMgr,
@@ -605,10 +646,8 @@ func startBotService(ctx context.Context, cfg *config.Config, database *db.DB, p
 		Bus:              bus,
 		Encryptor:        encryptor,
 		Logger:           slog.Default(),
-		AdminBaseURL:     adminBaseURL,
 		TLSDisabled:      cfg.TLSDisabled,
 	})
-	bot.UpgradeBotToken(database, encryptor)
 	if token := bot.LoadBotToken(database, encryptor); token != "" {
 		// botService doubles as the OffsetStore (persists the poll offset).
 		tg := bot.NewTelegramProvider(token, botService.HandleIncoming, botService.HandleCallback, botService)
@@ -622,7 +661,7 @@ func startBotService(ctx context.Context, cfg *config.Config, database *db.DB, p
 // so a stuck engine/LLM goroutine cannot wedge the process forever. After the
 // deadline the caller falls through to its deferred database closes; in-flight
 // writers then see "database is closed".
-func gracefulShutdown(cancelActions context.CancelFunc, tlsMgr *tlsproxy.Manager, netHelpers *networkHelpers, engineMgr *engine.Engine, jobsMgr *jobs.Manager) {
+func gracefulShutdown(cancelActions context.CancelFunc, drainActions func(), botService *bot.BotService, tlsMgr *tlsproxy.Manager, netHelpers *networkHelpers, engineMgr *engine.Engine, jobsMgr *jobs.Manager) {
 	// Abort in-flight webhook deliveries and trigger actions first: they are
 	// fire-and-forget side effects nothing waits on, and left running they would
 	// keep dialing out (and writing to project DBs) while the workers drain.
@@ -631,6 +670,12 @@ func gracefulShutdown(cancelActions context.CancelFunc, tlsMgr *tlsproxy.Manager
 	defer shutdownCancel()
 	done := make(chan struct{})
 	go func() {
+		if drainActions != nil {
+			drainActions()
+		}
+		if botService != nil {
+			botService.Stop()
+		}
 		_ = tlsMgr.Stop()
 		netHelpers.stop()
 		engineMgr.StopAll()
@@ -638,7 +683,7 @@ func gracefulShutdown(cancelActions context.CancelFunc, tlsMgr *tlsproxy.Manager
 		// Pooled headless browsers are rooted at Background so a probe's context
 		// cannot kill a shared one, which also means nothing else reaps them.
 		// After the workers stop, so a draining probe keeps its browser.
-		store.ShutdownBrowserPool()
+		browser.ShutdownBrowserPool()
 		close(done)
 	}()
 	select {

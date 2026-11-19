@@ -17,8 +17,9 @@ import (
 
 func init() {
 	tools.Define(tools.Tool{
-		Name:     "manage_guides",
-		Category: "project",
+		Name:           "manage_guides",
+		Category:       "project",
+		PreservesFlows: true,
 		// recall returns one guide's full body (contracts transcluded). The biggest
 		// reference guides (realtime_signaling, e2ee, 3d_rendering) far exceed the
 		// session's default tool-result cap, so without this the model recalls a
@@ -212,7 +213,7 @@ func (a *GuideRecall) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 			"slug": g.Slug, "title": g.Title, "summary": g.Summary, "category": g.Category,
 		}
 		if inlined {
-			out["note"] = "This guide's core is already inlined in your build context above; body omitted. Pull a section with section=<anchor>, or section=all for the extended sections."
+			out["note"] = "This guide's core is already inlined in your build context above; body omitted. Do NOT repeat this call without a section — pass section=\"<anchor>\" from sections below, or section=\"all\"."
 		} else {
 			// Core body + an index of what else can be pulled on demand. Transclude
 			// canonical facts so the model sees the rendered contract, not a token.

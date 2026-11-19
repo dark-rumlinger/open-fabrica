@@ -23,7 +23,7 @@ func TestSave_CreateReject_SteersToFullResave(t *testing.T) {
 	// error the single-file syntax parse passes but the bundler proves.
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "voxel.net.js",
+		FilePath: "app.net.js",
 		Body: `export function initNet(){
   const ctx = 1;
   ctx = 2;
@@ -55,7 +55,7 @@ func TestSave_UpdateReject_KeepsEditAndRetry(t *testing.T) {
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
 
 	// A clean prior version exists.
-	seedJS(t, db, "voxel.net.js", `export function initNet(){
+	seedJS(t, db, "app.net.js", `export function initNet(){
   const ctx = 1;
   return ctx;
 }`)
@@ -63,7 +63,7 @@ func TestSave_UpdateReject_KeepsEditAndRetry(t *testing.T) {
 	// Re-save it with a const reassignment - now an update, not a create.
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "voxel.net.js",
+		FilePath: "app.net.js",
 		Body: `export function initNet(){
   const ctx = 1;
   ctx = 2;
@@ -95,7 +95,7 @@ func TestSteerCreateRejectToResave(t *testing.T) {
 		t.Errorf("update (exists=true) must not gain the create-steer, got: %s", got.Error)
 	}
 	create := &tools.Result{Success: false, Code: "static_error", Error: "boom - fix the named line, then retry."}
-	got := steerCreateRejectToResave(create, "file", "voxel.net.js", false)
+	got := steerCreateRejectToResave(create, "file", "app.net.js", false)
 	if !contains(got.Error, "does not exist yet") || !contains(got.Error, "full corrected body") {
 		t.Errorf("create (exists=false) must gain the full-resave steer, got: %s", got.Error)
 	}

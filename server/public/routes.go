@@ -10,6 +10,7 @@ import (
 	"openfabrica/db"
 	"openfabrica/events"
 	"openfabrica/internal/actionexec"
+	"openfabrica/internal/mqtt"
 	"openfabrica/providers/llm"
 	"openfabrica/security"
 	"openfabrica/server/middleware"
@@ -21,6 +22,7 @@ type Deps struct {
 	ProjectDBManager *db.ProjectDBManager
 	Bus              *events.Bus
 	WSHub            *wsHub
+	MQTTHub          *mqtt.Hub
 	LLMRegistry      *llm.Set
 	Encryptor        *security.Encryptor
 	JWTManager       *security.JWTManager
@@ -49,8 +51,9 @@ func (d *Deps) completeDeps() actionexec.CompleteDeps {
 	return cd
 }
 
-// RegisterRoutes mounts all public project routes on the given router.
-func RegisterRoutes(r chi.Router, deps *Deps) {
+// RegisterRoutes mounts all public project routes on the given router and returns
+// a cleanup function that stops background resources (such as the API response cache).
+func RegisterRoutes(r chi.Router, deps *Deps) func() {
 	h := &Handler{
 		deps:                deps,
 		apiCache:            newAPICache(),
@@ -60,6 +63,7 @@ func RegisterRoutes(r chi.Router, deps *Deps) {
 		magicVerifyLimiter:  middleware.NewRateLimiter(middleware.MagicVerifyRatePerSec, middleware.MagicVerifyBurst),
 		totpVerifyLimiter:   middleware.NewRateLimiter(middleware.TOTPVerifyRatePerSec, middleware.TOTPVerifyBurst),
 		authLockout:         middleware.NewAccountLockout(middleware.PublicLockoutAttempts, middleware.LockoutBaseDelay, middleware.LockoutMaxDelay),
+		endpointLimiter:     newEndpointRateLimiter(),
 	}
 
 	// All public routes go through ProjectResolver which looks up the
@@ -123,9 +127,14 @@ func RegisterRoutes(r chi.Router, deps *Deps) {
 	// RSS / Atom feeds rendered from a table.
 	r.Get("/feed/*", h.Feed)
 
+	// MQTT-over-WebSocket broker endpoint for IoT devices and browser dashboards.
+	r.Get("/mqtt", h.ServeMQTT)
+
 	// Dynamic API endpoints (LLM-created), includes auth endpoints.
 	r.HandleFunc("/api/*", h.DynamicAPI)
 
 	// Catch-all: serve SSR pages by path.
 	r.Get("/*", h.ServePage)
+
+	return h.apiCache.Close
 }

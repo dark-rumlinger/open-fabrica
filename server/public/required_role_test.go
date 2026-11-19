@@ -27,7 +27,7 @@ func TestRequiredRoleGate(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", strings.NewReader(""))
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
-		if _, _, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep); ok {
+		if _, ok := h.buildAPIRequestContext(rec, req, &models.Project{ID: 1}, ep); ok {
 			return http.StatusOK
 		}
 		return rec.Code

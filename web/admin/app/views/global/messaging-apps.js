@@ -29,20 +29,12 @@ export const renderMessagingApps = defineView(async (ctx, container) => {
   const body = pageBody();
   container.appendChild(body);
 
-  const isAdmin = state.isAdmin();
   let status = null;
   let statusKey = '';
   // Invite currently shown to the person setting up (step 2, or "Add someone").
   let invite = null;
   let inviteBusy = false;
   let inviteBaseline = 0;
-
-  if (!isAdmin) {
-    body.appendChild(h('div', { className: 'card' }, [
-      h('p', { className: 'text-secondary' }, t('tg.adminOnly')),
-    ]));
-    return;
-  }
 
   await refresh(true);
   ctx.scope.interval(() => { if (shouldPoll()) refresh(false); }, POLL_MS);

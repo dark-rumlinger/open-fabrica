@@ -17,10 +17,10 @@ import (
 	"net/http"
 	"strings"
 
-	"openfabrica/db"
 	"openfabrica/events"
 	"openfabrica/internal/stringutil"
 	"openfabrica/security"
+	"openfabrica/store"
 )
 
 // tenantMembership is the read-side shape used to mint tokens and render the
@@ -36,27 +36,19 @@ type tenantMembership struct {
 // loadActiveMemberships returns the user's active tenants, ordered by joined_at
 // so the first row is a sensible auto-pick when the user has exactly one.
 func (h *Handler) loadActiveMemberships(projectDB *sql.DB, userID int) ([]tenantMembership, error) {
-	rows, err := projectDB.Query(
-		`SELECT t.id, t.slug, t.name, m.role, m.status
-		 FROM of_tenant_members m
-		 JOIN of_tenants t ON t.id = m.tenant_id AND t.is_deleted = 0
-		 WHERE m.user_id = ? AND m.status = 'active'
-		 ORDER BY m.joined_at ASC`,
-		userID,
-	)
+	rows, err := store.LoadActiveTenantMemberships(projectDB, userID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []tenantMembership
-	for rows.Next() {
-		var m tenantMembership
-		if err := rows.Scan(&m.TenantID, &m.Slug, &m.Name, &m.Role, &m.Status); err == nil {
-			out = append(out, m)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	out := make([]tenantMembership, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, tenantMembership{
+			TenantID: r.TenantID,
+			Slug:     r.Slug,
+			Name:     r.Name,
+			Role:     r.Role,
+			Status:   r.Status,
+		})
 	}
 	return out, nil
 }
@@ -127,6 +119,7 @@ func (h *Handler) handleTenantSubroute(
 	r *http.Request,
 	projectID int,
 	projectDB *sql.DB,
+	physTable string,
 	ae *authEndpointConfig,
 	action string,
 ) bool {
@@ -143,7 +136,7 @@ func (h *Handler) handleTenantSubroute(
 			writeError(w, http.StatusMethodNotAllowed, "POST required")
 			return true
 		}
-		h.authSwitchTenant(w, r, projectID, projectDB, ae)
+		h.authSwitchTenant(w, r, projectID, projectDB, physTable, ae)
 		return true
 	}
 	return false
@@ -170,7 +163,7 @@ func (h *Handler) authListTenants(w http.ResponseWriter, r *http.Request, projec
 
 // authSwitchTenant re-mints the caller's JWT with a new active tenant. The
 // caller must already be authenticated and a member of the target tenant.
-func (h *Handler) authSwitchTenant(w http.ResponseWriter, r *http.Request, projectID int, projectDB *sql.DB, ae *authEndpointConfig) {
+func (h *Handler) authSwitchTenant(w http.ResponseWriter, r *http.Request, projectID int, projectDB *sql.DB, physTable string, ae *authEndpointConfig) {
 	claims, err := h.extractUserClaims(r)
 	if err != nil || claims.ProjectID != projectID {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -202,9 +195,9 @@ func (h *Handler) authSwitchTenant(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
-	token, err := h.deps.JWTManager.Generate(security.TokenRequest{ProjectID: projectID, UserID: claims.UserID, TenantID: picked.TenantID, Username: claims.Username, Role: claims.Role, TenantRole: picked.Role, Expiry: authTokenExpiry(ae)})
+	token, status, err := h.mintSession(projectDB, projectID, claims.UserID, picked.TenantID, claims.Username, physTable, ae)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to mint token")
+		writeError(w, status, err.Error())
 		return
 	}
 
@@ -229,46 +222,11 @@ func (h *Handler) authSwitchTenant(w http.ResponseWriter, r *http.Request, proje
 // addressed to this email, without consuming it. Lets registration refuse before
 // it creates the account.
 func (h *Handler) inviteUsable(readDB *sql.DB, token, email string) bool {
-	if token == "" {
-		return false
-	}
-	var n int
-	err := readDB.QueryRow(
-		`SELECT COUNT(*) FROM of_tenant_invites
-		 WHERE token = ? AND (email = ? OR email = '')
-		   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)`,
-		token, email,
-	).Scan(&n)
-	return err == nil && n > 0
+	return store.TenantInviteUsable(readDB, token, email)
 }
 
-// consumeInviteToken atomically validates an invite token, returns the
-// associated tenant_id + role, and deletes the row. Returns ok=false when the
-// token is missing or already consumed; callers translate that into a 4xx
-// without leaking which case it was.
 func (h *Handler) consumeInviteToken(writeDB *sql.DB, token, email string) (tenantID int, role string, ok bool) {
-	err := db.RunInTx(writeDB, func(tx *sql.Tx) error {
-		// Enforce expiry alongside the token/email match: an invite past its
-		// expires_at must be treated as already gone, not silently honoured.
-		// expires_at IS NULL means "never expires".
-		if err := tx.QueryRow(
-			`SELECT tenant_id, role FROM of_tenant_invites
-			 WHERE token = ? AND (email = ? OR email = '')
-			   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)`,
-			token, email,
-		).Scan(&tenantID, &role); err != nil {
-			return err
-		}
-		_, err := tx.Exec("DELETE FROM of_tenant_invites WHERE token = ?", token)
-		return err
-	})
-	if err != nil {
-		return 0, "", false
-	}
-	if role == "" {
-		role = "member"
-	}
-	return tenantID, role, true
+	return store.ConsumeTenantInviteToken(writeDB, token, email)
 }
 
 // applyRegistrationTenancy resolves the new user's tenant according to the
@@ -299,10 +257,7 @@ func (h *Handler) applyRegistrationTenancy(
 		if !ok {
 			return 0, "", "invalid or expired invite", http.StatusForbidden
 		}
-		if _, err := writeDB.Exec(
-			"INSERT INTO of_tenant_members (tenant_id, user_id, role, status) VALUES (?, ?, ?, 'active')",
-			tid, userID, role,
-		); err != nil {
+		if err := store.InsertTenantMember(writeDB, tid, userID, role); err != nil {
 			return 0, "", "creating membership: " + err.Error(), http.StatusInternalServerError
 		}
 		if h.deps.Bus != nil {
@@ -320,50 +275,25 @@ func (h *Handler) applyRegistrationTenancy(
 		if base == "" {
 			base = fmt.Sprintf("tenant-%d", userID)
 		}
-		slug := base
-		for i := 2; i < 100; i++ {
-			var exists int
-			_ = writeDB.QueryRow("SELECT COUNT(*) FROM of_tenants WHERE slug = ?", slug).Scan(&exists)
-			if exists == 0 {
-				break
-			}
-			slug = fmt.Sprintf("%s-%d", base, i)
-		}
-		res, err := writeDB.Exec(
-			"INSERT INTO of_tenants (slug, name, plan, settings) VALUES (?, ?, 'free', '{}')",
-			slug, slug,
-		)
+		newID, slug, err := store.CreateTenantWithOwner(writeDB, base, userID)
 		if err != nil {
 			return 0, "", "creating tenant: " + err.Error(), http.StatusInternalServerError
-		}
-		newID, err := res.LastInsertId()
-		if err != nil {
-			return 0, "", "creating tenant: could not read new tenant id", http.StatusInternalServerError
-		}
-		if _, err := writeDB.Exec(
-			"INSERT INTO of_tenant_members (tenant_id, user_id, role, status) VALUES (?, ?, 'owner', 'active')",
-			newID, userID,
-		); err != nil {
-			return 0, "", "creating membership: " + err.Error(), http.StatusInternalServerError
 		}
 		if h.deps.Bus != nil {
 			h.deps.Bus.Publish(events.NewEvent(events.EventTenantCreated, projectID, map[string]any{
 				"tenant_id": newID, "slug": slug, "name": slug, "plan": "free", "owner_user_id": userID,
 			}))
 		}
-		return int(newID), "owner", "", 0
+		return newID, "owner", "", 0
 
 	case "signup_joins_default":
-		var defID int
 		// The "default" tenant is the lowest-id active tenant; manage_tenancy
 		// enable seeds one when default_tenant_slug is provided.
-		if err := writeDB.QueryRow("SELECT id FROM of_tenants WHERE is_deleted = 0 ORDER BY id ASC LIMIT 1").Scan(&defID); err != nil {
+		defID, err := store.DefaultTenantID(writeDB)
+		if err != nil {
 			return 0, "", "no default tenant configured", http.StatusInternalServerError
 		}
-		if _, err := writeDB.Exec(
-			"INSERT INTO of_tenant_members (tenant_id, user_id, role, status) VALUES (?, ?, 'member', 'active')",
-			defID, userID,
-		); err != nil {
+		if err := store.InsertTenantMember(writeDB, defID, userID, "member"); err != nil {
 			return 0, "", "creating membership: " + err.Error(), http.StatusInternalServerError
 		}
 		if h.deps.Bus != nil {

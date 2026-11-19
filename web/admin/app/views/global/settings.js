@@ -84,7 +84,6 @@ export const renderSettings = defineView(async (ctx, container) => {
 
   function renderForm(settings) {
     clear(formContainer);
-    const readOnly = !state.isAdmin();
 
     // Only settings with a label here are editable. The table also holds keys that
     // other pages own (the router port mapping toggle, bot state), and a raw text
@@ -103,7 +102,6 @@ export const renderSettings = defineView(async (ctx, container) => {
         const input = h('input', {
           className: 'input',
           value: settings[key] || '',
-          disabled: readOnly,
         });
         otherFields[key] = input;
         let hint = friendlyHint(key);
@@ -143,7 +141,7 @@ export const renderSettings = defineView(async (ctx, container) => {
 
     // The save button sits inside the settings panel, under its fields, rather
     // than on its own line below the card.
-    if (settingsCard && state.isAdmin()) {
+    if (settingsCard) {
       settingsCard.appendChild(h('div', { className: 'mt-4' }, [saveBtn]));
     }
 
@@ -157,14 +155,12 @@ export const renderSettings = defineView(async (ctx, container) => {
       }));
     }
 
-    if (state.isAdmin()) {
-      formContainer.appendChild(backupCard());
-      formContainer.appendChild(scheduledBackupsCard());
-      formContainer.appendChild(logsCard());
-      formContainer.appendChild(configCard());
-      formContainer.appendChild(systemStatusCard());
-      formContainer.appendChild(firewallCard());
-    }
+    formContainer.appendChild(backupCard());
+    formContainer.appendChild(scheduledBackupsCard());
+    formContainer.appendChild(logsCard());
+    formContainer.appendChild(configCard());
+    formContainer.appendChild(systemStatusCard());
+    formContainer.appendChild(firewallCard());
   }
 });
 

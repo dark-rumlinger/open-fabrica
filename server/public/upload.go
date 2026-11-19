@@ -55,18 +55,21 @@ type uploadEndpointConfig struct {
 }
 
 func (h *Handler) loadUploadEndpoint(projectDB *sql.DB, path string) (*uploadEndpointConfig, error) {
-	var ue uploadEndpointConfig
-	var allowedTypesJSON string
-	var tableName, ownerColumn, tenantColumn sql.NullString
-	err := projectDB.QueryRow(
-		"SELECT path, allowed_types, max_size_mb, requires_auth, COALESCE(rate_limit,0), table_name, COALESCE(owner_column,''), COALESCE(tenant_column,'') FROM of_upload_endpoints WHERE path = ?",
-		path,
-	).Scan(&ue.Path, &allowedTypesJSON, &ue.MaxSizeMB, &ue.RequiresAuth, &ue.RateLimit, &tableName, &ownerColumn, &tenantColumn)
+	row, err := store.LoadUploadEndpoint(projectDB, path)
 	if err != nil {
 		return nil, err
 	}
-	if allowedTypesJSON != "" {
-		if err := json.Unmarshal([]byte(allowedTypesJSON), &ue.AllowedTypes); err != nil {
+	ue := uploadEndpointConfig{
+		Path:         row.Path,
+		MaxSizeMB:    row.MaxSizeMB,
+		RequiresAuth: row.RequiresAuth,
+		RateLimit:    row.RateLimit,
+		TableName:    row.TableName,
+		OwnerColumn:  row.OwnerColumn,
+		TenantColumn: row.TenantColumn,
+	}
+	if row.AllowedTypes != "" {
+		if err := json.Unmarshal([]byte(row.AllowedTypes), &ue.AllowedTypes); err != nil {
 			slog.Warn("invalid allowed_types JSON in upload endpoint", "path", path, "error", err)
 		}
 	}
@@ -76,9 +79,6 @@ func (h *Handler) loadUploadEndpoint(projectDB *sql.DB, path string) (*uploadEnd
 	if ue.MaxSizeMB > endpoints.MaxUploadSizeMB {
 		ue.MaxSizeMB = endpoints.MaxUploadSizeMB
 	}
-	ue.TableName = tableName.String
-	ue.OwnerColumn = ownerColumn.String
-	ue.TenantColumn = tenantColumn.String
 	return &ue, nil
 }
 
@@ -123,7 +123,7 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	// Per-endpoint rate limit (requests/min per IP), configured via manage_uploads.
 	// Checked after MaxBytesReader is installed so a rejected request still drains
 	// its body gracefully. rate_limit=0 disables the cap.
-	if !checkEndpointRateLimit("upload:"+projectKeyOf(r)+":"+endpointPath+":"+middleware.RateLimitIdentity(r), ue.RateLimit) {
+	if !h.checkEndpointRateLimit("upload:"+projectKeyOf(r)+":"+endpointPath+":"+middleware.RateLimitIdentity(r), ue.RateLimit) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
@@ -132,28 +132,29 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	// RequiresAuth is false, we still try to read claims so an upload by an
 	// authenticated user can be tenant-scoped.
 	var authUserID, authTenantID int
+	var authTenantRole string
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if ue.RequiresAuth {
-		ok, claims := h.validateProjectTokenOrJWTWithClaims(projectID, token)
+		claims, ok := h.projectUserClaims(projectID, token)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		if claims != nil {
-			authUserID = claims.UserID
-			authTenantID = claims.TenantID
-		}
+		authUserID = claims.UserID
+		authTenantID = claims.TenantID
+		authTenantRole = claims.TenantRole
 	} else if token != "" {
-		if ok, claims := h.validateProjectTokenOrJWTWithClaims(projectID, token); ok && claims != nil {
+		if claims, ok := h.projectUserClaims(projectID, token); ok {
 			authUserID = claims.UserID
 			authTenantID = claims.TenantID
+			authTenantRole = claims.TenantRole
 		}
 	}
 
 	// Tenanted endpoint requires an active tenant session; refuse uploads
 	// from anonymous or tenant-less callers so an orphaned file can't land
 	// under the project files tree.
-	if ue.TenantColumn != "" && authTenantID == 0 {
+	if ue.TenantColumn != "" && authTenantID == 0 && authTenantRole != "platform_admin" {
 		writeError(w, http.StatusForbidden, "no active tenant; call /tenant/switch first")
 		return
 	}
@@ -196,11 +197,8 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	// Per-project disk quota: refuse the upload if it would push the project's
 	// total stored uploads past the cap. Without this an internet visitor can
 	// fill the host disk by spamming an upload endpoint.
-	var usedBytes sql.NullInt64
-	if err := projectDB.Reader().QueryRow(
-		"SELECT COALESCE(SUM(size), 0) FROM of_files WHERE kind = 'file' AND storage = 'disk' AND path LIKE 'uploads/%' AND is_deleted = 0",
-	).Scan(&usedBytes); err == nil {
-		if usedBytes.Int64+int64(len(data)) > endpoints.MaxProjectUploadBytes {
+	if usedBytes, err := store.SumDiskUploadBytes(projectDB.Reader()); err == nil {
+		if usedBytes+int64(len(data)) > endpoints.MaxProjectUploadBytes {
 			writeError(w, http.StatusInsufficientStorage, "project upload quota exceeded")
 			return
 		}
@@ -275,13 +273,7 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	// Must match what ServeFile reads: kind='file' + storage='disk' so
 	// artifactBytes loads the on-disk bytes via disk_path instead of returning
 	// an empty inline body.
-	_, err = projectDB.Writer().Exec(
-		`INSERT INTO of_files (kind, storage, path, content_type, size, disk_path)
-		 VALUES ('file', 'disk', ?, ?, ?, ?)
-		 ON CONFLICT(kind, path) DO UPDATE SET storage = excluded.storage, content_type = excluded.content_type, size = excluded.size, disk_path = excluded.disk_path, updated_at = CURRENT_TIMESTAMP`,
-		storageName, ct, len(data), storagePath,
-	)
-	if err != nil {
+	if err := store.UpsertUploadedFile(projectDB.Writer(), storageName, ct, len(data), storagePath); err != nil {
 		slog.Error("upload: failed to insert file metadata", "error", err)
 		_ = os.Remove(storagePath) // clean up orphaned file
 		writeError(w, http.StatusInternalServerError, "storage error")
@@ -326,19 +318,13 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 		for i, c := range cols {
 			quotedCols[i] = security.QuoteIdent(c)
 		}
-		placeholders := strings.Repeat("?,", len(cols))
-		placeholders = placeholders[:len(placeholders)-1]
 		// RETURNING hands back the row as stored, with its id and every column the
 		// table generates (a slug, an expiry): a page that shares a link to the upload
 		// needs those, and has no other way to learn them.
-		insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING *",
-			security.QuoteIdent(ue.TableName), strings.Join(quotedCols, ", "), placeholders)
-		rows, err := projectDB.Writer().Query(insertSQL, vals...)
-		if err == nil {
-			inserted = h.scanRowsToMaps(rows)
-			if len(inserted) == 0 {
-				err = fmt.Errorf("insert returned no row")
-			}
+		if row, rerr := store.InsertUploadedFileRow(projectDB.Writer(), ue.TableName, quotedCols, vals); rerr != nil {
+			err = rerr
+		} else {
+			inserted = []map[string]any{row}
 		}
 		if err != nil {
 			// Fail loudly when the linked-table insert fails: the file and
@@ -445,10 +431,7 @@ func cleanupOrphanedUpload(writer *sql.DB, diskPath, filePath, reason, tableName
 	if err := os.Remove(diskPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn("upload: cleanup remove failed", "path", diskPath, "error", err)
 	}
-	if _, err := writer.Exec(
-		`DELETE FROM of_files WHERE kind = 'file' AND path = ?`,
-		filePath,
-	); err != nil {
+	if err := store.DeleteUploadedFileMeta(writer, filePath); err != nil {
 		slog.Warn("upload: cleanup artifact row delete failed", "path", filePath, "error", err)
 	}
 }

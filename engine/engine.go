@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"openfabrica/db/models"
-	"openfabrica/internal/flowhooks"
 	"openfabrica/internal/safego"
 	"openfabrica/internal/sqliteretry"
 )
@@ -47,10 +46,17 @@ func New(deps *Deps, ctx context.Context) *Engine {
 		logger:  slog.With("component", "engine"),
 		rootCtx: ctx,
 	}
-	// User-flow replays run a project's scheduled tasks through the engine that
-	// owns its workers (runSchedule steps).
-	flowhooks.SetScheduleRunner(e.runScheduleForFlow)
+	if e.deps.ScheduleRunner == nil {
+		e.deps.ScheduleRunner = e.runScheduleForFlow
+	}
 	return e
+}
+
+// RunScheduleForFlow runs a project's scheduled task by name and waits for it to
+// finish. Exposed so the composition root can wire it into tools.Env for
+// user-flow replays without a package-level global.
+func (e *Engine) RunScheduleForFlow(ctx context.Context, projectID int, name string) error {
+	return e.runScheduleForFlow(ctx, projectID, name)
 }
 
 // StartProject starts a worker for the project (no-op when already running).

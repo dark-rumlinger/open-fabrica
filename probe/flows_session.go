@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
+	ofbrowser "openfabrica/internal/browser"
 	"openfabrica/internal/replayid"
-	"openfabrica/store"
 
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
@@ -105,7 +105,7 @@ func (r *flowRun) setupTab(s *flowSession, ctx context.Context) error {
 		// Same pre-script instrumentation as the load probe. No seeded token unless
 		// the flow declares a signedIn user for this session: otherwise a flow signs
 		// in through the real UI.
-		store.RuntimeInstrumentationAction(r.seedTokens[s.name]),
+		ofbrowser.RuntimeInstrumentationAction(r.seedTokens[s.name]),
 		seedRandomAction(fmt.Sprintf("%s|%d|%s", r.flow.Name, r.flowIndex, visitor)),
 		viewportAction(r.flow.Viewport),
 		// A headless tab is never the focused window; apps that check focus (the

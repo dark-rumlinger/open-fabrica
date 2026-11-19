@@ -84,6 +84,7 @@ globalThis.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem
 globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => '{}' });
 
 const { createQuestionGroup } = await import('../admin/app/ui/question-cards.js');
+const { t } = await import('../admin/app/core/i18n.js');
 
 function find(node, pred, out = []) {
   if (pred(node)) out.push(node);
@@ -116,4 +117,37 @@ test('a secret answer is masked, a normal answer is shown, in the grouped card s
   // Belt and suspenders: the raw secret must appear nowhere in the summary DOM.
   const summary = byClass(group.element, 'question-group__answered')[0];
   assert.ok(!summary.text.includes('sk_live_SUPERSECRET'), 'raw secret must not be in the DOM');
+});
+
+test('single_choice in a 1-question group auto-submits on option click, not on Other', async () => {
+  const group = createQuestionGroup([
+    { id: 10, type: 'single_choice', options: ['Yes', 'No'], question: 'Proceed?' },
+  ]);
+
+  const otherBtn = find(group.element, (n) => n.tagName === 'button' && n.text === t('qi.other'))[0];
+  assert.ok(otherBtn, 'Other... button exists');
+  otherBtn.listeners.click[0]();
+  assert.equal(byClass(group.element, 'question-group__answered').length, 0, 'Other... must not auto-submit');
+
+  const yesBtn = find(group.element, (n) => n.tagName === 'button' && n.text === 'Yes')[0];
+  assert.ok(yesBtn, 'Yes button exists');
+  yesBtn.listeners.click[0]();
+  await new Promise((r) => realSetTimeout(r, 0));
+
+  const answered = byClass(group.element, 'question-group__answered-a');
+  assert.equal(answered.length, 1, 'auto-submitted into answered summary');
+  assert.equal(answered[0].text, 'Yes');
+});
+
+test('single_choice in a multi-question group does not auto-submit on option click', async () => {
+  const group = createQuestionGroup([
+    { id: 11, type: 'single_choice', options: ['Yes', 'No'], question: 'First?' },
+    { id: 12, type: 'single_choice', options: ['A', 'B'], question: 'Second?' },
+  ]);
+
+  const yesBtn = find(group.element, (n) => n.tagName === 'button' && n.text === 'Yes')[0];
+  yesBtn.listeners.click[0]();
+  await new Promise((r) => realSetTimeout(r, 0));
+
+  assert.equal(byClass(group.element, 'question-group__answered').length, 0, 'must wait for all questions');
 });

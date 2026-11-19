@@ -11,7 +11,7 @@ import (
 // silent - but a /files/-originated logged Error must still hard-fail the render.
 func TestFailureReason_BootFailureIsHardFail(t *testing.T) {
 	r := &pageRenderReport{bootFailures: []string{
-		"subsystem load failed ./universe.hud.js ReferenceError: register is not defined",
+		"subsystem load failed ./app.ui.js ReferenceError: register is not defined",
 	}}
 	if reason, failed := r.failureReason(); !failed {
 		t.Fatalf("a project-code boot failure must hard-fail, got reason=%q failed=%v", reason, failed)
@@ -35,7 +35,7 @@ func TestFailureReason_LibraryConsoleErrorNotFatal(t *testing.T) {
 func TestConsoleFromProjectCode(t *testing.T) {
 	project := &runtime.EventConsoleAPICalled{
 		StackTrace: &runtime.StackTrace{CallFrames: []*runtime.CallFrame{
-			{URL: "http://app.local:8080/files/universe.js"},
+			{URL: "http://app.local:8080/files/app.js"},
 		}},
 	}
 	if !consoleFromProjectCode(project, "subsystem load failed") {
@@ -54,7 +54,7 @@ func TestConsoleFromProjectCode(t *testing.T) {
 	// Fallback: the serialized Error stack carries the /files/ URL even when the
 	// console call frame itself does not.
 	noStack := &runtime.EventConsoleAPICalled{}
-	if !consoleFromProjectCode(noStack, "ReferenceError at http://x/files/universe.hud.js:568") {
+	if !consoleFromProjectCode(noStack, "ReferenceError at http://x/files/app.ui.js:568") {
 		t.Errorf("a /files/ URL in the message must classify as project code")
 	}
 	if consoleFromProjectCode(noStack, "just a plain warning, no origin") {

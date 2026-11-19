@@ -8,35 +8,6 @@ import (
 	"openfabrica/db"
 )
 
-// TestPermissiveDefaultIssues pins the startup-nag decision: silent on a
-// local-only instance, and one issue per wide-open public default once a domain
-// makes the instance internet-reachable.
-func TestPermissiveDefaultIssues(t *testing.T) {
-	strict := "default-src 'self'; script-src 'self' {nonce}; object-src 'none'"
-
-	cases := []struct {
-		name        string
-		hasDomains  bool
-		corsOrigins []string
-		csp         string
-		wantCount   int
-	}{
-		{"local-only stays silent even with open defaults", false, nil, config.DefaultPublicCSP, 0},
-		{"exposed with both defaults open", true, nil, config.DefaultPublicCSP, 2},
-		{"exposed, CORS set, CSP still permissive", true, []string{"https://app.example.com"}, config.DefaultPublicCSP, 1},
-		{"exposed, CSP tightened, CORS still wildcard", true, nil, strict, 1},
-		{"exposed but both tightened", true, []string{"https://app.example.com"}, strict, 0},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := permissiveDefaultIssues(c.hasDomains, c.corsOrigins, c.csp)
-			if len(got) != c.wantCount {
-				t.Errorf("permissiveDefaultIssues() = %v (%d issues), want %d", got, len(got), c.wantCount)
-			}
-		})
-	}
-}
-
 // TestResolveEngineDailyTokenBudget pins the precedence the spend guardrail
 // depends on: env var > admin/wizard DB setting > config (config.json value or
 // the safe built-in default).

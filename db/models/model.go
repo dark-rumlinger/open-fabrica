@@ -153,3 +153,77 @@ func GetModelByID(db *sql.DB, id int) (*LLMModel, error) {
 	}
 	return m, nil
 }
+
+// ClearAllDefaultModels clears is_default on every model row.
+func ClearAllDefaultModels(exec Executor) error {
+	_, err := exec.Exec("UPDATE llm_models SET is_default = 0")
+	return err
+}
+
+// SetDefaultProviderModel enables and marks a provider's chosen model_id (or
+// its first model when modelID is empty) as is_default = 1.
+func SetDefaultProviderModel(exec Executor, providerID int, modelID string) error {
+	if modelID != "" {
+		_, err := exec.Exec(
+			"UPDATE llm_models SET is_default = 1, is_enabled = 1 WHERE model_id = ? AND provider_id = ?",
+			modelID, providerID,
+		)
+		return err
+	}
+	_, err := exec.Exec(
+		"UPDATE llm_models SET is_default = 1, is_enabled = 1 WHERE id = (SELECT id FROM llm_models WHERE provider_id = ? ORDER BY id LIMIT 1)",
+		providerID,
+	)
+	return err
+}
+
+// DemoteOtherDefaultLLMModels clears is_default on all other llm-kind models.
+func DemoteOtherDefaultLLMModels(exec Executor, keepModelID int) error {
+	_, err := exec.Exec(
+		"UPDATE llm_models SET is_default = 0 WHERE is_default = 1 AND id != ? AND provider_id IN (SELECT id FROM providers WHERE kind = 'llm')",
+		keepModelID,
+	)
+	return err
+}
+
+// ClearModelDefault clears is_default on a single model row.
+func ClearModelDefault(exec Executor, modelID int) error {
+	_, err := exec.Exec("UPDATE llm_models SET is_default = 0 WHERE id = ?", modelID)
+	return err
+}
+
+// PromoteDefaultModel enables and marks a model as default for its provider,
+// reporting whether a matching row existed.
+func PromoteDefaultModel(exec Executor, providerID, modelID int) (bool, error) {
+	res, err := exec.Exec(
+		"UPDATE llm_models SET is_default = 1, is_enabled = 1 WHERE id = ? AND provider_id = ?",
+		modelID, providerID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// GetModelVendorAndID returns the provider vendor and upstream model_id for a model primary key.
+func GetModelVendorAndID(db *sql.DB, modelPK int) (vendor, modelID string, err error) {
+	err = db.QueryRow(
+		`SELECT p.vendor, m.model_id
+		   FROM llm_models m JOIN providers p ON p.id = m.provider_id
+		  WHERE m.id = ?`,
+		modelPK,
+	).Scan(&vendor, &modelID)
+	return vendor, modelID, err
+}
+
+// FindModelIDByVendorAndModelID resolves a portable (vendor, model_id) pair to a local llm_models.id.
+func FindModelIDByVendorAndModelID(db *sql.DB, vendor, modelID string) (int, error) {
+	var id int
+	err := db.QueryRow(
+		`SELECT m.id FROM llm_models m JOIN providers p ON p.id = m.provider_id
+		  WHERE p.vendor = ? AND m.model_id = ? LIMIT 1`,
+		vendor, modelID,
+	).Scan(&id)
+	return id, err
+}

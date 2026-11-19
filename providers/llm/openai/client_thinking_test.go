@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"openfabrica/internal/providercfg"
 	"openfabrica/providers/llm"
 )
 
@@ -352,4 +353,89 @@ func thinkingTypeOf(body map[string]any) string {
 	}
 	s, _ := m["type"].(string)
 	return s
+}
+
+func TestBuildRequestBody_OpenRouterReasoning(t *testing.T) {
+	t.Cleanup(llm.Caps.Reset)
+	c := &Client{
+		name: "openrouter-provider",
+		cfg:  providercfg.Config{ModelsShape: providercfg.ShapeOpenRouter},
+	}
+
+	off := c.buildRequestBody(thinkingReq("or-off", false), false)
+	if _, ok := off["thinking"]; ok {
+		t.Fatalf("openrouter must not emit thinking, got %v", off["thinking"])
+	}
+	if _, ok := off["enable_thinking"]; ok {
+		t.Fatalf("openrouter must not emit enable_thinking, got %v", off["enable_thinking"])
+	}
+	if r, ok := off["reasoning"].(map[string]any); !ok || r["enabled"] != false {
+		t.Fatalf("reasoning = %v, want {enabled: false}", off["reasoning"])
+	}
+
+	on := c.buildRequestBody(thinkingReq("or-on", true), false)
+	if r, ok := on["reasoning"].(map[string]any); !ok || r["enabled"] != true {
+		t.Fatalf("reasoning = %v, want {enabled: true}", on["reasoning"])
+	}
+
+	unset := c.buildRequestBody(llm.CompletionRequest{
+		Model: "or-nil", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	}, false)
+	if _, ok := unset["reasoning"]; ok {
+		t.Fatal("reasoning must be omitted when Thinking is nil")
+	}
+
+	// Mandatory-reasoning model: CapThinkingOff=No -> effort: low.
+	llm.Caps.Learn(c.CapKey("or-forced"), llm.CapThinkingOff, llm.No)
+	forced := c.buildRequestBody(thinkingReq("or-forced", false), false)
+	if r, ok := forced["reasoning"].(map[string]any); !ok || r["effort"] != "low" {
+		t.Fatalf("reasoning = %v, want {effort: low}", forced["reasoning"])
+	}
+
+	// Strict model rejecting the reasoning field itself: CapThinkingField=No -> omitted.
+	llm.Caps.Learn(c.CapKey("or-strict"), llm.CapThinkingField, llm.No)
+	strict := c.buildRequestBody(thinkingReq("or-strict", false), false)
+	if _, ok := strict["reasoning"]; ok {
+		t.Fatalf("reasoning must be omitted once CapThinkingField=No, got %v", strict["reasoning"])
+	}
+}
+
+func TestComplete_OpenRouterLearnsMandatoryReasoningAndRetries(t *testing.T) {
+	t.Cleanup(llm.Caps.Reset)
+	srv, bodies := recordingServer(t, func(n int, body map[string]any) (int, string) {
+		r, _ := body["reasoning"].(map[string]any)
+		if r["enabled"] == false {
+			return http.StatusBadRequest, `{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}`
+		}
+		return http.StatusOK, okCompletion
+	})
+	c := New(llm.Options{
+		Name:       "or-mandatory",
+		APIKey:     "k",
+		BaseURL:    srv.URL,
+		HTTPClient: srv.Client(),
+		Config:     providercfg.Config{ModelsShape: providercfg.ShapeOpenRouter},
+	})
+
+	if _, err := c.Complete(context.Background(), thinkingReq("deepseek/deepseek-r1", false)); err != nil {
+		t.Fatalf("Complete returned %v, want retry with reasoning.effort=low", err)
+	}
+	if len(*bodies) != 2 {
+		t.Fatalf("%d requests, want 2", len(*bodies))
+	}
+	retryR, _ := (*bodies)[1]["reasoning"].(map[string]any)
+	if retryR["effort"] != "low" {
+		t.Fatalf("retry reasoning = %v, want {effort: low}", retryR)
+	}
+}
+
+func TestMatchesUnknownThinkingField_DoesNotMatchReasoningEffort(t *testing.T) {
+	err := classify400(t, `{"error":{"message":"Unrecognized request argument supplied: reasoning_effort"}}`)
+	if matchesUnknownThinkingField(err) {
+		t.Fatal("reasoning_effort must not match matchesUnknownThinkingField")
+	}
+	orErr := classify400(t, `{"error":{"message":"Unknown parameter: 'reasoning'"}}`)
+	if !matchesUnknownThinkingField(orErr) {
+		t.Fatal("expected unknown 'reasoning' parameter to match matchesUnknownThinkingField")
+	}
 }

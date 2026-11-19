@@ -55,7 +55,7 @@ func (w *Worker) publishMessage(content string) {
 // text the chat UI recognises by its English wording (the expanded-brief marker),
 // text a model wrote, and the go-live summary, whose card the UI translates itself.
 func (w *Worker) publishVerbatim(content string) {
-	if content == "" {
+	if strings.TrimSpace(content) == "" {
 		return
 	}
 	w.saveChatMessage(llm.Message{Role: llm.RoleAssistant, Content: content})

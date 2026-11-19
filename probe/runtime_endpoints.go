@@ -27,7 +27,7 @@ const endpointProbeTimeout = 5 * time.Second
 
 // endpointProbeClient returns after response headers (so an open SSE stream does not
 // block it) and does not follow the project server anywhere surprising.
-var endpointProbeClient = &http.Client{}
+var endpointProbeClient = &http.Client{Timeout: endpointProbeTimeout}
 
 // RunSSESmoke dials every SSE endpoint's /api/<path>/stream route and asserts it
 // answers 200 with a text/event-stream content type. An SSE endpoint that 404s,

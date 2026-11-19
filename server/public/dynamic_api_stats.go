@@ -3,11 +3,13 @@ package public
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"openfabrica/security"
+	"openfabrica/store"
 )
 
 // allowedAggFuncsPublic is the whitelist of aggregate functions for the public API.
@@ -20,6 +22,10 @@ var allowedAggFuncsPublic = map[string]bool{
 // Also supports same column=value filters as apiList.
 func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sql.DB, endpointPath string) {
 	ep, err := h.loadEndpoint(projectDB, endpointPath)
+	if errors.Is(err, errEndpointMisconfigured) {
+		writeError(w, http.StatusInternalServerError, "endpoint misconfigured")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "endpoint not found")
 		return
@@ -28,7 +34,7 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 	// Authenticate and build the row-level security predicates the same way the
 	// CRUD paths do. Without the owner/tenant filter an aggregation on a scoped
 	// table would sum, count, or min/max across every owner's or tenant's rows.
-	rc, _, ok := h.buildAPIRequestContext(w, r, getProject(r), ep)
+	rc, ok := h.buildAPIRequestContext(w, r, getProject(r), ep)
 	if !ok {
 		return
 	}
@@ -90,16 +96,6 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 		}
 	}
 
-	physTable := ep.TableName
-	quotedGroupCols := make([]string, len(groupCols))
-	for i, gc := range groupCols {
-		quotedGroupCols[i] = security.QuoteIdent(gc)
-	}
-	var selectParts []string
-	selectParts = append(selectParts, quotedGroupCols...)
-	selectParts = append(selectParts, aggExpr+" AS result")
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectParts, ", "), security.QuoteIdent(physTable))
-
 	var whereClauses []string
 	var whereArgs []any
 	statsReserved := map[string]bool{"fn": true, "column": true, "group_by": true}
@@ -133,20 +129,18 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 		whereArgs = append(whereArgs, rc.TenantFilterVal)
 	}
 
-	if len(whereClauses) > 0 {
-		query += " WHERE " + strings.Join(whereClauses, " AND ")
-	}
-
-	if len(groupCols) > 0 {
-		query += " GROUP BY " + strings.Join(quotedGroupCols, ", ")
-		query += " ORDER BY " + strings.Join(quotedGroupCols, ", ")
+	statsQuery := store.DynamicStatsQuery{
+		Table:        ep.TableName,
+		AggExpr:      aggExpr,
+		GroupCols:    groupCols,
+		WhereClauses: whereClauses,
+		WhereArgs:    whereArgs,
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), dynamicAPIQueryTimeout)
 	defer cancel()
 	if len(groupCols) == 0 {
-		var result float64
-		err := projectDB.QueryRowContext(ctx, query, whereArgs...).Scan(&result) // #nosec G701 -- group/aggregate identifiers are QuoteIdent'd/validated; every value is a ? placeholder
+		result, err := store.QueryDynamicStatsScalar(ctx, projectDB, statsQuery)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "aggregation query failed")
 			return
@@ -158,35 +152,8 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 		return
 	}
 
-	rows, err := projectDB.QueryContext(ctx, query, whereArgs...) // #nosec G701 -- group/aggregate identifiers are QuoteIdent'd/validated; every value is a ? placeholder
+	results, err := store.QueryDynamicStatsGrouped(ctx, projectDB, statsQuery)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "aggregation query failed")
-		return
-	}
-	defer rows.Close()
-
-	var results []map[string]any
-	for rows.Next() {
-		scanTargets := make([]any, len(groupCols)+1)
-		values := make([]any, len(groupCols)+1)
-		for i := range scanTargets {
-			scanTargets[i] = &values[i]
-		}
-		if err := rows.Scan(scanTargets...); err != nil {
-			continue
-		}
-		row := make(map[string]any)
-		for i, gc := range groupCols {
-			if b, ok := values[i].([]byte); ok {
-				row[gc] = string(b)
-			} else {
-				row[gc] = values[i]
-			}
-		}
-		row["result"] = values[len(groupCols)]
-		results = append(results, row)
-	}
-	if err := rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "aggregation query failed")
 		return
 	}

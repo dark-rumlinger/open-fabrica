@@ -29,7 +29,7 @@ type DiagTestWebSocket struct {
 	EndpointPath string `arg:"endpoint_path,required" desc:"WebSocket endpoint path, e.g. 'call' (also accepts '/api/call/ws')."`
 	Room         string `arg:"room"                   desc:"Room to join. Defaults to a unique throwaway probe room."`
 	TwoPeer      bool   `arg:"two_peer"               desc:"Run the full two-peer flow (room_gated mint/join/refuse + one relayed message) instead of the default single-socket smoke."`
-	AuthToken    string `arg:"auth_token"             desc:"JWT for a requires_auth endpoint (every probe peer connects with it). Mint one with action=test_auth_flow - its result carries 'token'. Without it an auth-gated handshake is refused 401 before the upgrade."`
+	AuthToken    string `arg:"auth_token"             desc:"JWT for a requires_auth endpoint (every probe peer connects with it). Mint one with action=test_auth_flow - its result carries 'token'. Without it an auth-gated handshake is refused 401 before the upgrade." sensitive:"true"`
 	TimeoutMs    int    `arg:"timeout_ms"             desc:"Per-frame read timeout." default:"6000"`
 	// Action is sent by peer B through the same _action frame net.action() builds, so the
 	// probe exercises the reducer's app-action path (not just @join).

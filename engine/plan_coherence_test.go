@@ -641,3 +641,18 @@ func TestCoherence_RealtimeToolWithoutDecision_Flagged(t *testing.T) {
 		t.Fatalf("a plan with no realtime tool needs no decision, got %q", m)
 	}
 }
+
+func TestIsProjectShapeTopic(t *testing.T) {
+	for topic, want := range map[string]bool{
+		"project shape":  true,
+		"Project Shape":  true,
+		"shape":          true,
+		"response shape": false,
+		"data shape":     false,
+		"auth model":     false,
+	} {
+		if got := isProjectShapeTopic(topic); got != want {
+			t.Errorf("isProjectShapeTopic(%q) = %v, want %v", topic, got, want)
+		}
+	}
+}

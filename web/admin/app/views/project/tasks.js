@@ -20,14 +20,12 @@ export function renderProjectTasks(container, projectId, section) {
 
   // --- Scheduled Jobs tab ---
   const scheduledBody = h('div', { className: 'list-block' });
-  if (state.isAdmin()) {
-    scheduledBody.appendChild(h('div', { className: 'list-toolbar flex items-center justify-end mb-3' }, [
-      h('button', {
-        className: 'btn btn--primary btn--sm',
-        onClick: () => showCreateModal(projectId, () => list.reload()),
-      }, [h('span', { innerHTML: icon('plus') }), ' ' + t('tasks.create')]),
-    ]));
-  }
+  scheduledBody.appendChild(h('div', { className: 'list-toolbar flex items-center justify-end mb-3' }, [
+    h('button', {
+      className: 'btn btn--primary btn--sm',
+      onClick: () => showCreateModal(projectId, () => list.reload()),
+    }, [h('span', { innerHTML: icon('plus') }), ' ' + t('tasks.create')]),
+  ]));
 
   const listEl = h('div');
   scheduledBody.appendChild(listEl);
@@ -42,9 +40,7 @@ export function renderProjectTasks(container, projectId, section) {
       iconName: 'clock',
       title: t('tasks.empty.title'),
       description: t('tasks.empty.description'),
-      action: state.isAdmin()
-        ? { label: t('tasks.create'), onClick: () => showCreateModal(projectId, () => list.reload()) }
-        : null,
+      action: { label: t('tasks.create'), onClick: () => showCreateModal(projectId, () => list.reload()) },
     },
     errorMsg: t('tasks.loadFailed'),
   });
@@ -145,7 +141,7 @@ function jobStatusBadge(status) {
 }
 
 function renderJob(job, projectId, reload) {
-  const canCancel = state.isAdmin() && (job.status === 'pending' || job.status === 'running');
+  const canCancel = job.status === 'pending' || job.status === 'running';
   const actions = canCancel ? [{
     label: t('common.cancel'), iconName: 'x', kind: 'danger',
     onClick: () => modal.confirmDanger(t('tasks.cancelJob'), t('tasks.cancelBody', { id: job.id, type: job.type }),
@@ -187,7 +183,7 @@ function renderTask(task, projectId, reload) {
     ? h('span', { className: 'badge badge--success' }, t('common.enabled'))
     : h('span', { className: 'badge badge--danger' }, t('common.disabled'));
 
-  const adminActions = state.isAdmin() ? [
+  const adminActions = [
     { label: t('tasks.history'), onClick: () => showRunsModal(projectId, task) },
     {
       label: t('tasks.runNow'), iconName: 'zap',
@@ -219,7 +215,7 @@ function renderTask(task, projectId, reload) {
         }),
       ),
     },
-  ] : [];
+  ];
 
   return card({
     title: task.name,

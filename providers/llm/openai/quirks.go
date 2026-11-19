@@ -40,16 +40,22 @@ func init() {
 	})
 	llm.RegisterQuirkRule("openai-chat", llm.QuirkRule{
 		Cap:   llm.CapThinkingField,
-		Sent:  func(r llm.CompletionRequest) bool { return r.Thinking != nil },
+		Sent:  func(r llm.CompletionRequest) bool { return r.Thinking != nil || r.Effort != "" },
 		Match: matchesUnknownThinkingField,
 	})
 	llm.RegisterQuirkRule("openai-chat", llm.QuirkRule{
 		Cap: llm.CapReasoningEffort,
-		// Sent whenever the request would carry the field, which is any request
-		// asking for thinking off. Independent of whether the thinking rule has
-		// fired: an endpoint may take `thinking` and still reject the effort field.
-		Sent:  func(r llm.CompletionRequest) bool { return r.Thinking != nil && !*r.Thinking },
+		// Sent whenever the request would carry the field: when asking for
+		// thinking off (fallback to forcedReasoningEffort) or when Effort is set.
+		// Independent of whether the thinking rule has fired: an endpoint may
+		// take `thinking` and still reject the effort field.
+		Sent:  func(r llm.CompletionRequest) bool { return (r.Thinking != nil && !*r.Thinking) || r.Effort != "" },
 		Match: matchesReasoningEffort,
+	})
+	llm.RegisterQuirkRule("openai-chat", llm.QuirkRule{
+		Cap:   llm.CapVision,
+		Sent:  llm.RequestHasImages,
+		Match: llm.MatchesVisionUnsupported,
 	})
 }
 
@@ -103,14 +109,16 @@ func matchesForcedThinking(e *llm.Error) bool {
 		return false
 	}
 	low := strings.ToLower(e.Message)
-	if !strings.Contains(low, "thinking") {
+	if !strings.Contains(low, "thinking") && !strings.Contains(low, "reasoning") {
 		return false
 	}
 	return strings.Contains(low, "cannot be disabled") ||
 		strings.Contains(low, "can not be disabled") ||
 		strings.Contains(low, "cannot disable") ||
 		strings.Contains(low, "always engages in thinking") ||
-		strings.Contains(low, "must be enabled")
+		strings.Contains(low, "must be enabled") ||
+		strings.Contains(low, "is mandatory") ||
+		strings.Contains(low, "is required")
 }
 
 // unknownThinkingParamRe anchors the FIELD NAME to the unknown-parameter
@@ -118,15 +126,16 @@ func matchesForcedThinking(e *llm.Error) bool {
 // argument", strict gateways' variants). Anchored on purpose: error messages
 // carry the provider tag, and a provider merely NAMED with "thinking" must not
 // convert an unrelated unknown-parameter complaint into a demotion.
+// The trailing \b ensures `reasoning_effort` does not match `reasoning`.
 var unknownThinkingParamRe = regexp.MustCompile(
-	`(?i)(?:unknown parameter|unknown field|unrecognized request argument supplied|unsupported parameter|unexpected keyword(?: argument)?)[:\s]+['"]?(?:enable_)?thinking\b`)
+	`(?i)(?:unknown parameter|unknown field|unrecognized request argument supplied|unsupported parameter|unexpected keyword(?: argument)?)[:\s]+['"]?(?:(?:enable_)?thinking|reasoning)\b`)
 
 // extraThinkingFieldRe recognises the pydantic shape, where the field name sits
 // on its own line shortly before "extra fields not permitted". The line break
 // reaches us as a LITERAL backslash-n (ClassifyHTTPError keeps the raw JSON
 // body), so the lead-in accepts the escape as well as real whitespace.
 var extraThinkingFieldRe = regexp.MustCompile(
-	`(?i)(?:\\n|\s|")(?:enable_)?thinking\b[\s\S]{0,60}extra fields not permitted`)
+	`(?i)(?:\\n|\s|")(?:(?:enable_)?thinking|reasoning)\b[\s\S]{0,60}extra fields not permitted`)
 
 // matchesUnknownThinkingField recognises a strict endpoint refusing the
 // thinking toggle field itself in either direction. A can't-disable complaint

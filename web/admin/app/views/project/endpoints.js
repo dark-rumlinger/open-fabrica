@@ -64,14 +64,12 @@ async function loadEndpoints(container, projectId) {
 function renderEndpoints(container, apiEndpoints, authEndpoints, projectId) {
   clear(container);
   const reload = () => loadEndpoints(container, projectId);
-  const canWrite = state.isAdmin();
 
   // Data APIs are the one kind this page can edit or delete. Every other kind
   // (AI endpoints, WebSockets, uploads, exports, functions ...) is created and
-  // changed by the builder, so it is listed read-only. Rows from an older server
-  // carry no kind and are treated as data APIs.
-  const dataApis = apiEndpoints.filter((e) => !e.kind || e.kind === 'api');
-  const otherEndpoints = apiEndpoints.filter((e) => e.kind && e.kind !== 'api');
+  // changed by the builder, so it is listed read-only.
+  const dataApis = apiEndpoints.filter((e) => e.kind === 'api');
+  const otherEndpoints = apiEndpoints.filter((e) => e.kind !== 'api');
 
   // Nothing yet: the empty state carries the action, so there is no lone
   // button hanging above an otherwise blank panel.
@@ -80,19 +78,17 @@ function renderEndpoints(container, apiEndpoints, authEndpoints, projectId) {
       iconName: 'zap',
       title: t('api.empty.title'),
       description: t('api.empty.description'),
-      action: canWrite ? { label: t('api.create'), onClick: () => showCreateModal(projectId, reload) } : null,
+      action: { label: t('api.create'), onClick: () => showCreateModal(projectId, reload) },
     }));
     return;
   }
 
-  if (canWrite) {
-    container.appendChild(h('div', { className: 'flex items-center justify-end mb-3' }, [
-      h('button', {
-        className: 'btn btn--primary btn--sm',
-        onClick: () => showCreateModal(projectId, reload),
-      }, [h('span', { innerHTML: icon('plus') }), ' ' + t('api.create')]),
-    ]));
-  }
+  container.appendChild(h('div', { className: 'flex items-center justify-end mb-3' }, [
+    h('button', {
+      className: 'btn btn--primary btn--sm',
+      onClick: () => showCreateModal(projectId, reload),
+    }, [h('span', { innerHTML: icon('plus') }), ' ' + t('api.create')]),
+  ]));
 
   if (dataApis.length > 0) {
     container.appendChild(sectionHeader(t('api.dataApis')));
@@ -194,7 +190,7 @@ function renderApiCard(ep, projectId, reload) {
         h('code', { style: { fontSize: 'var(--text-sm)' } }, `/api/${ep.path}`),
         copyUrlBtn(ep.path),
       ]),
-      ...(state.isAdmin() ? [h('div', { className: 'flex items-center gap-1' }, [
+      h('div', { className: 'flex items-center gap-1' }, [
         h('button', {
           className: 'btn btn--ghost btn--sm',
           title: t('api.edit'),
@@ -211,7 +207,7 @@ function renderApiCard(ep, projectId, reload) {
               `/admin/api/projects/${projectId}/endpoints/${ep.id}`, t('api.deleted'), reload);
           },
         }, [h('span', { innerHTML: icon('trash') })]),
-      ])] : []),
+      ]),
     ]),
     h('div', { style: { padding: '0 12px 12px' } }, [
       h('div', { className: 'flex items-center gap-2 mb-2' }, [
@@ -228,7 +224,7 @@ function renderApiCard(ep, projectId, reload) {
       llmBudgetLine(ep),
     ]),
   ]);
-  if (state.isAdmin()) clickable(card, () => showEditModal(ep, projectId, reload));
+  clickable(card, () => showEditModal(ep, projectId, reload));
   return card;
 }
 
@@ -263,7 +259,7 @@ function renderAuthCard(ep, projectId, reload) {
         copyUrlBtn(ep.path),
         h('span', { className: 'badge badge--warning' }, t('sp.auth')),
       ]),
-      ...(state.isAdmin() ? [h('button', {
+      h('button', {
         className: 'btn btn--ghost btn--sm',
         title: t('api.deleteLogin'),
         'aria-label': t('api.deleteLogin'),
@@ -272,7 +268,7 @@ function renderAuthCard(ep, projectId, reload) {
           confirmDelete(t('api.deleteLoginBody', { path: `/api/${ep.path}` }),
             `/admin/api/projects/${projectId}/auth-endpoints/${ep.id}`, t('api.loginDeleted'), reload);
         },
-      }, [h('span', { innerHTML: icon('trash') })])] : []),
+      }, [h('span', { innerHTML: icon('trash') })]),
     ]),
     h('div', { style: { padding: '0 12px 12px' } }, [
       h('div', { className: 'flex items-center gap-2 mb-2' }, [

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"openfabrica/store"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -70,7 +72,7 @@ func TestRunChatMessages_SpaceFormatWindow(t *testing.T) {
 		t.Fatalf("seed other: %v", err)
 	}
 
-	build, err := loadBuildSummary(db, "run_x")
+	build, err := store.LoadBuildSummary(db, "run_x")
 	if err != nil {
 		t.Fatalf("loadBuildSummary: %v", err)
 	}
@@ -95,7 +97,7 @@ func TestRunChatMessages_SpaceFormatWindow(t *testing.T) {
 
 	// datetime()-normalized window returns exactly the two in-window brain
 	// messages and excludes the out-of-window one and the other session.
-	msgs, err := runChatMessages(db, build.StartedAt, build.CompletedAt)
+	msgs, err := store.LoadRunChatMessages(db, build.StartedAt, build.CompletedAt)
 	if err != nil {
 		t.Fatalf("runChatMessages: %v", err)
 	}

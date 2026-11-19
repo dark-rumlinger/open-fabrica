@@ -30,12 +30,10 @@ function renderModels(provider, modelsList, container) {
   clear(container);
 
   const headerItems = [h('h5', { className: 'text-sm font-medium' }, t('prov.models'))];
-  if (state.isAdmin()) {
-    headerItems.push(h('button', {
-      className: 'btn btn--sm btn--primary',
-      onClick: () => showAddModelModal(provider, container),
-    }, [h('span', { innerHTML: icon('plus') }), t('models.add')]));
-  }
+  headerItems.push(h('button', {
+    className: 'btn btn--sm btn--primary',
+    onClick: () => showAddModelModal(provider, container),
+  }, [h('span', { innerHTML: icon('plus') }), t('models.add')]));
   container.appendChild(h('div', { className: 'flex items-center justify-between mt-4 mb-2' }, headerItems));
 
   if (!modelsList?.length) {
@@ -86,7 +84,7 @@ function renderModelRow(provider, m, container, idx) {
         : null,
       modelSpecLine(m),
     ].filter(Boolean)),
-    ...(state.isAdmin() ? [h('div', { className: 'flex items-center gap-1' }, [
+    h('div', { className: 'flex items-center gap-1' }, [
       !m.is_default ? h('button', {
         className: 'btn btn--sm',
         title: t('prov.setDefault'),
@@ -114,7 +112,7 @@ function renderModelRow(provider, m, container, idx) {
             toast.error(humanizeError(err.message));
           }
         },
-      }, [h('span', { innerHTML: icon(disabled ? 'eye' : 'eye-off') })]),
+      }, [h('span', { innerHTML: icon(disabled ? 'eye-off' : 'eye') })]),
       h('button', {
         className: 'btn btn--sm',
         title: t('models.edit'),
@@ -139,7 +137,7 @@ function renderModelRow(provider, m, container, idx) {
           },
         ),
       }, [h('span', { innerHTML: icon('trash') })]),
-    ].filter(Boolean))] : []),
+    ].filter(Boolean)),
   ]);
 }
 

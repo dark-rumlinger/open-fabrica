@@ -45,16 +45,16 @@ func TestFirstProjectFrameFindsFilesFrame(t *testing.T) {
 		},
 		StackTrace: &runtime.StackTrace{CallFrames: []*runtime.CallFrame{
 			frame("https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", "onFirstUse", 20275),
-			frame("http://stellar-heron.localhost:5733/files/lego.js", "boot", 152),
-			frame("http://stellar-heron.localhost:5733/files/lego.js", "", 10),
+			frame("http://app.localhost/files/main.js", "boot", 152),
+			frame("http://app.localhost/files/main.js", "", 10),
 		}},
 	}
-	want := "/files/lego.js:153 in boot"
+	want := "/files/main.js:153 in boot"
 	if got := FirstProjectFrame(ed); got != want {
 		t.Errorf("FirstProjectFrame = %q, want %q", got, want)
 	}
 	msg := FormatExceptionForModel(ed, 1200)
-	if !strings.Contains(msg, `first_project_frame: "/files/lego.js:153 in boot"`) {
+	if !strings.Contains(msg, `first_project_frame: "/files/main.js:153 in boot"`) {
 		t.Errorf("formatted message must carry the project frame, got %q", msg)
 	}
 }
@@ -78,10 +78,10 @@ func TestFirstProjectFrameDescriptionFallback(t *testing.T) {
 	ed := &runtime.ExceptionDetails{
 		Text: "Uncaught",
 		Exception: &runtime.RemoteObject{
-			Description: "ReferenceError: makeBoard is not defined\n    at init (http://x.localhost:5733/files/tetris/entry.js:101:3)",
+			Description: "ReferenceError: initView is not defined\n    at init (http://app.localhost/files/app/entry.js:101:3)",
 		},
 	}
-	if got := FirstProjectFrame(ed); got != "/files/tetris/entry.js:101" {
+	if got := FirstProjectFrame(ed); got != "/files/app/entry.js:101" {
 		t.Errorf("description fallback = %q", got)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"openfabrica/config"
 	"openfabrica/events"
 	"openfabrica/internal/dbh"
+	"openfabrica/internal/stringutil"
 	"openfabrica/security"
 )
 
@@ -41,14 +42,16 @@ type ToolContext struct {
 	// the cap bounds a whole run (build plus repair, across a crash-resume restart)
 	// rather than one process lifetime. Empty for LIVE owner chat and scheduled
 	// tasks, which fall back to the in-memory per-project budget.
-	RunID      string
-	Logger     *slog.Logger
-	Bus        *events.Bus
-	Encryptor  *security.Encryptor
-	JWTManager *security.JWTManager // for self-testing: minting auth tokens for protected endpoints
-	PublicPort int                  // public server port for self-testing (0 = use config.DefaultPublicPort)
-	DataDir    string               // instance data directory ("" = use config.DefaultDataDir)
-	EmbedFunc  func(ctx context.Context, texts []string) ([][]float32, error)
+	RunID                   string
+	Logger                  *slog.Logger
+	Bus                     *events.Bus
+	Encryptor               *security.Encryptor
+	JWTManager              *security.JWTManager // for self-testing: minting auth tokens for protected endpoints
+	PublicPort              int                  // public server port for self-testing (0 = use config.DefaultPublicPort)
+	DataDir                 string               // instance data directory ("" = use config.DefaultDataDir)
+	ExtraDownloadExtensions []string             // additive safe extensions for manage_web_fetch action=download
+	WebFetchMaxAssetMB      int                  // max MiB for manage_web_fetch action=download (0 = 25 MiB)
+	EmbedFunc               func(ctx context.Context, texts []string) ([][]float32, error)
 
 	// ReadTracker (optional) deduplicates full artifact-body reads within one
 	// build session so a repeated get of an unchanged file returns a stub
@@ -64,6 +67,15 @@ type ToolContext struct {
 	// HiddenGuides (optional) names guide slugs no tool can serve here (every tool
 	// they cover is gated off), which manage_guides leaves out. Nil means none.
 	HiddenGuides map[string]bool
+
+	// RunScheduleNowFunc (optional) executes a scheduled task synchronously on
+	// demand, returning its execution summary. Nil outside the engine, where
+	// run_schedule_now falls back to queuing for the next scheduler tick.
+	RunScheduleNowFunc func(ctx context.Context, taskID int64) (map[string]any, error)
+
+	// RunScheduleByNameFunc (optional) executes a named scheduled task for
+	// user-flow replays (test_flows). Nil outside the engine composition root.
+	RunScheduleByNameFunc func(ctx context.Context, projectID int, name string) error
 }
 
 // ChangedBy is the write-attribution label for an artifact version: every
@@ -217,6 +229,10 @@ type Param struct {
 	Max    float64
 	HasMin bool
 	HasMax bool
+
+	// Sensitive marks a credential arg (`sensitive:"true"`). The LLM log
+	// redactor blanks these; see tools/llmredact.
+	Sensitive bool
 }
 
 // Example is one fully-formed call shown to the LLM in the rendered tool doc.
@@ -271,6 +287,10 @@ type ToolDef struct {
 	// FullResultInEvents includes the full result string in event payloads
 	// instead of truncating; set on tools whose UI relies on structured data.
 	FullResultInEvents bool
+
+	// PreservesFlows marks bookkeeping/self-managing tools whose writes do not
+	// alter the app or of_test.js, so they do not invalidate replaybudget.
+	PreservesFlows bool
 
 	// RequestsPause, when set, decides after a successful call whether the
 	// pipeline should pause for owner input. Used by question-asking tools.
@@ -342,6 +362,12 @@ func (d *ToolDef) Parameters() map[string]any {
 			// Some providers reject an array schema with no items; an empty schema
 			// leaves the elements unconstrained.
 			prop["items"] = map[string]any{}
+		}
+		if p.Type == "object" {
+			// Mark free-form map objects as open to arbitrary keys so
+			// schema-guided tool decoders don't treat an empty object schema
+			// as having no valid keys.
+			prop["additionalProperties"] = true
 		}
 		if p.HasDefault {
 			prop["default"] = typedDefault(p)
@@ -516,7 +542,7 @@ func (d *ToolDef) ignoredArgSuggestion(action, key string, declared map[string]b
 	sort.Strings(names)
 	best, bestDist := "", 3
 	for _, name := range names {
-		if dist := editDistance(key, name); dist < bestDist {
+		if dist := stringutil.Levenshtein(key, name); dist < bestDist {
 			best, bestDist = name, dist
 		}
 	}
@@ -524,27 +550,6 @@ func (d *ToolDef) ignoredArgSuggestion(action, key string, declared map[string]b
 		return fmt.Sprintf(" (did you mean %s?)", best)
 	}
 	return " (not an argument of this action)"
-}
-
-// editDistance is the Levenshtein distance between a and b, for did-you-mean hints.
-func editDistance(a, b string) int {
-	prev := make([]int, len(b)+1)
-	for j := range prev {
-		prev[j] = j
-	}
-	for i := 1; i <= len(a); i++ {
-		cur := make([]int, len(b)+1)
-		cur[0] = i
-		for j := 1; j <= len(b); j++ {
-			cost := 1
-			if a[i-1] == b[j-1] {
-				cost = 0
-			}
-			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
-		}
-		prev = cur
-	}
-	return prev[len(b)]
 }
 
 // inferMissingAction fills a missing action when the supplied args match

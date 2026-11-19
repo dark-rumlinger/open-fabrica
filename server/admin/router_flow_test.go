@@ -149,11 +149,11 @@ func TestAdminOnlySystemPagesThroughTheRouter(t *testing.T) {
 	}
 }
 
-// Every signed-in account, whatever its role, may change its own password; doing so
-// ends the other sessions and the response carries a token that keeps this one.
+// An admin may change its own password; doing so ends the other sessions and
+// the response carries a token that keeps this one.
 func TestChangePasswordThroughTheRouter(t *testing.T) {
 	f := newAdminFlow(t)
-	for _, name := range []string{"owner", "viewer"} {
+	for _, name := range []string{"owner"} {
 		old := f.login(name, flowPassword)
 		const next = "Fresh-Pass-2@"
 
@@ -325,15 +325,18 @@ func (f *fakeFirewall) Remove(_ context.Context, name string) (firewall.Result, 
 	return firewall.Result{OK: name == firewall.RuleName}, nil
 }
 
-// Anyone signed in may read the firewall state, but adding or removing the rule is
-// an admin action, and removing it asks for Open Fabrica's own rule by name.
+// The firewall state and its rule changes are for admins only, and removing the
+// rule asks for Open Fabrica's own rule by name.
 func TestFirewallRuleChangesAreAdminOnly(t *testing.T) {
 	f := newAdminFlow(t)
 	admin := f.login("owner", flowPassword)
 	viewer := f.login("viewer", flowPassword)
 
-	if rec := f.do(http.MethodGet, "/admin/api/firewall/status", viewer, ""); rec.Code != http.StatusOK {
-		t.Errorf("status as a non-admin: %d, want 200", rec.Code)
+	if rec := f.do(http.MethodGet, "/admin/api/firewall/status", viewer, ""); rec.Code != http.StatusForbidden {
+		t.Errorf("status as a non-admin: %d, want 403", rec.Code)
+	}
+	if rec := f.do(http.MethodGet, "/admin/api/firewall/status", admin, ""); rec.Code != http.StatusOK {
+		t.Errorf("status as admin: %d, want 200", rec.Code)
 	}
 	for _, action := range []string{"allow", "remove"} {
 		path := "/admin/api/firewall/" + action
@@ -358,5 +361,23 @@ func TestFirewallRuleChangesAreAdminOnly(t *testing.T) {
 	}
 	if got := f.do(http.MethodGet, "/admin/api/firewall/status", admin, "").Body.String(); !strings.Contains(got, `"rule_present":true`) {
 		t.Errorf("the card would not show the rule after adding it: %s", got)
+	}
+}
+
+// The panel has one kind of account. A signed-in non-admin reaches nothing,
+// reads included.
+func TestNonAdminReachesNoAdminRoute(t *testing.T) {
+	f := newAdminFlow(t)
+	viewer := f.login("viewer", flowPassword)
+	for _, path := range []string{
+		"/admin/api/projects",
+		"/admin/api/users",
+		"/admin/api/providers",
+		"/admin/api/system/status",
+		"/admin/api/auth/preferences",
+	} {
+		if rec := f.do(http.MethodGet, path, viewer, ""); rec.Code != http.StatusForbidden {
+			t.Errorf("GET %s as a non-admin: status %d, want 403", path, rec.Code)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"openfabrica/internal/endpoints"
+	"openfabrica/internal/mediatype"
 	"openfabrica/store"
 	"openfabrica/tools"
 )
@@ -26,35 +27,14 @@ var defaultUploadAllowedTypes = []string{
 	"application/zip",
 }
 
-// dangerousUploadMIMEs is rejected at endpoint creation. The runtime never
-// dispatches binaries, but allowing executable MIME types invites browsers and
-// downstream tools to treat the asset as runnable.
-var dangerousUploadMIMEs = map[string]bool{
-	"application/x-msdownload":                      true,
-	"application/x-msdos-program":                   true,
-	"application/x-executable":                      true,
-	"application/x-mach-binary":                     true,
-	"application/x-dosexec":                         true,
-	"application/x-sh":                              true,
-	"application/x-bat":                             true,
-	"application/x-bsh":                             true,
-	"application/x-csh":                             true,
-	"application/java-archive":                      true,
-	"application/vnd.microsoft.portable-executable": true,
-}
-
-// validateUploadAllowedTypes checks each entry against the deny-list. Globs
-// containing "executable" or "x-msi" are rejected too, even if not in the map.
+// validateUploadAllowedTypes checks each entry against the deny-list.
 func validateUploadAllowedTypes(types []string) error {
 	for _, t := range types {
 		lower := strings.ToLower(strings.TrimSpace(t))
 		if lower == "" {
 			return fmt.Errorf("allowed_types contains an empty entry")
 		}
-		if dangerousUploadMIMEs[lower] {
-			return fmt.Errorf("MIME type %q is not allowed (executable content)", t)
-		}
-		if strings.Contains(lower, "executable") || strings.Contains(lower, "x-msi") {
+		if mediatype.IsDangerousMIME(lower) {
 			return fmt.Errorf("MIME type %q is not allowed (executable content)", t)
 		}
 	}

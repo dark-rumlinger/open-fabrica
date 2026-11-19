@@ -19,16 +19,16 @@ func arityKeys(ms []ArityMismatch) []string {
 // and the intended value is dropped, leaving a later call through it to throw.
 func TestArity_OverAppliedFixedArityFn(t *testing.T) {
 	src := `
-function buildFlora(planet) {
-  const name = genFloraName(planet, planet.rng());
+function processItem(ctx) {
+  const name = formatLabel(ctx, ctx.next());
   return name;
 }
-function genFloraName(rng) {
-  return NAMES[Math.floor(rng() * NAMES.length)];
+function formatLabel(next) {
+  return LABELS[Math.floor(next() * LABELS.length)];
 }
 `
-	got := arityKeys(ArityOverApplications("game.terrain.js", src))
-	want := []string{"genFloraName/2/1"}
+	got := arityKeys(ArityOverApplications("app.module.js", src))
+	want := []string{"formatLabel/2/1"}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("want %v, got %v", want, got)
 	}

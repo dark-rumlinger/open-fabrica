@@ -90,7 +90,6 @@ function renderProvider(prov, projectId, reload) {
     actions: [
       {
         label: prov.is_enabled ? t('tasks.disable') : t('tasks.enable'),
-        adminOnly: true,
         className: `btn btn--sm ${prov.is_enabled ? 'btn--secondary' : 'btn--primary'}`,
         onClick: () => runAction(
           () => post(`/admin/api/projects/${projectId}/service-providers/${prov.id}/toggle`),
@@ -98,7 +97,7 @@ function renderProvider(prov, projectId, reload) {
         ),
       },
       {
-        label: t('common.delete'), kind: 'danger', adminOnly: true,
+        label: t('common.delete'), kind: 'danger',
         onClick: () => modal.confirmDanger(t('psvc.deleteTitle'), t('psvc.deleteBody', { name: prov.name }), () => runAction(
           () => del(`/admin/api/projects/${projectId}/service-providers/${prov.id}`),
           { success: t('psvc.deleted'), onDone: reload },

@@ -1366,6 +1366,7 @@ CREATE TABLE IF NOT EXISTS of_flow_budget (
     partial_depth INTEGER NOT NULL DEFAULT 0,  -- furthest a red single-flow replay got since the last full run
     stall_count   INTEGER NOT NULL DEFAULT 0,  -- replays in a row without progress
     red           INTEGER NOT NULL DEFAULT 0,  -- 1 when the latest replay failed
+    clean_green   INTEGER NOT NULL DEFAULT 0,  -- 1 when the latest full replay passed with no edits since
     updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1401,5 +1402,68 @@ CREATE TABLE IF NOT EXISTS of_knowledge_bases (
     name TEXT NOT NULL UNIQUE,
     table_name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Durable outbox for outgoing webhook deliveries so retries survive restarts
+-- and every delivery carries a stable delivery_id for receiver idempotency.
+CREATE TABLE IF NOT EXISTS of_webhook_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    delivery_id TEXT NOT NULL UNIQUE,
+    webhook_id INTEGER NOT NULL,
+    webhook_name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    secret_encrypted TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL,
+    body TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    next_retry_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_pending
+    ON of_webhook_outbox(status, next_retry_at);
+
+-- Per-project MQTT broker configuration, device credentials/ACLs, retained
+-- messages, and topic ingest rules.
+
+CREATE TABLE IF NOT EXISTS of_mqtt_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    allow_anonymous INTEGER NOT NULL DEFAULT 0,
+    max_clients INTEGER NOT NULL DEFAULT 100,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS of_mqtt_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL UNIQUE,
+    secret_hash TEXT NOT NULL,
+    allow_pub TEXT NOT NULL DEFAULT '#',
+    allow_sub TEXT NOT NULL DEFAULT '#',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_seen_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS of_mqtt_retained (
+    topic TEXT PRIMARY KEY,
+    payload BLOB NOT NULL,
+    qos INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS of_mqtt_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    topic_filter TEXT NOT NULL,
+    target_table TEXT NOT NULL DEFAULT '',
+    function_path TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

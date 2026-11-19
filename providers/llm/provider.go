@@ -42,6 +42,35 @@ func EphemeralCacheControlTTL(ttl string) map[string]string {
 // of its messages to keep a reserved message out of candidacy - a prefix
 // keeps indices aligned with the full slice. A budget of zero or less
 // selects nothing.
+// CacheBreakpointBudget computes the per-request cache_control budget for an append-only
+// history, single-homing the arithmetic both provider clients share: at most 4 breakpoints
+// (a hard API limit), minus one for the cached system block, minus one for the last-tool
+// block when reserveTool holds (Anthropic reserves it; OpenAI-format tools sit in a separate
+// top-level array, so it passes false), minus one reserved for the final message. Returns the
+// candidate messages to stamp (the final message excluded, since the reserved tail breakpoint
+// already covers it), the budget left for them, and whether the final message gets that
+// reserved breakpoint. Pass candidates+budget straight to CacheBreakpointIndices; each client
+// keeps its own on/off gating.
+func CacheBreakpointBudget(req CompletionRequest, reserveTool bool) (candidates []Message, userBudget int, stampFinal bool) {
+	const max = 4
+	base := 0
+	if req.CacheSystem && req.System != "" {
+		base++ // system block
+	}
+	if reserveTool && req.CacheSystem && req.ResponseSchema == nil && len(req.Tools) > 0 {
+		base++ // last-tool block
+	}
+	stampFinal = req.CacheSystem && len(req.Messages) > 0
+	if stampFinal {
+		base++ // final-message block, stamped after the message loop
+	}
+	candidates = req.Messages
+	if stampFinal {
+		candidates = req.Messages[:len(req.Messages)-1]
+	}
+	return candidates, max - base, stampFinal
+}
+
 func CacheBreakpointIndices(msgs []Message, budget int) map[int]bool {
 	out := map[int]bool{}
 	if budget <= 0 {
@@ -111,6 +140,23 @@ type ContextWindowProvider interface {
 // manual-add flow, the admin endpoint surfaces a clear error.
 type ModelLister interface {
 	ListModels(ctx context.Context) ([]ModelInfo, error)
+}
+
+// As unwraps provider decorators (such as LoggedProvider) to check whether the
+// underlying provider implements an optional capability interface T.
+func As[T any](p Provider) (T, bool) {
+	for p != nil {
+		if v, ok := p.(T); ok {
+			return v, true
+		}
+		u, ok := p.(interface{ Unwrap() Provider })
+		if !ok {
+			break
+		}
+		p = u.Unwrap()
+	}
+	var zero T
+	return zero, false
 }
 
 // ModelInfo is the discovery-time shape. Every backend must be able to fill it
@@ -225,6 +271,11 @@ type CompletionResponse struct {
 	// the model's actual answer (visible text or tool_calls) is still in
 	// Content / ToolCalls.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+
+	// ReasoningDetails carries opaque provider reasoning blocks (OpenRouter's
+	// `reasoning_details` array) so multi-turn callers can echo them back
+	// unmodified on the next assistant turn.
+	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
 // Error codes classify provider failures so the retry layer can route them

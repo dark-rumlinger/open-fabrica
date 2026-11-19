@@ -170,13 +170,18 @@ func TestAdminLogin_LockoutAfterThreshold(t *testing.T) {
 }
 
 // TestAdminAuthGuard exercises the middleware that gates every protected admin
-// route: it must accept only an unscoped (ProjectID==0) token whose version still
-// matches the DB, and reject everything else.
+// route: it must accept only an admin-audience token whose version still matches
+// the DB, and reject everything else.
 func TestAdminAuthGuard(t *testing.T) {
 	h, mem, user := newAuthTestHandler(t)
 	guard := adminAuthGuard(h.deps)
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
+	// adminClaims are claims as the JWT manager mints them for an admin.
+	adminClaims := func(c security.Claims) *security.Claims {
+		c.Audience = []string{security.AudienceAdmin}
+		return &c
+	}
 	call := func(claims *security.Claims) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/admin/api/system", nil)
 		if claims != nil {
@@ -188,7 +193,7 @@ func TestAdminAuthGuard(t *testing.T) {
 	}
 
 	// Valid unscoped admin token whose version matches the DB -> passes through.
-	if rec := call(&security.Claims{ProjectID: 0, UserID: user.ID, Username: "admin", Role: "admin", TokenVersion: user.TokenVersion}); rec.Code != http.StatusOK {
+	if rec := call(adminClaims(security.Claims{UserID: user.ID, Username: "admin", Role: "admin", TokenVersion: user.TokenVersion})); rec.Code != http.StatusOK {
 		t.Errorf("valid admin token: status = %d, want 200", rec.Code)
 	}
 	// No claims in context -> 401.
@@ -199,15 +204,19 @@ func TestAdminAuthGuard(t *testing.T) {
 	if rec := call(&security.Claims{ProjectID: 7, UserID: user.ID, Role: "admin"}); rec.Code != http.StatusForbidden {
 		t.Errorf("project-scoped token: status = %d, want 403", rec.Code)
 	}
+	// An unscoped token without the admin audience -> 403.
+	if rec := call(&security.Claims{UserID: user.ID, Role: "admin", TokenVersion: user.TokenVersion}); rec.Code != http.StatusForbidden {
+		t.Errorf("token without the admin audience: status = %d, want 403", rec.Code)
+	}
 	// Unknown user id -> 401 (token_version lookup fails).
-	if rec := call(&security.Claims{ProjectID: 0, UserID: 999999, TokenVersion: 0}); rec.Code != http.StatusUnauthorized {
+	if rec := call(adminClaims(security.Claims{UserID: 999999})); rec.Code != http.StatusUnauthorized {
 		t.Errorf("unknown user: status = %d, want 401", rec.Code)
 	}
 	// Bump the stored token_version: a token minted at the old version is stale.
 	if _, err := mem.Exec("UPDATE users SET token_version = token_version + 1 WHERE id = ?", user.ID); err != nil {
 		t.Fatalf("bump token_version: %v", err)
 	}
-	if rec := call(&security.Claims{ProjectID: 0, UserID: user.ID, TokenVersion: user.TokenVersion}); rec.Code != http.StatusUnauthorized {
+	if rec := call(adminClaims(security.Claims{UserID: user.ID, TokenVersion: user.TokenVersion})); rec.Code != http.StatusUnauthorized {
 		t.Errorf("stale token_version: status = %d, want 401", rec.Code)
 	}
 }
@@ -294,7 +303,7 @@ func TestRevokeSessionsInvalidatesOldTokensOnly(t *testing.T) {
 		return rec.Code
 	}
 
-	old, err := h.deps.JWTManager.Generate(security.TokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
+	old, err := h.deps.JWTManager.GenerateAdmin(security.AdminTokenRequest{UserID: user.ID, Username: user.Username, Role: user.Role, TokenVersion: user.TokenVersion})
 	if err != nil {
 		t.Fatal(err)
 	}

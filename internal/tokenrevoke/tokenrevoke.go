@@ -118,7 +118,7 @@ func (s *Store) ensureLoaded(r *sql.DB, projectID int) {
 		}
 		err = rows.Err()
 	}
-	if err != nil && !strings.Contains(err.Error(), "no such table") {
+	if err != nil {
 		slog.Warn("token revocations could not be read; sessions are not being checked until they can", "project_id", projectID, "error", err)
 		return
 	}

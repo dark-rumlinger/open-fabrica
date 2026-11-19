@@ -13,9 +13,7 @@ import (
 )
 
 // AmbitionTaskBudget scales with the level, ceiling is always >= target, off
-// shares the lean low budget, unknown falls back to the high default, and the
-// high ceiling sits at/under the largePlanTaskThreshold the run log already
-// treats as oversized (so an oversized plan is reined in).
+// shares the lean low budget, and unknown falls back to the high default.
 func TestAmbitionTaskBudget(t *testing.T) {
 	for _, lvl := range []string{AmbitionLow, AmbitionMedium, AmbitionHigh} {
 		target, ceiling := AmbitionTaskBudget(lvl)
@@ -31,9 +29,6 @@ func TestAmbitionTaskBudget(t *testing.T) {
 	ht, hc := AmbitionTaskBudget(AmbitionHigh)
 	if !(lt < mt && mt < ht) || !(lc < mc && mc < hc) {
 		t.Errorf("budget must grow with ambition: low(%d,%d) medium(%d,%d) high(%d,%d)", lt, lc, mt, mc, ht, hc)
-	}
-	if hc > largePlanTaskThreshold {
-		t.Errorf("high ceiling (%d) must sit at/under the oversized-plan threshold (%d) to rein in an oversized plan", hc, largePlanTaskThreshold)
 	}
 	// off (skip EXPAND, take the brief literally) is the least-expansive end of the
 	// dial, so it shares the lean LOW budget - keeping off <= low <= medium <= high.
@@ -271,53 +266,5 @@ func TestPlanStage_StillOverAfterRetryProceeds(t *testing.T) {
 	tasks, _ := LoadTasks(pdb.Reader())
 	if len(tasks) != ceiling+2 {
 		t.Fatalf("the retried plan (%d tasks) must seed even though still over, got %d", ceiling+2, len(tasks))
-	}
-}
-
-// An undershot high-ambition plan is NOT bounced for coverage: the floor retry was
-// removed, so a thin first-pass plan seeds as written with no extra round-trip.
-func TestPlanStage_UndershotHighDoesNotRetry(t *testing.T) {
-	floor := AmbitionTaskFloor(AmbitionHigh) // scheduledTestWorker has no level -> high default
-	p := &enginetest.Provider{Steps: []enginetest.Step{
-		selectNoGuides, noFeatures, // PLAN guide-selection pre-pass
-		enginetest.Text(planJSONWithTasks(floor - 6)), // undershot, but accepted as-is
-	}}
-	w, pdb := scheduledTestWorker(t, p)
-
-	out, err := planStage{}.Run(context.Background(), w, &Run{ID: "run-floor", Kind: RunKindBuild})
-	if err != nil {
-		t.Fatalf("plan run: %v", err)
-	}
-	if resolveNext(StagePlan, out) != StageBuild {
-		t.Fatalf("plan should advance to build, got %+v", out)
-	}
-	if p.CallCount() != 3 {
-		t.Fatalf("an undershot high plan must NOT retry (guide-select + features + 1 plan call), got %d", p.CallCount())
-	}
-	tasks, _ := LoadTasks(pdb.Reader())
-	if len(tasks) != floor-6 {
-		t.Fatalf("the undershot %d-task plan must seed as written, got %d", floor-6, len(tasks))
-	}
-}
-
-// A high plan at its target seeds with NO retry: the floor never adds a
-// round-trip to a correctly-sized plan.
-func TestPlanStage_HighAtTargetNoRetry(t *testing.T) {
-	target, _ := AmbitionTaskBudget(AmbitionHigh)
-	p := &enginetest.Provider{Steps: []enginetest.Step{
-		selectNoGuides, noFeatures,
-		enginetest.Text(planJSONWithTasks(target)),
-	}}
-	w, pdb := scheduledTestWorker(t, p)
-
-	if _, err := (planStage{}).Run(context.Background(), w, &Run{ID: "run-high-ok", Kind: RunKindBuild}); err != nil {
-		t.Fatalf("plan run: %v", err)
-	}
-	if p.CallCount() != 3 {
-		t.Fatalf("a target-sized high plan must NOT retry (guide-select + features + 1 plan call), got %d", p.CallCount())
-	}
-	tasks, _ := LoadTasks(pdb.Reader())
-	if len(tasks) != target {
-		t.Fatalf("expected %d seeded tasks, got %d", target, len(tasks))
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"openfabrica/internal/netinfo"
-	"openfabrica/security"
 	"openfabrica/server/deps"
 	"openfabrica/server/middleware"
 )
@@ -118,8 +117,8 @@ func newAdminHandlers(deps *Deps) *adminHandlers {
 }
 
 // RegisterRoutes mounts all admin API routes on the given router. The route tree
-// is: public endpoints, then a JWT-protected group (shared read-only routes, the
-// per-project subtree, and an admin-only group), then the SPA fallback.
+// is: public endpoints, then a JWT-protected group that only an admin passes
+// (adminAuthGuard), then the SPA fallback.
 func RegisterRoutes(r chi.Router, deps *Deps, adminFS fs.FS) {
 	h := newAdminHandlers(deps)
 	authLimiter := middleware.NewRateLimiter(middleware.AdminLoginRatePerSec, middleware.AdminLoginBurst)
@@ -147,8 +146,9 @@ func RegisterRoutes(r chi.Router, deps *Deps, adminFS fs.FS) {
 		// Protected endpoints (JWT required).
 		r.Group(func(r chi.Router) {
 			r.Use(deps.JWTManager.Authenticator)
-			// Reject project-scoped tokens and tokens invalidated by a password
-			// change / sign-out-everywhere before any admin handler runs.
+			// Reject project-scoped tokens, non-admin accounts and tokens
+			// invalidated by a password change / sign-out-everywhere before any
+			// admin handler runs.
 			r.Use(adminAuthGuard(deps))
 
 			// Cross-project build-anomaly triage. Loopback-unauthenticated by
@@ -158,11 +158,11 @@ func RegisterRoutes(r chi.Router, deps *Deps, adminFS fs.FS) {
 				r.Get("/triage", h.triage.Scan)
 			}
 
-			// Every signed-in user manages their own credentials and sessions.
-			r.Put("/auth/password", h.auth.HandleChangePassword)
+			// An admin manages their own credentials and sessions.
+			r.With(h.audit.record).Put("/auth/password", h.auth.HandleChangePassword)
 			r.Get("/auth/preferences", h.preferences.Get)
-			r.Put("/auth/preferences", h.preferences.Update)
-			r.Post("/auth/revoke-sessions", h.auth.HandleRevokeSessions)
+			r.With(h.audit.record).Put("/auth/preferences", h.preferences.Update)
+			r.With(h.audit.record).Post("/auth/revoke-sessions", h.auth.HandleRevokeSessions)
 
 			registerSharedReadRoutes(r, h)
 			r.Route("/projects/{projectID}", func(r chi.Router) {
@@ -170,8 +170,7 @@ func RegisterRoutes(r chi.Router, deps *Deps, adminFS fs.FS) {
 			})
 			registerEngineAndChatRoutes(r, h)
 			r.Group(func(r chi.Router) {
-				r.Use(security.RequireRole("admin"))
-				registerAdminOnlyRoutes(r, h)
+				registerGlobalWriteRoutes(r, h)
 			})
 		})
 	})
@@ -184,7 +183,6 @@ func RegisterRoutes(r chi.Router, deps *Deps, adminFS fs.FS) {
 func registerPublicRoutes(r chi.Router, h *adminHandlers, authLimiter *middleware.RateLimiter, adminExposed bool) {
 	r.Get("/setup/check", h.auth.HandleSetupCheck)
 	r.Get("/setup/providers", h.auth.HandleProviderCatalog)
-	r.Post("/setup/providers/{providerID}/sync", h.auth.HandleSetupSyncProvider)
 	// Cross-project build-anomaly triage. Not JWT-gated: it is mounted only for
 	// loopback peers (same 127.0.0.1 trust boundary the whole admin panel binds
 	// to), so the local operator can scan build history without a login round-trip.
@@ -200,6 +198,7 @@ func registerPublicRoutes(r chi.Router, h *adminHandlers, authLimiter *middlewar
 		r.Post("/auth/logout", h.auth.HandleLogout)
 		r.Post("/setup", h.auth.HandleSetup)
 		r.Post("/setup/token", h.auth.HandleSetupTokenCheck)
+		r.Post("/setup/providers/{providerID}/sync", h.auth.HandleSetupSyncProvider)
 	})
 }
 
@@ -219,8 +218,8 @@ func requireLoopback(next http.Handler) http.Handler {
 	})
 }
 
-// registerSharedReadRoutes mounts the read-only endpoints available to every
-// authenticated user (including the unified Builds view).
+// registerSharedReadRoutes mounts the global read-only endpoints (including the
+// unified Builds view).
 func registerSharedReadRoutes(r chi.Router, h *adminHandlers) {
 	r.Get("/projects", h.projects.List)
 	r.Get("/providers/catalog", h.providers.Catalog)
@@ -249,12 +248,13 @@ func registerSharedReadRoutes(r chi.Router, h *adminHandlers) {
 }
 
 // registerProjectScopedRoutes mounts everything under /projects/{projectID}: the
-// read-only views for any authenticated user, then an admin-only group of the
-// destructive project actions.
+// read-only views, then the audited group of project mutations.
 func registerProjectScopedRoutes(r chi.Router, h *adminHandlers) {
-	// Read-only, all authenticated users
+	// Read-only
 	r.Get("/", h.projects.Get)
 	r.Get("/summary", h.projects.Summary)
+	r.Get("/preview.png", h.projectFiles.Preview)
+	r.Get("/chat-images/{name}", h.projectFiles.ChatImage)
 	r.Get("/pages", h.projectPages.List)
 	r.Get("/pages/{pageID}", h.projectPages.Get)
 	r.Get("/tables", h.projectTables.List)
@@ -292,9 +292,8 @@ func registerProjectScopedRoutes(r chi.Router, h *adminHandlers) {
 	r.Get("/diagnostics/errors", h.projectDiag.Errors)
 	r.Get("/hosting/status", h.hosting.Status)
 
-	// Admin-only, destructive project actions
+	// Project mutations
 	r.Group(func(r chi.Router) {
-		r.Use(security.RequireRole("admin"))
 		// Record every mutation here (project update/delete, table and artifact
 		// writes, secrets, ...) to the admin audit trail.
 		r.Use(h.audit.record)
@@ -357,22 +356,21 @@ func registerProjectScopedRoutes(r chi.Router, h *adminHandlers) {
 }
 
 // registerEngineAndChatRoutes mounts the engine status, chat, and question-answer
-// endpoints (all authenticated users; the destructive engine controls live in
-// the admin-only group).
+// endpoints (the engine controls live in the audited global group).
 func registerEngineAndChatRoutes(r chi.Router, h *adminHandlers) {
 	r.Get("/engine/{projectID}/status", h.engine.Status)
 	r.Get("/chat/{projectID}/history", h.chat.History)
 
 	// Chat send: synchronous JSON request/response.
-	r.Post("/chat/{projectID}/stream", h.chat.Send)
+	r.With(h.audit.record).Post("/chat/{projectID}/stream", h.chat.Send)
 
-	// Question answering, all authenticated users can answer.
-	r.Post("/questions/{questionID}/answer", h.questions.Answer)
+	// Question answering.
+	r.With(h.audit.record).Post("/questions/{questionID}/answer", h.questions.Answer)
 }
 
-// registerAdminOnlyRoutes mounts the destructive / configuration endpoints. The
-// caller wraps it in security.RequireRole("admin").
-func registerAdminOnlyRoutes(r chi.Router, h *adminHandlers) {
+// registerGlobalWriteRoutes mounts the global mutation and configuration
+// endpoints, all recorded to the audit trail.
+func registerGlobalWriteRoutes(r chi.Router, h *adminHandlers) {
 	// Record every global admin mutation (users, providers, settings, engine
 	// control, ...) to the audit trail. GET routes here, the audit log's own read
 	// included, are skipped by the recorder.
@@ -506,7 +504,7 @@ func registerAdminSPA(r chi.Router, adminFS fs.FS, version string) {
 		// Try to serve the requested file. If it doesn't exist,
 		// fall back to index.html for SPA routing.
 		path := r.URL.Path
-		if path == "/" {
+		if path == "" || path == "/" {
 			path = "/index.html"
 		}
 

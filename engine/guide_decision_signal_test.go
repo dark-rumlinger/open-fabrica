@@ -328,3 +328,18 @@ func TestUnmappedDecisionImpliesNoTerrainGuide(t *testing.T) {
 		}
 	}
 }
+
+func TestPhysicsModelDecisionRouting(t *testing.T) {
+	ps, err := pack.Embedded()
+	if err != nil {
+		t.Fatalf("pack.Embedded: %v", err)
+	}
+	got3D := planGuideSlugs(decisionPlan("physics model", "rigid-body-3d"), ps)
+	if !got3D["physics_3d"] || !got3D["3d_rendering"] {
+		t.Errorf("rigid-body-3d should route physics_3d and require 3d_rendering, got %v", got3D)
+	}
+	got2D := planGuideSlugs(decisionPlan("physics model", "rigid-body-2d"), ps)
+	if !got2D["physics_2d"] {
+		t.Errorf("rigid-body-2d should route physics_2d, got %v", got2D)
+	}
+}

@@ -10,8 +10,8 @@ import (
 
 // The agent's query_data tool runs SQL the MODEL wrote, so it cannot be trusted to
 // filter on the caller. Tables behind an owner- or tenant-scoped endpoint must be
-// withheld from an ordinary caller, while a project key and the admin role (the two
-// callers REST also exempts) keep full access.
+// withheld from an ordinary caller, while the admin role (the caller REST also
+// exempts) keeps full access.
 
 func agentScopeProject(t *testing.T) *db.ProjectDB {
 	t.Helper()
@@ -73,7 +73,7 @@ func TestAgentQueryWithholdsScopedTables(t *testing.T) {
 	}
 
 	if got := runAgentQuery(t, pdb, true, `SELECT body FROM notes ORDER BY id`); !strings.Contains(got, "theirs") {
-		t.Errorf("a project key or admin keeps full access, got %s", got)
+		t.Errorf("an admin keeps full access, got %s", got)
 	}
 }
 

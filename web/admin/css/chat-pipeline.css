@@ -540,19 +540,6 @@
   max-width: min(760px, 100%);
 }
 
-/* PLAN overview: accent the left border and category labels so the structured
-   "Here's the plan" summary reads as a panel rather than a plain bubble. */
-.message--plan {
-  border-inline-start-color: var(--accent);
-}
-.message--plan .message__body > p:first-child {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.message--plan li {
-  margin-bottom: 6px;
-}
-
 /* Build-progress card: the completion snapshot shown when build tasks finish
    (createBuildProgressCard). App-composed, not markdown, so it carries a real
    progress bar and distinct done/pending task rows. Accent stays on-brand
@@ -705,7 +692,7 @@
 
 /* Build-plan card: the upfront queue snapshot shown once when a build's full
    task list is first known (createBuildPlanCard). The accent left border marks
-   it as a structured milestone, like .message--plan. */
+   it as a structured milestone. */
 .message--build-plan {
   border-inline-start-color: var(--accent);
 }
@@ -793,7 +780,7 @@
 /* Go-live summary card (createGoLiveCard): the structured completion message
    shown when a build finishes - celebratory (or, on known issues, cautionary)
    header, Preview/Publish actions, "what's inside" stat tiles, and a sign-in
-   sub-card. Accent left border marks it as a milestone, like .message--plan. */
+   sub-card. Accent left border marks it as a milestone. */
 .message--golive {
   border-inline-start-color: var(--accent);
 }
@@ -841,6 +828,102 @@
 .golive__actions {
   display: flex;
   gap: 8px;
+}
+.golive__preview-shot {
+  display: block;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  transition: border-color 0.15s ease;
+}
+.golive__preview-shot:hover {
+  border-color: var(--accent);
+}
+.golive__preview-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.image-attach__input {
+  display: none;
+}
+.image-attach__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.image-attach__btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+.image-attach__btn svg { width: 16px; height: 16px; }
+.image-attach__strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.image-attach__thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+}
+.image-attach__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.image-attach__remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.composer__attach-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.composer__attach-hint {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.message__images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.message__images img {
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  object-fit: cover;
 }
 .golive__action {
   flex: 1;
@@ -1371,22 +1454,73 @@ a.golive__page:hover { border-color: var(--text-tertiary); }
 
 .chat-input__wrapper {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   gap: 8px;
   background: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 8px 12px;
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-.chat-input__wrapper:focus-within {
+.chat-input__wrapper:focus-within,
+.chat-input__wrapper.is-dragover {
   border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--accent-muted);
 }
 
+.chat-input__wrapper .image-attach__slot {
+  order: 1;
+  position: relative;
+  width: 72px;
+  height: 72px;
+  align-self: flex-end;
+  flex-shrink: 0;
+}
+
+.chat-input__wrapper .image-attach__btn {
+  width: 72px;
+  height: 72px;
+  padding: 4px;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--text-primary) 2%, transparent);
+  font-size: 10px;
+  line-height: 1.15;
+  text-align: center;
+}
+
+.chat-input__wrapper .image-attach__btn--has-image {
+  padding: 0;
+  overflow: hidden;
+  border-style: solid;
+}
+
+.chat-input__wrapper .image-attach__btn-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.chat-input__wrapper .image-attach__slot .image-attach__remove {
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+}
+
+.chat-input__wrapper .image-attach__btn svg {
+  width: 18px;
+  height: 18px;
+}
+
 .chat-input__textarea {
+  order: 2;
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
@@ -1404,6 +1538,7 @@ a.golive__page:hover { border-color: var(--text-tertiary); }
 }
 
 .chat-input__send {
+  order: 3;
   display: flex;
   align-items: center;
   justify-content: center;

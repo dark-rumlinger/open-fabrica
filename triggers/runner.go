@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 
 	"openfabrica/db"
@@ -52,6 +53,7 @@ type Runner struct {
 	toolExec    *tools.Executor // optional, set via SetTools; backs the messaging actions
 	toolEnv     *tools.Env      // optional, set via SetTools
 	sem         chan struct{}   // bounds concurrent action execution
+	wg          sync.WaitGroup  // tracks in-flight fan-out and action goroutines
 	// allowPrivateHosts disables the SSRF guard on outbound http_request /
 	// trigger_webhook actions. Off by default so triggers cannot reach the
 	// loopback admin API, link-local metadata endpoints, or the internal
@@ -103,6 +105,56 @@ func (r *Runner) lifecycle() context.Context {
 		return r.ctx
 	}
 	return context.Background()
+}
+
+// Stop waits for all in-flight trigger fan-out and action goroutines to finish.
+// Call after canceling the runner's lifecycle context so blocked outbound calls
+// abort promptly.
+func (r *Runner) Stop() {
+	r.wg.Wait()
+}
+
+// RuntimeDeps bundles the downstream runtime services that triggers need
+// at fire time, wired once after all subsystems are constructed.
+type RuntimeDeps struct {
+	GlobalDB      *sql.DB
+	LLMRegistry   *llm.Set
+	LLMHTTPClient *http.Client
+	BudgetFn      func() int
+	CallLLM       llm.CallFunc
+	ToolExec      *tools.Executor
+	ToolEnv       *tools.Env
+	Webhooks      *webhooks.Dispatcher
+	Broadcaster   events.WSBroadcaster
+}
+
+// BindRuntime wires all runtime dependencies into the runner in one call.
+func (r *Runner) BindRuntime(d RuntimeDeps) {
+	if d.GlobalDB != nil {
+		r.globalDB = d.GlobalDB
+	}
+	if d.LLMRegistry != nil {
+		r.llmRegistry = d.LLMRegistry
+	}
+	if d.LLMHTTPClient != nil {
+		r.llmHTTPClient = d.LLMHTTPClient
+	}
+	if d.BudgetFn != nil {
+		r.budgetFn = d.BudgetFn
+	}
+	if d.CallLLM != nil {
+		r.callLLM = d.CallLLM
+	}
+	if d.ToolExec != nil && d.ToolEnv != nil {
+		r.toolExec = d.ToolExec
+		r.toolEnv = d.ToolEnv.Headless()
+	}
+	if d.Webhooks != nil {
+		r.webhooks = d.Webhooks
+	}
+	if d.Broadcaster != nil {
+		r.broadcaster = d.Broadcaster
+	}
 }
 
 // SetBroadcaster sets the WebSocket broadcaster for ws_broadcast actions.
@@ -219,7 +271,9 @@ func (r *Runner) handleEvent(event events.Event) {
 	// stay globally capped at maxConcurrentActions without applying
 	// backpressure to Publish.
 	writer := projectDB.Writer()
+	r.wg.Add(1)
 	safego.Go("trigger fan-out", func() {
+		defer r.wg.Done()
 		type trigger struct {
 			id            int
 			name          string
@@ -258,8 +312,14 @@ func (r *Runner) handleEvent(event events.Event) {
 					continue
 				}
 			}
-			r.sem <- struct{}{}
+			select {
+			case r.sem <- struct{}{}:
+			case <-r.lifecycle().Done():
+				return
+			}
+			r.wg.Add(1)
 			go func(t trigger) {
+				defer r.wg.Done()
 				defer func() { <-r.sem }()
 				r.execute(writer, event, t.id, t.name, t.triggerType, t.triggerConfig)
 			}(t)

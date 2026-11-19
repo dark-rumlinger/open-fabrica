@@ -150,7 +150,7 @@ func (h *ProvidersHandler) CreateModel(w http.ResponseWriter, r *http.Request) {
 	// defaults window is harmless: GetDefaultModel tolerates it (orders by
 	// is_default DESC, id ASC). One default at a time, see SetDefaultModel.
 	if req.IsDefault {
-		if _, err := h.deps.DB.ExecWrite("UPDATE llm_models SET is_default = 0 WHERE is_default = 1 AND id != ? AND provider_id IN (SELECT id FROM providers WHERE kind = 'llm')", model.ID); err != nil {
+		if err := models.DemoteOtherDefaultLLMModels(h.deps.DB.DB, model.ID); err != nil {
 			h.deps.Logger.Error("failed to clear previous default models", "error", err)
 		}
 	}
@@ -314,7 +314,7 @@ func (h *ProvidersHandler) UpdateModel(w http.ResponseWriter, r *http.Request) {
 	// disabled rows). Clear the flag so the system falls back to
 	// GetDefaultModel's no-default branch instead of pointing at a hidden row.
 	if !edit.IsEnabled && existing.IsDefault {
-		if _, err := h.deps.DB.ExecWrite("UPDATE llm_models SET is_default = 0 WHERE id = ?", modelPK); err != nil {
+		if err := models.ClearModelDefault(h.deps.DB.DB, modelPK); err != nil {
 			h.deps.Logger.Error("failed to clear default on disabled model", "error", err)
 		}
 	}
@@ -381,18 +381,18 @@ func (h *ProvidersHandler) SetDefaultModel(w http.ResponseWriter, r *http.Reques
 	// the demote step below never leaves the system with zero defaults. The
 	// brief two-defaults window is harmless: GetDefaultModel tolerates it via
 	// its is_default DESC, id ASC tie-breaker.
-	res, err := h.deps.DB.ExecWrite("UPDATE llm_models SET is_default = 1, is_enabled = 1 WHERE id = ? AND provider_id = ?", modelID, providerID)
+	found, err := models.PromoteDefaultModel(h.deps.DB.DB, providerID, modelID)
 	if err != nil {
 		h.deps.serverError(w, "failed to set default model", err)
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if !found {
 		writeError(w, http.StatusNotFound, "model not found for this provider")
 		return
 	}
 
 	// Demote every OTHER system-wide default.
-	if _, err := h.deps.DB.ExecWrite("UPDATE llm_models SET is_default = 0 WHERE is_default = 1 AND id != ? AND provider_id IN (SELECT id FROM providers WHERE kind = 'llm')", modelID); err != nil {
+	if err := models.DemoteOtherDefaultLLMModels(h.deps.DB.DB, modelID); err != nil {
 		h.deps.Logger.Error("failed to clear other default models", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to update default model")
 		return

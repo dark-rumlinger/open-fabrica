@@ -36,6 +36,7 @@ class StubNode {
   getAttribute(k) { return this.attributes[k]; }
   addEventListener(evt, fn) { (this.listeners[evt] ||= []).push(fn); }
   appendChild(child) { this.children.push(child); return child; }
+  querySelectorAll() { return []; }
   // Test helper: fire a listener the way the browser would.
   fire(evt, e = {}) {
     for (const fn of this.listeners[evt] || []) fn({ preventDefault() {}, ...e });

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -12,7 +13,7 @@ import (
 // hands it over at the next boundary.
 func TestOwnerMessageDuringBuildReachesTheSession(t *testing.T) {
 	w := &Worker{commands: make(chan Command, 1)}
-	w.state = StateBuilding
+	w.setState(StateBuilding)
 	if err := w.Send(Command{Type: CommandChat, Payload: map[string]any{"message": "make the header blue"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -43,5 +44,25 @@ func TestOwnerMessageHeldWhenTheTurnStopsTheBuild(t *testing.T) {
 	}
 	if msgs := w.takeOwnerInbox(); len(msgs) != 1 {
 		t.Fatalf("the message must stay queued for the post-build wake, got %v", msgs)
+	}
+}
+
+// Once the build's leftovers are drained, a message is routed as a command, so
+// it cannot land in an inbox nobody reads again.
+func TestOwnerMessageAfterBuildDrainIsACommand(t *testing.T) {
+	w := &Worker{commands: make(chan Command, 1), ctx: context.Background()}
+	w.setState(StateBuilding)
+	if !w.offerOwnerInbox("one") {
+		t.Fatal("a building worker takes inbox messages")
+	}
+	w.state = StateLive
+	if left := w.closeOwnerInbox(); len(left) != 1 {
+		t.Fatalf("drain returned %v, want the one queued message", left)
+	}
+	if err := w.Send(Command{Type: CommandChat, Payload: map[string]any{"message": "two"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.commands) != 1 || len(w.takeOwnerInbox()) != 0 {
+		t.Fatal("a message after the drain must be queued as a command, not left in the inbox")
 	}
 }

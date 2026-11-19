@@ -212,8 +212,7 @@ export function createTopBar() {
     ]),
     contextSlot,
     h('div', { className: 'topbar__actions' }, [
-      // Stays visible after the shell banner is dismissed. Opens About, which
-      // says what the early release status means.
+      // Opens About, which says what the early release status means.
       h('button', {
         className: 'preview-badge',
         type: 'button',

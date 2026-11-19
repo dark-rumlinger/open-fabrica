@@ -17,8 +17,8 @@ const (
 	tokenEncPrefix = "enc:v1:"
 )
 
-// LoadBotToken returns the plaintext bot token. Values stored before encryption
-// was introduced are returned as-is, so upgrades need no migration step.
+// LoadBotToken returns the plaintext bot token. A value without the encryption
+// prefix was saved with no encryptor configured and is returned as-is.
 func LoadBotToken(database *db.DB, enc *security.Encryptor) string {
 	raw, err := database.GetSetting(TokenSettingKey)
 	if err != nil {
@@ -64,17 +64,4 @@ func SaveBotToken(database *db.DB, enc *security.Encryptor, token string) error 
 		return err
 	}
 	return database.SetSetting(TokenSettingKey, stored)
-}
-
-// UpgradeBotToken re-saves a legacy plaintext token in encrypted form.
-func UpgradeBotToken(database *db.DB, enc *security.Encryptor) {
-	if enc == nil {
-		return
-	}
-	raw, err := database.GetSetting(TokenSettingKey)
-	raw = strings.TrimSpace(raw)
-	if err != nil || raw == "" || strings.HasPrefix(raw, tokenEncPrefix) {
-		return
-	}
-	_ = SaveBotToken(database, enc, raw)
 }

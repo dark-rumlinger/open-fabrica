@@ -175,14 +175,22 @@ func (s *session) Run(ctx context.Context, spec SessionSpec) (SessionResult, err
 // loadedToolNotes restates the routing notes of the tools find_tool loaded before a
 // rollover. They arrived only in find_tool's result, which the fresh segment no
 // longer holds, while the schemas themselves are carried over.
+func (s *session) loadCapabilities(caller string) llm.Capabilities {
+	if s.deps == nil || s.deps.DB == nil || s.deps.DB.DB == nil {
+		return llm.Capabilities{}
+	}
+	caps, err := llm.LoadCapabilities(s.deps.DB.DB)
+	if err != nil && s.logger != nil {
+		s.logger.Warn(caller+": load capabilities failed; capability-gated features hidden", "err", err)
+	}
+	return caps
+}
+
 func (s *session) loadedToolNotes(spec *SessionSpec, names []string) string {
 	if len(names) == 0 {
 		return ""
 	}
-	caps, err := llm.LoadCapabilities(s.deps.DB.DB)
-	if err != nil {
-		return ""
-	}
+	caps := s.loadCapabilities("loadedToolNotes")
 	prose := s.deps.ToolRegistry.RoutingProse(names, caps, strings.ToLower(spec.Stage))
 	if prose == "" {
 		return ""
@@ -224,6 +232,9 @@ func (s *session) runSegment(ctx context.Context, spec *SessionSpec, seed []llm.
 
 	res := SessionResult{}
 	finish := func(e ending) (SessionResult, bool, error) {
+		if e.outcome == EndFailed && len(s.requestHashes) > 0 {
+			s.caller.cacheDiscard(s.requestHashes)
+		}
 		res.Ending = e.outcome
 		res.EndDetail = e.detail
 		res.Messages = st.tr.Messages()
@@ -301,7 +312,12 @@ func (s *session) runSegment(ctx context.Context, spec *SessionSpec, seed []llm.
 		}
 		res.Model = resp.Model
 
-		assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls}
+		assistantMsg := llm.Message{
+			Role:             llm.RoleAssistant,
+			Content:          resp.Content,
+			ToolCalls:        resp.ToolCalls,
+			ReasoningDetails: resp.ReasoningDetails,
+		}
 		if resp.Content != "" || len(resp.ToolCalls) > 0 {
 			s.events.assistant(resp.Content, resp.ToolCalls)
 		}
@@ -355,7 +371,7 @@ func (s *session) newSegState(spec *SessionSpec, seed []llm.Message, segment int
 	if st.rolloverAt == 0 {
 		st.rolloverAt = defaultRolloverInputTokens
 	}
-	if cw, ok := rp.Provider.(llm.ContextWindowProvider); ok {
+	if cw, ok := llm.As[llm.ContextWindowProvider](rp.Provider); ok {
 		st.rolloverAt = rolloverForWindow(st.rolloverAt, cw.ContextWindow())
 	}
 	if s.rolloverCeiling > 0 && s.rolloverCeiling < st.rolloverAt {
@@ -603,10 +619,7 @@ func (s *session) resolveTools(spec *SessionSpec) []llm.ToolDef {
 	if len(spec.PreloadTools) == 0 {
 		return nil
 	}
-	caps, err := llm.LoadCapabilities(s.deps.DB.DB)
-	if err != nil {
-		s.logger.Warn("load capabilities failed; capability-gated tools hidden", "err", err)
-	}
+	caps := s.loadCapabilities("resolveTools")
 	names := append([]string(nil), spec.PreloadTools...)
 	sort.Strings(names)
 	dedup := names[:0]
@@ -616,7 +629,7 @@ func (s *session) resolveTools(spec *SessionSpec) []llm.ToolDef {
 		}
 		dedup = append(dedup, n)
 	}
-	defs := s.deps.ToolRegistry.LookupFull(dedup, caps, spec.Stage)
+	defs := s.deps.ToolRegistry.LookupFullFiltered(dedup, caps, spec.Stage, spec.OmitToolActions)
 	defs = append(defs, tools.FindToolDef())
 	return defs
 }
@@ -798,8 +811,15 @@ func (s *session) updateReadOnlyStreak(spec *SessionSpec, st *segState, calls []
 		st.stopWith(endReadOnlyStreak)
 	case spec.ReadOnlyNudge > 0 && st.readOnlyRun == spec.ReadOnlyNudge:
 		s.logger.Warn("read-only streak nudge", "streak", st.readOnlyRun)
-		st.tr.Append(llm.Message{Role: llm.RoleUser, Content: "You've spent several iterations only reading, with no edit. Take ONE concrete action now: make the change with patch (a unique search anchor), or if the task's deliverables already exist and are wired, call complete."})
+		st.tr.Append(llm.Message{Role: llm.RoleUser, Content: readOnlyNudgeMessage(spec.Stage)})
 	}
+}
+
+func readOnlyNudgeMessage(stage string) string {
+	if strings.EqualFold(stage, StageLive) {
+		return "You've spent several turns only reading, with no edit. Batch any remaining reads into one turn, then take a concrete action now: apply the fix with patch, test with manage_testing, or ask the owner one targeted question if something is ambiguous."
+	}
+	return "You've spent several iterations only reading, with no edit. Take ONE concrete action now: make the change with patch (a unique search anchor), or if the task's deliverables already exist and are wired, call complete."
 }
 
 // routeKeyHeadBytes is how much of the system prompt the routing hint keys on. The BUILD

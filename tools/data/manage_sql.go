@@ -14,20 +14,7 @@ func init() {
 		Category:           "data",
 		FullResultInEvents: true,
 		OneLiner:           "Build-time only: raw SELECT, atomic multi-write transactions (<=100 ops), CSV/JSON bulk import (<=500 rows) and CSV export.",
-		WhenToUse: `BUILD-TIME / admin tool only - it is NOT exposed as a runtime HTTP
-route, so never use it to back a query endpoint a page calls. For runtime read-only
-SQL (a SQL editor, joins/aggregations on demand) use manage_api enable_query; for a
-view's rows use manage_api create over the view.
-
-execute_sql (SELECT only) for joins/aggregations too complex for
-manage_data query. transaction when two writes must succeed or fail together
-(transfers, ledger entries, order+inventory); inner ops follow the manage_data
-write shape (insert/update/upsert/delete/batch_delete) plus a required table_name
-and action. Do NOT nest transactions or include DDL (CREATE/ALTER/DROP) - SQLite
-DDL isn't transactional and is rejected. For loading rows you already have as
-objects, manage_data insert (rows=[...], any count) is simpler; import_csv/import_json
-fit data you hold as CSV or a JSON string. For a reusable upload/download endpoint use
-manage_import_endpoint/manage_export_endpoint.`,
+		WhenToUse:          `Build-time/admin only (never a runtime HTTP route — use manage_api enable_query or a view for runtime queries). execute_sql runs SELECT for complex joins/aggregates; transaction runs <=100 atomic insert/update/upsert/delete/batch_delete ops (no nesting or DDL). Prefer manage_data insert for object rows; import_csv/import_json for raw CSV/JSON.`,
 		Actions: []tools.Action{
 			&SQLExecute{},
 			&SQLTransaction{},

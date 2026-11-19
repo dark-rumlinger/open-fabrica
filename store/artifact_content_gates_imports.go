@@ -192,12 +192,6 @@ var reservedWindowGlobals = map[string]bool{
 	"ofProbeViolations": true,
 }
 
-// platformWindowGlobals is the set of bare `window.*` API surfaces the platform
-// injects as classic global scripts. It is EMPTY: every platform helper
-// (auth -> "auth", realtime -> "ofnet", crypto -> "e2ee") is an ES module imported
-// by specifier. Retained as the extension point for any future bare platform global.
-var platformWindowGlobals = map[string]bool{}
-
 // browserWindowGlobals are built-in window/BOM properties legitimately read as
 // `window.X`; the language/DOM set is deferred to analysis.IsJSGlobal. Err broad:
 // over-allowing only weakens the catch, while under-allowing false-positives a
@@ -220,7 +214,6 @@ var browserWindowGlobals = map[string]bool{
 func IsAllowedWindowGlobal(name string) bool {
 	bare := strings.TrimPrefix(name, "__")
 	return reservedWindowGlobals[bare] ||
-		platformWindowGlobals[name] ||
 		browserWindowGlobals[name] ||
 		analysis.IsJSGlobal(name)
 }
@@ -234,10 +227,6 @@ func ReservedWindowGlobalNames() []string {
 	}
 	return out
 }
-
-// PlatformWindowGlobalCount reports how many bare platform window globals are
-// declared (0 by design; the drift test asserts it stays empty).
-func PlatformWindowGlobalCount() int { return len(platformWindowGlobals) }
 
 // jsWindowProducersConsumers returns the identifiers this body exports on window
 // (LHS of `window.X =`) and the identifiers it reads from window but does NOT itself

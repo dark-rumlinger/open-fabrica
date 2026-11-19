@@ -34,8 +34,8 @@ function renderMemory(m, projectId, reload) {
     ? h('span', { className: 'badge' }, m.category)
     : null;
   const actions = [
-    { label: t('common.edit'), iconName: 'edit', adminOnly: true, onClick: () => showEditModal(projectId, m, reload) },
-    { label: t('common.delete'), iconName: 'trash', kind: 'danger', adminOnly: true, onClick: () => confirmDeleteMemory(projectId, m, reload) },
+    { label: t('common.edit'), iconName: 'edit', onClick: () => showEditModal(projectId, m, reload) },
+    { label: t('common.delete'), iconName: 'trash', kind: 'danger', onClick: () => confirmDeleteMemory(projectId, m, reload) },
   ];
   return card({
     title: m.key,

@@ -111,12 +111,14 @@ var dynamicOK = map[string]string{
 	"server/admin/project_artifacts.go|err.Error()": "artifact store errors, technical",
 	"server/admin/project_transfer.go|err.Error()":  "import manifest errors are marked",
 	"server/admin/projects.go|err.Error()":          "banned address validation is marked",
+	"server/admin/projects.go|imgErr.Error()":       "image input decode errors, technical",
 	"server/admin/providers_crud.go|err.Error()":    "provider config validation, technical",
 	"server/admin/providers_crud.go|cErr.Error()":   "provider config validation, technical",
 	"server/admin/providers_models.go|err.Error()":  "model thinking stage validation, technical",
 	"server/admin/providers_sync.go|se.msg":         "sync error messages are marked where the error is built",
 	"server/admin/users.go|err.Error()":             "credential validators are marked",
 	"chat/handler.go|sendErr.Error()":               "chat send errors, technical",
+	"chat/handler.go|err.Error()":                   "image input decode errors, technical",
 
 	// A composite of a model's sentence and one of our own lines; the line is
 	// translated before it is joined (Worker.tr).

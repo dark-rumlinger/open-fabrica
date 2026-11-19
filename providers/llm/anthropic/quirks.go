@@ -29,6 +29,11 @@ func init() {
 		Sent:  func(r llm.CompletionRequest) bool { return r.ResponseSchema != nil },
 		Match: matchesForcedToolChoiceRejection,
 	})
+	llm.RegisterQuirkRule("anthropic", llm.QuirkRule{
+		Cap:   llm.CapVision,
+		Sent:  llm.RequestHasImages,
+		Match: llm.MatchesVisionUnsupported,
+	})
 }
 
 // matchesForcedToolChoiceRejection recognises the newer models refusing a forced

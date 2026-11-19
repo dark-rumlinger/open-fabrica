@@ -1,5 +1,7 @@
 package llm
 
+import "encoding/json"
+
 // Role represents the role of a message in a conversation.
 type Role string
 
@@ -16,6 +18,11 @@ type Message struct {
 	Content    string     `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+
+	// ReasoningDetails carries opaque provider reasoning blocks (OpenRouter's
+	// `reasoning_details` array) that must be echoed back unmodified on
+	// assistant messages in multi-turn tool-call loops.
+	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
 
 	// Images attaches inline image parts to a user message. When non-empty,
 	// providers send the message in multimodal content-array form alongside

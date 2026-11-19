@@ -172,6 +172,7 @@ func (sp StagePolicy) callOnProvider(
 		if cancel != nil {
 			cancel()
 		}
+		llm.RecordProviderCall(provider.Name(), err)
 		if err == nil {
 			return resp, stats, nil
 		}

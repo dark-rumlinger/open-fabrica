@@ -18,6 +18,11 @@ func init() {
 		Sent:  func(llm.CompletionRequest) bool { return true },
 		Match: matchesThinkRejected,
 	})
+	llm.RegisterQuirkRule("ollama", llm.QuirkRule{
+		Cap:   llm.CapVision,
+		Sent:  llm.RequestHasImages,
+		Match: llm.MatchesVisionUnsupported,
+	})
 }
 
 // matchesThinkRejected reports whether err is a daemon or model refusing the

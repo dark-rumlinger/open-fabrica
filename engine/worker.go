@@ -51,13 +51,11 @@ type Worker struct {
 	// run is the active run (nil when idle/live with no run in flight).
 	run *Run
 
-	// repairSigs maps a repair item's id to the finding signatures it answers, and
-	// disputed holds the signatures of explore findings the builder completed as wrong
-	// ("disputed: ..."). specAudits counts the spec audits run, so a gap a re-check
-	// calls new gets a key no earlier audit used. All live for one build; see repair.go.
-	repairSigs map[string][]string
-	disputed   map[string]bool
-	specAudits int
+	// build is the bookkeeping that belongs to ONE build, grouped off this long-lived
+	// Worker (which also serves LIVE and scheduled runs) so the build stage resets all
+	// of it at once by replacing the value; adding a field cannot leak across runs by a
+	// forgotten reset. See buildState and buildStage.Run.
+	build *buildState
 
 	// wakeContext carries answer payloads from a wake command into the next
 	// stage execution.
@@ -69,8 +67,12 @@ type Worker struct {
 	// ownerInbox holds owner chat messages that arrived while a build runs. A
 	// command waits until drive returns, so they are kept here instead and the build
 	// session takes them at its next turn boundary (takeOwnerInbox); whatever is left
-	// when the build ends is answered by a LIVE wake. Guarded by inboxMu.
+	// when the build ends is answered by a LIVE wake. inboxOpen is true while a
+	// build accepts messages: it opens when the state turns Building and closes in
+	// the same critical section that drains the leftovers, so a message is either
+	// taken by that drain or routed as a command, never stranded. Guarded by inboxMu.
 	inboxMu    sync.Mutex
+	inboxOpen  bool
 	ownerInbox []string
 
 	// pendingScheduledTasks dedupes CommandScheduledTask by task id: a tick
@@ -148,7 +150,7 @@ func newWorker(deps *Deps, projectID int, limiter *llmLimiter, parent context.Co
 		pdb:       pdb,
 		logger:    logger,
 		limiter:   limiter,
-		dbLog:     llm.NewDBLLMLogger(pdb.Writer(), llm.WithRedactor(llmredact.New(pdb.Reader())), llm.WithOnLogged(onLogged)),
+		dbLog:     llm.NewDBLLMLogger(pdb.Writer(), llm.WithRedactor(llmredact.New(pdb.Reader(), deps.ToolRegistry.SensitiveArgs)), llm.WithOnLogged(onLogged)),
 		runlog:    &runLogger{pdb: pdb, logger: logger},
 		commands:  make(chan Command, 16),
 		ctx:       ctx,
@@ -169,6 +171,11 @@ func (w *Worker) setState(s State) {
 	w.stateMu.Lock()
 	w.state = s
 	w.stateMu.Unlock()
+	if s == StateBuilding {
+		w.inboxMu.Lock()
+		w.inboxOpen = true
+		w.inboxMu.Unlock()
+	}
 	w.publishPhase()
 }
 
@@ -212,9 +219,8 @@ func (w *Worker) publishPhase() {
 func (w *Worker) Send(cmd Command) error {
 	// An owner message during a build goes to the inbox the running session reads
 	// between turns; queued as a command it would wait for the whole build.
-	if cmd.Type == CommandChat && w.State() == StateBuilding {
-		if msg, _ := cmd.Payload["message"].(string); strings.TrimSpace(msg) != "" {
-			w.pushOwnerInbox(msg)
+	if cmd.Type == CommandChat {
+		if msg, _ := cmd.Payload["message"].(string); strings.TrimSpace(msg) != "" && w.offerOwnerInbox(msg) {
 			return nil
 		}
 	}
@@ -436,16 +442,36 @@ func (w *Worker) publishError(errMsg string) {
 // answerLeftoverInbox answers owner messages a build ended without taking (it stopped
 // on the turn they arrived, or they came during the validator sweep) with one LIVE wake.
 func (w *Worker) answerLeftoverInbox(ctx context.Context) {
-	msgs := w.takeOwnerInbox()
-	if len(msgs) == 0 || w.State() == StateBuilding {
-		if len(msgs) > 0 {
-			for _, m := range msgs {
-				w.pushOwnerInbox(m)
-			}
-		}
+	if w.State() == StateBuilding {
+		return // the next drive takes them at a turn boundary
+	}
+	msgs := w.closeOwnerInbox()
+	if len(msgs) == 0 {
 		return
 	}
 	w.handleCommandSafely(ctx, Command{Type: CommandChat, Payload: map[string]any{"message": strings.Join(msgs, "\n\n")}})
+}
+
+// offerOwnerInbox queues an owner message for the running build. It reports
+// false when no build is taking messages, so the caller routes it as a command.
+func (w *Worker) offerOwnerInbox(msg string) bool {
+	w.inboxMu.Lock()
+	defer w.inboxMu.Unlock()
+	if !w.inboxOpen {
+		return false
+	}
+	w.ownerInbox = append(w.ownerInbox, msg)
+	return true
+}
+
+// closeOwnerInbox stops accepting messages and returns what the build left.
+func (w *Worker) closeOwnerInbox() []string {
+	w.inboxMu.Lock()
+	defer w.inboxMu.Unlock()
+	w.inboxOpen = false
+	msgs := w.ownerInbox
+	w.ownerInbox = nil
+	return msgs
 }
 
 // pushOwnerInbox queues an owner message that arrived during a build.

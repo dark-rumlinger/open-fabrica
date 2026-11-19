@@ -8,7 +8,6 @@ import { navigate, currentPath, getActiveProjectId } from '../core/router.js';
 import { pendingFor, watchPending } from '../core/questions.js';
 import * as state from '../core/state.js';
 import { createTopBar, MENU_LINKS } from './topbar.js';
-import { createPreviewBanner } from './preview-banner.js';
 import { icon } from './icon.js';
 import { setPageTitle } from './tab-indicator.js';
 import { titleForPath } from './page-title.js';
@@ -36,12 +35,9 @@ export function createLayout() {
     onClick: (e) => { e.preventDefault(); main.focus(); },
   }, t('nav.skip'));
 
-  const previewBanner = createPreviewBanner();
-
   const root = h('div', { className: 'app-layout' }, [
     skipLink,
     topbar.element,
-    previewBanner.element,
     main,
     bottomNav.element,
   ]);

@@ -32,6 +32,7 @@ this table as the authority:
 | --------------------- | ------------------------------- | ------------- |
 | `admin_port`          | `OPENFABRICA_ADMIN_PORT`        | `5734`        |
 | `public_port`         | `OPENFABRICA_PUBLIC_PORT`       | `5733`        |
+| `mqtt_port`           | `OPENFABRICA_MQTT_PORT`         | `0` (WS `/mqtt` only) |
 | `admin_bind_addr`     | `OPENFABRICA_ADMIN_BIND`        | `127.0.0.1`   |
 | `data_dir`            | `OPENFABRICA_DATA_DIR`          | `./data`      |
 | `log_level`           | `OPENFABRICA_LOG_LEVEL`         | `info`        |
@@ -47,7 +48,10 @@ off. A numeric variable that does not parse is ignored with a warning in the log
 honored when it is unset) is also environment-only, see `docs/SECURITY.md`.
 
 A few settings are environment-only (no config-file key), such as
-`OPENFABRICA_ADMIN_EXPOSE` and `OPENFABRICA_ALLOW_KEY_REGEN`. The
+`OPENFABRICA_ADMIN_EXPOSE`, `OPENFABRICA_ALLOW_KEY_REGEN`, and
+`OPENFABRICA_BROWSER_TIMEOUT` (pins the headless Chrome cold-start probe timeout,
+e.g. `20s`; by default it starts at `5s` on `amd64` and `15s` on `arm`/`arm64` and
+adapts up to `30s` based on observed startup latency). The
 `_env_only_settings` block in `config.example.json` documents these.
 
 ## The runtime exception: engine daily token budget
@@ -175,3 +179,19 @@ You do not need a config file. Either:
 committed, and `config.example.json` is the template. If `config.json` is still
 tracked from an earlier commit, untrack it once with `git rm --cached config.json`
 (this keeps your local working file).
+
+## Raspberry Pi & Headless Linux
+
+Open Fabrica builds as a static binary for `linux/arm64` (64-bit Raspberry Pi OS
+/ Ubuntu) and `linux/arm` (`GOARM=7`, 32-bit ARMv7). On headless SBCs and minimal
+Linux servers:
+
+- **Headless browser (recommended):** install Chromium and a basic font package so
+  post-build runtime verification and PDF generation work:
+  `sudo apt-get install -y chromium fonts-freefont-ttf`
+  On `arm`/`arm64`, the browser cold-start probe starts at `15s` and adapts up to
+  `30s` automatically (override with `OPENFABRICA_BROWSER_TIMEOUT`).
+- **Memory limit:** set `OPENFABRICA_MEMORY_LIMIT` (e.g. `512MiB` on 1 GB boards,
+  `1GiB` on 2 GB+ boards) so Go's GC pressures before the OS OOM-killer steps in.
+- **Systemd service:** see `deploy/openfabrica.service` for a ready-to-use unit
+  template with `OPENFABRICA_NO_BROWSER=1` and `CAP_NET_BIND_SERVICE`.

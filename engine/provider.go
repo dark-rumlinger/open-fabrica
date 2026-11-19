@@ -174,3 +174,13 @@ func supportsStructuredOutput(rp resolvedProvider) bool {
 	}
 	return llm.Caps.Allowed(llm.ModelKey{Provider: rp.Provider.Name(), Model: rp.Model}, llm.CapStructuredOutput)
 }
+
+// supportsVision reports whether the resolved provider and model support image
+// attachments without stripping them.
+func supportsVision(rp resolvedProvider) bool {
+	if rp.Provider == nil {
+		return false
+	}
+	k := llm.ModelKey{Provider: rp.Provider.Name(), Model: rp.Model}
+	return llm.Caps.Supports(k, llm.CapVision) == llm.Yes
+}

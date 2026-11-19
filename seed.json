@@ -270,6 +270,20 @@
         "id": "default",
         "display_name": "Brave Search"
       }
+    },
+    {
+      "vendor": "duckduckgo",
+      "kind": "search",
+      "name": "DuckDuckGo",
+      "transport": "duckduckgo",
+      "base_url": "https://html.duckduckgo.com/html/",
+      "auth": {
+        "required": false
+      },
+      "default_model": {
+        "id": "default",
+        "display_name": "DuckDuckGo Search"
+      }
     }
   ]
 }

@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"openfabrica/db"
 	"openfabrica/engine/enginetest"
@@ -331,5 +333,112 @@ func TestSpecAuditGapDrivesRepairRound(t *testing.T) {
 	_ = pdb.Reader().QueryRow(`SELECT COUNT(*) FROM of_chat_messages WHERE content LIKE '%{"items"%'`).Scan(&n)
 	if n != 0 {
 		t.Fatal("the audit's JSON is working context, never a chat message")
+	}
+}
+
+// Many files just over the clip floor must not spin the budget-shrink loop forever: a
+// clip that cannot get shorter ends it.
+func TestSpecAuditSourceTerminatesOnManyMidSizeFiles(t *testing.T) {
+	mgr := db.NewProjectDBManager(t.TempDir())
+	pdb, err := mgr.Create(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mgr.CloseAll)
+	body := strings.Repeat("const x = 1; // filler line\n", 85) // ~2.4 KB each
+	for i := 0; i < 150; i++ {
+		if _, err := pdb.ExecWrite(`INSERT INTO of_files (kind, path, body, metadata, scope) VALUES ('file', ?, ?, '{}', 'page')`,
+			fmt.Sprintf("m%03d.js", i), body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan string, 1)
+	go func() { done <- specAuditSource(pdb.Reader(), "", 50_000) }()
+	select {
+	case src := <-done:
+		if src == "" {
+			t.Fatal("expected source text")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("specAuditSource did not terminate")
+	}
+}
+
+// platform_managed is read from the JSON, not matched as a literal substring.
+func TestIsPlatformManagedMeta(t *testing.T) {
+	for meta, want := range map[string]bool{
+		`{"platform_managed":true}`:       true,
+		`{"platform_managed": true}`:      true,
+		`{"a":1,"platform_managed":true}`: true,
+		`{"platform_managed":false}`:      false,
+		`{}`:                              false,
+		``:                                false,
+		`not json`:                        false,
+	} {
+		if got := isPlatformManagedMeta(meta); got != want {
+			t.Errorf("isPlatformManagedMeta(%q) = %v, want %v", meta, got, want)
+		}
+	}
+}
+
+// TestRepairStallShortCircuitsLoop verifies that when a repair round stalls
+// (EndFailed / repeat_stall), the build stage stops the repair loop immediately
+// instead of re-running validators, spec_audit, and additional repair rounds.
+func TestRepairStallShortCircuitsLoop(t *testing.T) {
+	stallCall := enginetest.Calls(llm.ToolCall{ID: "s1", Name: "manage_files", Arguments: `{"action":"get","file_path":"/files/missing.js"}`})
+	inner := &enginetest.Provider{Steps: []enginetest.Step{
+		selectNoGuides, noFeatures,
+		enginetest.Text(planJSON),
+		saveStep,
+		completeStep("c2"),
+		enginetest.Text("done"), // answers the finalProbeNudge
+		// Repair round 1: 4 identical calls trigger RepeatGuard -> repeat_stall (EndFailed).
+		stallCall, stallCall, stallCall, stallCall,
+		// If the loop failed to short-circuit, a second repair round would consume this.
+		enginetest.Text("unexpected second repair round"),
+	}}
+	w, _ := buildE2EWorker(t, inner)
+	p := &auditProvider{Provider: inner, audits: []string{
+		`{"items":[{"id":"home-page","verdict":"partial","gaps":["missing widget"]}]}`,
+		`{"items":[{"id":"home-page","verdict":"partial","gaps":["missing widget"]}]}`,
+	}}
+	w.providerOverride = staticProviderSource{rp: resolvedProvider{Provider: p, Model: "fake-model", ProviderID: 1}}
+	validatorMu.Lock()
+	validatorSet = nil
+	validatorMu.Unlock()
+	driveToCompletion(t, w)
+
+	if len(p.auditLog) != 1 {
+		t.Fatalf("audits = %d, want 1 (stalled repair round must not re-run spec_audit)", len(p.auditLog))
+	}
+}
+
+// TestRepairNoProgressWithOpenTasksStops verifies that when a repair round makes
+// no progress on findings and closes no open plan tasks, the loop stops instead
+// of repeating all maxRepairRounds.
+func TestRepairNoProgressWithOpenTasksStops(t *testing.T) {
+	inner := &enginetest.Provider{Steps: []enginetest.Step{
+		selectNoGuides, noFeatures,
+		enginetest.Text(planJSON),
+		saveStep, // leaves home-page open (no completeStep)
+		enginetest.Text("cannot finish"),
+		// Repair round 1: makes no edits and closes no tasks.
+		enginetest.Text("still stuck"),
+		enginetest.Text("still stuck 2"),
+	}}
+	w, _ := buildE2EWorker(t, inner)
+	p := &auditProvider{Provider: inner, audits: []string{
+		`{"items":[{"id":"home-page","verdict":"partial","gaps":["missing widget"]}]}`,
+		`{"items":[{"id":"home-page","verdict":"partial","gaps":["missing widget"]}]}`,
+		`{"items":[{"id":"home-page","verdict":"partial","gaps":["missing widget"]}]}`,
+	}}
+	w.providerOverride = staticProviderSource{rp: resolvedProvider{Provider: p, Model: "fake-model", ProviderID: 1}}
+	validatorMu.Lock()
+	validatorSet = nil
+	validatorMu.Unlock()
+	driveToCompletion(t, w)
+
+	if len(p.auditLog) != 2 {
+		t.Fatalf("audits = %d, want 2 (initial + 1st repair re-audit, then stop on no progress)", len(p.auditLog))
 	}
 }

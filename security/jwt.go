@@ -32,18 +32,31 @@ type Claims struct {
 	// TenantRole is the user's role within TenantID (owner/admin/member/...).
 	// Empty when TenantID is zero. Distinct from Role (project-wide).
 	TenantRole string `json:"tenant_role,omitempty"`
-	// TokenVersion pins the token to the issuing user's token_version at mint
-	// time. The admin auth guard rejects the token once the stored version moves
-	// ahead (password change / sign-out-everywhere). Only meaningful for admin
-	// (project 0) tokens today.
+	// TokenVersion pins an admin token to the issuing user's token_version at
+	// mint time. The admin auth guard rejects the token once the stored version
+	// moves ahead (password change / sign-out-everywhere).
 	TokenVersion int `json:"tv,omitempty"`
 	jwt.RegisteredClaims
 }
 
+// The two kinds of token, carried in the audience claim. Both are signed with
+// the same key, so the audience is what keeps a project user's token off the
+// admin API and an admin token off a project's API.
+const (
+	AudienceAdmin   = "openfabrica-admin"
+	AudienceProject = "openfabrica-project"
+)
+
+// ForAdmin reports whether this is a platform admin's token.
+func (c *Claims) ForAdmin() bool {
+	return c.ProjectID == 0 && len(c.Audience) == 1 && c.Audience[0] == AudienceAdmin
+}
+
 type JWTManager struct {
-	secret        []byte
-	expiry        time.Duration
-	SecureCookies bool
+	secret          []byte
+	expiry          time.Duration
+	SecureCookies   bool
+	secureCookiesFn func() bool
 }
 
 func NewJWTManager(secret string, expiry time.Duration) *JWTManager {
@@ -53,42 +66,73 @@ func NewJWTManager(secret string, expiry time.Duration) *JWTManager {
 	}
 }
 
-// TokenRequest describes a token to mint. Zero-value fields are omitted from the
-// claims (see the omitempty tags on Claims), so a plain project login leaves
-// TenantID and TokenVersion unset. ProjectID 0 is an admin/unscoped token. A
-// non-positive Expiry falls back to the manager default.
+// NewJWTManagerWithSecureCookies constructs a JWTManager whose auth cookies
+// derive their Secure flag dynamically from secureCookies().
+func NewJWTManagerWithSecureCookies(secret string, expiry time.Duration, secureCookies func() bool) *JWTManager {
+	return &JWTManager{
+		secret:          []byte(secret),
+		expiry:          expiry,
+		secureCookiesFn: secureCookies,
+	}
+}
+
+// TokenRequest describes a project user's token. Zero-value fields are omitted
+// from the claims (see the omitempty tags on Claims), so a plain project login
+// leaves TenantID unset. A non-positive Expiry falls back to the manager default.
 type TokenRequest struct {
-	ProjectID    int
+	ProjectID  int
+	UserID     int
+	Username   string
+	Role       string
+	TenantID   int
+	TenantRole string
+	Expiry     time.Duration
+}
+
+// AdminTokenRequest describes a platform admin's token.
+type AdminTokenRequest struct {
 	UserID       int
 	Username     string
 	Role         string
-	TenantID     int
-	TenantRole   string
 	TokenVersion int
-	Expiry       time.Duration
 }
 
-// Generate mints a signed JWT for req.
+// Generate mints a project user's token. It refuses a request without a
+// project: a token for the platform itself comes only from GenerateAdmin.
 func (j *JWTManager) Generate(req TokenRequest) (string, error) {
-	expiry := req.Expiry
-	if expiry <= 0 {
-		expiry = j.expiry
+	if req.ProjectID <= 0 {
+		return "", fmt.Errorf("a project token needs a project id")
 	}
-	claims := Claims{
-		ProjectID:    req.ProjectID,
+	return j.sign(Claims{
+		ProjectID:  req.ProjectID,
+		UserID:     req.UserID,
+		Username:   req.Username,
+		Role:       req.Role,
+		TenantID:   req.TenantID,
+		TenantRole: req.TenantRole,
+	}, AudienceProject, req.Expiry)
+}
+
+// GenerateAdmin mints a platform admin's token.
+func (j *JWTManager) GenerateAdmin(req AdminTokenRequest) (string, error) {
+	return j.sign(Claims{
 		UserID:       req.UserID,
 		Username:     req.Username,
 		Role:         req.Role,
-		TenantID:     req.TenantID,
-		TenantRole:   req.TenantRole,
 		TokenVersion: req.TokenVersion,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
+	}, AudienceAdmin, 0)
+}
+
+func (j *JWTManager) sign(claims Claims, audience string, expiry time.Duration) (string, error) {
+	if expiry <= 0 {
+		expiry = j.expiry
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(j.secret)
+	claims.RegisteredClaims = jwt.RegisteredClaims{
+		Audience:  jwt.ClaimStrings{audience},
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(j.secret)
 }
 
 // AuthCookieName is the name of the HttpOnly cookie used for SSE auth.
@@ -96,6 +140,7 @@ const AuthCookieName = "of_auth"
 
 // SetAuthCookie writes an HttpOnly, SameSite=Strict cookie with the given token.
 func (j *JWTManager) SetAuthCookie(w http.ResponseWriter, token string) {
+	secure := j.SecureCookies || (j.secureCookiesFn != nil && j.secureCookiesFn())
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
 		Value:    token,
@@ -103,7 +148,7 @@ func (j *JWTManager) SetAuthCookie(w http.ResponseWriter, token string) {
 		MaxAge:   int(j.expiry.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   j.SecureCookies,
+		Secure:   secure,
 	})
 }
 
@@ -141,6 +186,15 @@ func (j *JWTManager) Validate(tokenString string) (*Claims, error) {
 	claims, ok := token.Claims.(*Claims)
 	if !ok || !token.Valid {
 		return nil, fmt.Errorf("invalid token")
+	}
+	// The audience must name the kind the claims describe: admin tokens carry
+	// no project, project tokens always carry one.
+	want := AudienceProject
+	if claims.ProjectID == 0 {
+		want = AudienceAdmin
+	}
+	if len(claims.Audience) != 1 || claims.Audience[0] != want {
+		return nil, fmt.Errorf("invalid token audience")
 	}
 
 	return claims, nil

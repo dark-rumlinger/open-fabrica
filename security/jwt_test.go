@@ -1,6 +1,7 @@
 package security
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestJWT_GenerateForProject_NoTenantClaim(t *testing.T) {
 
 func TestJWT_GenerateAdmin_CarriesVersionAndIsUnscoped(t *testing.T) {
 	jm := NewJWTManager("test-secret", time.Hour)
-	token, err := jm.Generate(TokenRequest{UserID: 7, Username: "root", Role: "admin", TokenVersion: 3})
+	token, err := jm.GenerateAdmin(AdminTokenRequest{UserID: 7, Username: "root", Role: "admin", TokenVersion: 3})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -166,5 +167,50 @@ func TestTokenIssueTimeHasMillisecondPrecision(t *testing.T) {
 	// Expiry keeps working at the finer resolution.
 	if d := second.ExpiresAt.Time.Sub(second.IssuedAt.Time); d < 59*time.Minute || d > 61*time.Minute {
 		t.Errorf("token lifetime = %v, want about an hour", d)
+	}
+}
+
+// A project token cannot be minted without a project, and the two kinds of
+// token validate only as what they are.
+func TestTokenAudience(t *testing.T) {
+	jm := NewJWTManager("aud-secret", time.Hour)
+	if _, err := jm.Generate(TokenRequest{UserID: 1, Role: "admin"}); err == nil {
+		t.Fatal("minted a project token with no project id")
+	}
+	admin, err := jm.GenerateAdmin(AdminTokenRequest{UserID: 1, Role: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := jm.Generate(TokenRequest{ProjectID: 3, UserID: 1, Role: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ac, err := jm.Validate(admin)
+	if err != nil || !ac.ForAdmin() {
+		t.Errorf("admin token: err=%v forAdmin=%v", err, ac != nil && ac.ForAdmin())
+	}
+	pc, err := jm.Validate(project)
+	if err != nil || pc.ForAdmin() {
+		t.Errorf("project token: err=%v, must not pass as an admin token", err)
+	}
+}
+
+func TestJWTManagerWithSecureCookies(t *testing.T) {
+	tlsActive := false
+	jm := NewJWTManagerWithSecureCookies("cookie-secret", time.Hour, func() bool {
+		return tlsActive
+	})
+
+	rec1 := httptest.NewRecorder()
+	jm.SetAuthCookie(rec1, "tok1")
+	if cookies := rec1.Result().Cookies(); len(cookies) != 1 || cookies[0].Secure {
+		t.Fatalf("expected non-Secure cookie when tlsActive=false, got %+v", cookies)
+	}
+
+	tlsActive = true
+	rec2 := httptest.NewRecorder()
+	jm.SetAuthCookie(rec2, "tok2")
+	if cookies := rec2.Result().Cookies(); len(cookies) != 1 || !cookies[0].Secure {
+		t.Fatalf("expected Secure cookie when tlsActive=true, got %+v", cookies)
 	}
 }

@@ -51,9 +51,7 @@ export function createCrudPanel(opts) {
     toolbarChildren.push(h('span', { className: 'notice text-sm text-secondary', style: { marginTop: '0' } }, note));
   }
   if (toolbarExtra) toolbarChildren.push(toolbarExtra);
-  // Writes are admin-only server-side, so non-admins get no create control
-  // that could only answer 403.
-  const canCreate = !!(createLabel && onCreate && state.isAdmin());
+  const canCreate = !!(createLabel && onCreate);
   if (canCreate) {
     toolbarChildren.push(h('button', {
       className: 'btn btn--primary btn--sm ml-auto',

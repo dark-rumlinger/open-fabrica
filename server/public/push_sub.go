@@ -6,23 +6,16 @@ import (
 	"strings"
 
 	"openfabrica/db"
+	"openfabrica/store"
 )
 
-// apiPushSubscribe handles POST /api/<path>/push/subscribe. Body is the raw
-// PushSubscription object from the browser:
-//
-//	{"endpoint":"https://...","keys":{"p256dh":"...","auth":"..."}}
-//
-// Saves it under of_push_subscriptions keyed by endpoint_url.
+// apiPushSubscribe handles POST /api/<path>/push/subscribe.
 func (h *Handler) apiPushSubscribe(w http.ResponseWriter, r *http.Request, projectID int, projectDB *db.ProjectDB, path string) {
-	var exists int
-	if err := projectDB.Reader().QueryRow("SELECT COUNT(*) FROM of_push_endpoints WHERE path = ?", path).Scan(&exists); err != nil || exists == 0 {
+	requiresAuth, exists := store.PushEndpointRequiresAuth(projectDB, path)
+	if !exists {
 		writeError(w, http.StatusNotFound, "push endpoint not found")
 		return
 	}
-
-	var requiresAuth bool
-	_ = projectDB.Reader().QueryRow("SELECT requires_auth FROM of_push_endpoints WHERE path = ?", path).Scan(&requiresAuth) // existence checked above; a miss keeps requiresAuth false
 
 	var userID int
 	if requiresAuth {
@@ -38,7 +31,6 @@ func (h *Handler) apiPushSubscribe(w http.ResponseWriter, r *http.Request, proje
 		}
 		userID = claims.UserID
 	} else if h.deps.JWTManager != nil {
-		// Opportunistically capture user_id if a valid token is present.
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token != "" {
 			if claims, err := h.validateUserClaims(token); err == nil && claims.ProjectID == projectID {
@@ -54,7 +46,7 @@ func (h *Handler) apiPushSubscribe(w http.ResponseWriter, r *http.Request, proje
 			Auth   string `json:"auth"`
 		} `json:"keys"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // 64 KB: a push subscription is tiny
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "bad json")
 		return
@@ -64,21 +56,7 @@ func (h *Handler) apiPushSubscribe(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
-	var uidArg any
-	if userID > 0 {
-		uidArg = userID
-	}
-
-	_, err := projectDB.Writer().Exec(`
-		INSERT INTO of_push_subscriptions (endpoint_path, user_id, endpoint_url, p256dh, auth_key)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(endpoint_url) DO UPDATE SET
-		  p256dh = excluded.p256dh,
-		  auth_key = excluded.auth_key,
-		  user_id = excluded.user_id`,
-		path, uidArg, body.Endpoint, body.Keys.P256DH, body.Keys.Auth,
-	)
-	if err != nil {
+	if err := store.UpsertPushSubscription(projectDB, path, userID, body.Endpoint, body.Keys.P256DH, body.Keys.Auth); err != nil {
 		writeError(w, http.StatusInternalServerError, "save subscription: "+err.Error())
 		return
 	}

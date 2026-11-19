@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"openfabrica/db"
@@ -16,6 +17,8 @@ import (
 	"openfabrica/internal/netguard"
 	"openfabrica/internal/safego"
 	"openfabrica/security"
+
+	"github.com/google/uuid"
 )
 
 // maxConcurrentDeliveries caps the number of in-flight webhook HTTP deliveries
@@ -32,6 +35,7 @@ type Dispatcher struct {
 	logger    *slog.Logger
 	client    *http.Client
 	sem       chan struct{}
+	wg        sync.WaitGroup
 	// ctx is the dispatcher's lifecycle context: retry backoff waits and
 	// in-flight requests must abort when it is canceled at shutdown. Nil on a
 	// zero-value Dispatcher (tests).
@@ -67,6 +71,14 @@ func NewDispatcher(projectDBMgr *db.ProjectDBManager, bus *events.Bus, encryptor
 	// Subscribe to all events and check for matching webhook subscriptions.
 	bus.SubscribeAll(d.handleEvent)
 
+	if ctx != nil {
+		d.wg.Add(1)
+		safego.Go("webhook-outbox-sweeper", func() {
+			defer d.wg.Done()
+			d.sweepLoop(ctx)
+		})
+	}
+
 	return d
 }
 
@@ -76,77 +88,118 @@ func (d *Dispatcher) handleEvent(event events.Event) {
 		return
 	}
 
-	eventType := string(event.Type)
-
 	// Get the project DB for this event's project.
 	projectDB := d.projectDBMgr.Get(event.ProjectID)
 	if projectDB == nil {
 		return // project DB not open, skip
 	}
 
-	// Query for outgoing webhooks subscribed to this event type.
-	rows, err := projectDB.Query(
-		`SELECT w.id, w.name, w.url, w.secret_encrypted
-		 FROM of_webhooks w
-		 JOIN of_webhook_subscriptions ws ON ws.webhook_id = w.id
-		 WHERE ws.event_type = ? AND w.is_enabled = 1 AND w.url IS NOT NULL AND w.url != ''`,
-		eventType,
-	)
-	if err != nil {
-		slog.Warn("webhook dispatch: subscription lookup failed", "event", eventType, "error", err)
-		return
-	}
-	defer rows.Close()
+	// Do the subscription lookup, secret decryption, and fan-out in a single
+	// detached goroutine so the event bus (which calls subscribers synchronously,
+	// in the publisher's goroutine) is never blocked on SQLite or crypto.
+	d.wg.Add(1)
+	safego.Go("webhook fan-out", func() {
+		defer d.wg.Done()
+		eventType := string(event.Type)
 
-	type target struct {
-		id     int
-		name   string
-		url    string
-		secret string
-	}
-
-	var targets []target
-	for rows.Next() {
-		var t target
-		var sealed sql.NullString
-		if err := rows.Scan(&t.id, &t.name, &t.url, &sealed); err != nil {
-			continue
+		// Query for outgoing webhooks subscribed to this event type.
+		rows, err := projectDB.Query(
+			`SELECT w.id, w.name, w.url, w.secret_encrypted
+			 FROM of_webhooks w
+			 JOIN of_webhook_subscriptions ws ON ws.webhook_id = w.id
+			 WHERE ws.event_type = ? AND w.is_enabled = 1 AND w.url IS NOT NULL AND w.url != ''`,
+			eventType,
+		)
+		if err != nil {
+			slog.Warn("webhook dispatch: subscription lookup failed", "event", eventType, "error", err)
+			return
 		}
-		if sealed.Valid {
-			secret, err := d.encryptor.OpenOptional(sealed.String)
-			if err != nil {
-				// Delivering unsigned would look like a working webhook to a
-				// receiver that does not check, and a failing one to one that does:
-				// skip it and say why instead.
-				slog.Warn("webhook dispatch: signing secret cannot be decrypted, skipping",
-					"webhook", t.name, "error", err)
+		defer rows.Close()
+
+		type target struct {
+			id              int
+			name            string
+			url             string
+			secret          string
+			secretEncrypted string
+		}
+
+		var targets []target
+		for rows.Next() {
+			var t target
+			var sealed sql.NullString
+			if err := rows.Scan(&t.id, &t.name, &t.url, &sealed); err != nil {
 				continue
 			}
-			t.secret = secret
+			if sealed.Valid {
+				secret, err := d.encryptor.OpenOptional(sealed.String)
+				if err != nil {
+					// Delivering unsigned would look like a working webhook to a
+					// receiver that does not check, and a failing one to one that does:
+					// skip it and say why instead.
+					slog.Warn("webhook dispatch: signing secret cannot be decrypted, skipping",
+						"webhook", t.name, "error", err)
+					continue
+				}
+				t.secret = secret
+				t.secretEncrypted = sealed.String
+			}
+			targets = append(targets, t)
 		}
-		targets = append(targets, t)
-	}
-	if err := rows.Err(); err != nil {
-		slog.Warn("webhook dispatch: subscription read failed", "event", eventType, "error", err)
-	}
-	// Fan out in a single detached goroutine so the event bus (which calls
-	// subscribers synchronously, in the publisher's goroutine) is never blocked.
-	// That goroutine drains the targets through the semaphore, so in-flight HTTP
-	// deliveries stay globally capped at maxConcurrentDeliveries without applying
-	// backpressure to Publish.
-	safego.Go("webhook fan-out", func() {
+		if err := rows.Err(); err != nil {
+			slog.Warn("webhook dispatch: subscription read failed", "event", eventType, "error", err)
+		}
+
+		if len(targets) == 0 {
+			return
+		}
+		payload, err := json.Marshal(map[string]any{
+			"event":      string(event.Type),
+			"project_id": event.ProjectID,
+			"payload":    event.Payload,
+			"timestamp":  event.Timestamp,
+		})
+		if err != nil {
+			d.logger.Error("webhook: failed to marshal payload", "event", eventType, "error", err)
+			return
+		}
+
+		ctx := d.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		for _, t := range targets {
-			d.sem <- struct{}{}
-			go func(t target) {
+			deliveryID := uuid.NewString()
+			_, _ = projectDB.ExecWrite(
+				`INSERT INTO of_webhook_outbox (delivery_id, webhook_id, webhook_name, url, secret_encrypted, event_type, body)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				deliveryID, t.id, t.name, t.url, t.secretEncrypted, eventType, string(payload),
+			)
+
+			select {
+			case d.sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			d.wg.Add(1)
+			go func(t target, deliveryID string) {
+				defer d.wg.Done()
 				defer func() { <-d.sem }()
 				// Recover so a panic in one delivery cannot crash the whole
 				// multi-project server from this detached goroutine. The webhook
 				// name rides in the task label.
 				defer safego.Recover("webhook delivery " + t.name)
-				d.deliver(t.id, t.name, t.url, t.secret, event)
-			}(t)
+				d.deliverOutbox(projectDB, deliveryID, Target{ID: t.id, Name: t.name, URL: t.url, Secret: t.secret}, event.ProjectID, eventType, payload)
+			}(t, deliveryID)
 		}
 	})
+}
+
+// Stop waits for all in-flight webhook fan-out, delivery, and outbox sweep
+// goroutines to finish. Call after canceling the dispatcher's lifecycle context
+// so retry sleeps and outbound requests abort promptly.
+func (d *Dispatcher) Stop() {
+	d.wg.Wait()
 }
 
 // deliver sends one subscribed event to a webhook, wrapped in the subscription
@@ -165,6 +218,118 @@ func (d *Dispatcher) deliver(webhookID int, name, url, secret string, event even
 	_ = d.Send(Target{ID: webhookID, Name: name, URL: url, Secret: secret}, event.ProjectID, string(event.Type), payload)
 }
 
+func (d *Dispatcher) deliverOutbox(projectDB *db.ProjectDB, deliveryID string, t Target, projectID int, eventType string, body []byte) {
+	err := d.sendWithID(deliveryID, t, projectID, eventType, body)
+	if err == nil {
+		_, _ = projectDB.ExecWrite(
+			"UPDATE of_webhook_outbox SET status = 'delivered', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?",
+			deliveryID,
+		)
+		return
+	}
+	// If interrupted by shutdown cancellation, leave status = 'pending' so the
+	// outbox sweeper resumes delivery on next boot.
+	if d.ctx != nil && d.ctx.Err() != nil {
+		return
+	}
+	_, _ = projectDB.ExecWrite(
+		"UPDATE of_webhook_outbox SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?",
+		err.Error(), deliveryID,
+	)
+}
+
+const outboxSweepInterval = 10 * time.Second
+
+func (d *Dispatcher) sweepLoop(ctx context.Context) {
+	// Run once shortly after startup to pick up any pending deliveries left by a restart.
+	select {
+	case <-time.After(2 * time.Second):
+		d.sweepAllProjects(ctx)
+	case <-ctx.Done():
+		return
+	}
+	ticker := time.NewTicker(outboxSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.sweepAllProjects(ctx)
+		}
+	}
+}
+
+func (d *Dispatcher) sweepAllProjects(ctx context.Context) {
+	for _, projectID := range d.projectDBMgr.OpenProjectIDs() {
+		if ctx.Err() != nil {
+			return
+		}
+		pdb := d.projectDBMgr.Get(projectID)
+		if pdb == nil {
+			continue
+		}
+		d.sweepProject(ctx, projectID, pdb)
+	}
+}
+
+func (d *Dispatcher) sweepProject(ctx context.Context, projectID int, pdb *db.ProjectDB) {
+	rows, err := pdb.Query(
+		`SELECT delivery_id, webhook_id, webhook_name, url, secret_encrypted, event_type, body
+		 FROM of_webhook_outbox
+		 WHERE status = 'pending' AND next_retry_at <= CURRENT_TIMESTAMP
+		 ORDER BY id ASC LIMIT 20`,
+	)
+	if err != nil {
+		return
+	}
+	type item struct {
+		deliveryID, name, url, secretEnc, eventType, body string
+		webhookID                                         int
+	}
+	var pending []item
+	for rows.Next() {
+		var it item
+		if rows.Scan(&it.deliveryID, &it.webhookID, &it.name, &it.url, &it.secretEnc, &it.eventType, &it.body) == nil {
+			pending = append(pending, it)
+		}
+	}
+	_ = rows.Err()
+	rows.Close()
+
+	for _, it := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		// Claim by bumping attempts so concurrent sweeps or startup races don't double-send.
+		res, err := pdb.ExecWrite(
+			`UPDATE of_webhook_outbox
+			 SET attempts = attempts + 1, next_retry_at = datetime('now', '+30 seconds'), updated_at = CURRENT_TIMESTAMP
+			 WHERE delivery_id = ? AND status = 'pending' AND next_retry_at <= CURRENT_TIMESTAMP`,
+			it.deliveryID,
+		)
+		if err != nil {
+			continue
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
+		}
+		var secret string
+		if it.secretEnc != "" && d.encryptor != nil {
+			s, err := d.encryptor.OpenOptional(it.secretEnc)
+			if err != nil {
+				_, _ = pdb.ExecWrite(
+					"UPDATE of_webhook_outbox SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?",
+					"secret decrypt failed", it.deliveryID,
+				)
+				continue
+			}
+			secret = s
+		}
+		d.deliverOutbox(pdb, it.deliveryID, Target{ID: it.webhookID, Name: it.name, URL: it.url, Secret: secret}, projectID, it.eventType, []byte(it.body))
+	}
+}
+
 // Target is one outgoing webhook: its row id, name, URL and opened signing secret.
 type Target struct {
 	ID     int
@@ -179,6 +344,10 @@ type Target struct {
 // subscriptions and a trigger's trigger_webhook action both go through it, and only
 // the body differs. Returns the final error, nil on a 2xx.
 func (d *Dispatcher) Send(t Target, projectID int, eventType string, body []byte) error {
+	return d.sendWithID(uuid.NewString(), t, projectID, eventType, body)
+}
+
+func (d *Dispatcher) sendWithID(deliveryID string, t Target, projectID int, eventType string, body []byte) error {
 	// Pre-flight SSRF check: refuse a stored URL that resolves to a private or
 	// internal address before spending a delivery attempt on it.
 	if !d.allowPrivateHosts {
@@ -217,6 +386,7 @@ func (d *Dispatcher) Send(t Target, projectID int, eventType string, body []byte
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "OpenFabrica-Webhook/1.0")
+		req.Header.Set("X-Webhook-Delivery-ID", deliveryID)
 		if t.Secret != "" {
 			req.Header.Set("X-Webhook-Signature", "sha256="+security.HMACSHA256Hex([]byte(t.Secret), body))
 		}

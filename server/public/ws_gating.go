@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"openfabrica/db"
+	"openfabrica/store"
 )
 
 // Per-room access gating for room_gated endpoints: the first peer into an
@@ -28,11 +29,7 @@ func (h *Handler) roomJoinGate(projectDB *db.ProjectDB, endpointPath string, ten
 		return "", false, true // global channel is not gated
 	}
 
-	var stored string
-	err := projectDB.QueryRow(
-		"SELECT token FROM of_ws_room_tokens WHERE endpoint_path = ? AND tenant_id = ? AND room = ?",
-		endpointPath, tenantID, room,
-	).Scan(&stored)
+	stored, err := store.GetWSRoomToken(projectDB.Reader(), endpointPath, tenantID, room)
 	switch {
 	case err == nil:
 		// Room already claimed: the presented token must match exactly.
@@ -50,20 +47,9 @@ func (h *Handler) roomJoinGate(projectDB *db.ProjectDB, endpointPath string, ten
 	if minted == "" {
 		minted = uuid.New().String()
 	}
-	if _, ierr := projectDB.ExecWrite(
-		"INSERT OR IGNORE INTO of_ws_room_tokens (endpoint_path, tenant_id, room, token) VALUES (?, ?, ?, ?)",
-		endpointPath, tenantID, room, minted,
-	); ierr != nil {
-		slog.Warn("ws room gate: token claim failed", "path", endpointPath, "room", room, "error", ierr)
-		return "", false, false
-	}
-
-	var final string
-	if rerr := projectDB.QueryRow(
-		"SELECT token FROM of_ws_room_tokens WHERE endpoint_path = ? AND tenant_id = ? AND room = ?",
-		endpointPath, tenantID, room,
-	).Scan(&final); rerr != nil {
-		slog.Warn("ws room gate: token re-read failed", "path", endpointPath, "room", room, "error", rerr)
+	final, rerr := store.ClaimWSRoomToken(projectDB, endpointPath, tenantID, room, minted)
+	if rerr != nil {
+		slog.Warn("ws room gate: token claim failed", "path", endpointPath, "room", room, "error", rerr)
 		return "", false, false
 	}
 	if final == minted {
@@ -91,10 +77,7 @@ func pruneRoomToken(projectDB *db.ProjectDB, ws *wsEndpointConfig, roomName stri
 	if ws == nil || !ws.RoomGated || roomName == "" {
 		return
 	}
-	if _, err := projectDB.ExecWrite(
-		"DELETE FROM of_ws_room_tokens WHERE endpoint_path = ? AND tenant_id = ? AND room = ?",
-		ws.Path, tenantID, roomName,
-	); err != nil {
+	if err := store.DeleteWSRoomToken(projectDB, ws.Path, tenantID, roomName); err != nil {
 		slog.Warn("ws room token prune failed", "endpoint", ws.Path, "room", roomName, "error", err)
 	}
 }

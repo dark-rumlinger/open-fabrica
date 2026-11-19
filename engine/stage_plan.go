@@ -27,15 +27,29 @@ type planStage struct{}
 // with the capability-visibility test so a surface the test checks (like
 // HiddenGuides) cannot be silently dropped from the production path.
 func planAssembleInput(ps []pack.Pack, reg *tools.Registry, caps llm.Capabilities, sentinels map[string]string) pack.AssembleInput {
+	merged := make(map[string]string, len(sentinels)+1)
+	for k, v := range sentinels {
+		merged[k] = v
+	}
+	if _, ok := merged["WEB_SEARCH_NOTE"]; !ok {
+		merged["WEB_SEARCH_NOTE"] = planWebSearchNote(caps)
+	}
 	return pack.AssembleInput{
 		Stage:     StagePlan,
 		Wave:      pack.Wave,
 		Selection: pack.Select(ps, StagePlan),
-		Sentinels: sentinels,
-		// Capability-dead guides are left out of the index PLAN picks from:
-		// naming one lets the planner commit to a capability no tool can build.
-		HiddenGuides: capabilityDeadGuides(ps, reg, caps),
+		Sentinels: merged,
+		// Capability-dead guides (and user_flows, which runs as a post-build gate
+		// rather than a planned item) are left out of the index PLAN picks from.
+		HiddenGuides: userFlowsHiddenGuides(capabilityDeadGuides(ps, reg, caps), false),
 	}
+}
+
+func planWebSearchNote(caps llm.Capabilities) string {
+	if !caps.Has("search") {
+		return ""
+	}
+	return "**Web research & live sources.** When the brief asks to search online, research external references/prompts, or pull live web/RSS content, include `manage_web_search` and `manage_web_fetch` in the relevant task's `tools` and state what to look up in its `intent` so BUILD executes the search. Keep navigation labels and seeded content in one consistent language (matching the owner's brief unless they asked for another language)."
 }
 
 func (planStage) Name() string { return StagePlan }
@@ -61,10 +75,7 @@ func (planStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 	}
 
 	ps := w.effectivePacks()
-	caps, capsErr := llm.LoadCapabilities(w.deps.DB.DB)
-	if capsErr != nil {
-		w.logger.Warn("load capabilities failed; capability-gated tools hidden from plan catalogue", "error", capsErr)
-	}
+	caps := w.loadCapabilities("planStage")
 
 	// Resolve the task budget from the ambition level AND the brief (so an EXPAND-off
 	// project whose brief specifies its scope is built in full, not capped). An update run
@@ -117,13 +128,30 @@ func (planStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 		features = w.extractFeatures(ctx, planBriefText(w.projectBrief(), r))
 	}
 
+	// Optional pre-PLAN web research: runs BEFORE PlanResponseSchema() so PLAN
+	// stays a pure structured-JSON call while still incorporating live search
+	// findings when the brief asks to search/research online.
+	var researchSummary string
+	if !isUpdateReplan && caps.Has("search") && w.needsPrePlanResearch(ctx, w.projectBrief(), r.ExpandedBrief) {
+		researchSummary = w.runPrePlanResearch(ctx, w.projectBrief(), r.ExpandedBrief)
+	}
+
 	// The ask, built once. Each corrective turn below re-asks it with the previous answer
 	// and a critique appended, so they share this base rather than restating it.
+	planTaskMsg := buildPlanUserMessage(w.projectBrief(), answers, r, features)
+	if researchSummary != "" {
+		planTaskMsg += "\n\n## Web Research Findings\n\n" + researchSummary
+	}
 	base := seed{
 		owner: w.ownerContext() + w.ownerMemoryBlock(),
-		task:  buildPlanUserMessage(w.projectBrief(), answers, r, features),
+		task:  planTaskMsg,
 	}
 	spec.Seed = base.messages()
+	if r.ExpandedBrief == "" {
+		if imgs := w.loadBriefImages(); len(imgs) > 0 && len(spec.Seed) > 0 {
+			spec.Seed[len(spec.Seed)-1].Images = imgs
+		}
+	}
 
 	sess := w.newStageSession(StagePlan)
 
@@ -204,12 +232,9 @@ func (planStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 	if r != nil && r.UpdateDescription != "" && w.pdb != nil {
 		projectHasAuth = store.ProjectHasAuth(w.pdb.Reader())
 	}
-	// Deterministic repairs first: a mechanical, unambiguous fix (e.g. homing entry
-	// exports in a store module) is applied engine-side rather than spent as an LLM
-	// re-plan turn (see plan_normalize.go). Only what survives goes to the retry.
-	if fixes := normalizeEntryExports(plan); len(fixes) > 0 {
-		w.logger.Info("plan normalized deterministically", "fixes", strings.Join(fixes, "; "))
-	}
+	// Deterministic repairs (e.g. homing entry exports in a store module) already ran at
+	// parse in canonicalizePlan - and again on every re-plan output, since those re-parse -
+	// so only what a mechanical fix could not settle reaches the retry below (plan_normalize.go).
 	if fb := joinFeedback(planCoherenceFeedback(plan, projectHasAuth), featureCoverageFeedback(plan, features)); fb != "" {
 		w.logger.Info("plan has coherence issues, retrying once to repair", "detail", stringutil.Truncate(fb, 500))
 		// Feeds back the re-marshalled canonical plan, not the raw response: by here the
@@ -219,9 +244,6 @@ func (planStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 			string(curJSON), fb, "plan coherence-retry", plan); err != nil {
 			return Outcome{}, err
 		}
-		// Re-normalize the repaired plan so a re-slipped export home is fixed
-		// deterministically instead of only logged as still-incoherent.
-		normalizeEntryExports(plan)
 		if still := joinFeedback(planCoherenceFeedback(plan, projectHasAuth), featureCoverageFeedback(plan, features)); still != "" {
 			w.logger.Info("plan still has coherence issues after retry, proceeding", "detail", stringutil.Truncate(still, 500))
 		}
@@ -237,7 +259,6 @@ func (planStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 		} else {
 			plan = next
 		}
-		normalizeEntryExports(plan)
 		if still := featureCoverageFeedback(plan, features); still != "" {
 			w.logger.Info("plan still leaves features uncovered, proceeding", "detail", stringutil.Truncate(still, 500))
 		}
@@ -257,15 +278,14 @@ func (planStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 	// The planner never writes the feature list; the engine attaches the one it checked
 	// the plan against, for BUILD and the spec audit to read.
 	plan.Features = features
-	planJSON, _ := json.Marshal(plan)
-	if err := r.setPlan(w.pdb, string(planJSON)); err != nil {
-		w.logger.Warn("persist plan failed", "error", err)
+	// BUILD reads the plan back from the run row, so a plan that was not stored
+	// would build with no decisions and no guides. Fail the stage instead.
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		return Outcome{}, fmt.Errorf("encode plan: %w", err)
 	}
-
-	// Surface an oversized single-session build in the run log (advisory only -
-	// never blocks; the planner legitimately scales tasks with project size).
-	if adv := PlanScopeAdvisory(plan); adv != "" {
-		w.logger.Info("plan scope advisory", "detail", adv, "tasks", len(plan.Tasks))
+	if err := r.setPlan(w.pdb, string(planJSON)); err != nil {
+		return Outcome{}, fmt.Errorf("persist plan: %w", err)
 	}
 
 	// A decision check the conformance validator cannot evaluate (unknown op, or an
@@ -599,27 +619,6 @@ func seedTasksFromPlan(w *Worker, r *Run, plan *Plan) int {
 		w.logger.Warn("seed tasks failed", "error", err)
 	}
 	return len(ids)
-}
-
-// normPlanPath normalises a planner-declared path for overlap comparison (case, leading
-// slash, /files/ prefix) so "/files/list.js", "files/list.js", and "list.js" compare equal.
-// A page route and a resource/table name are DIFFERENT namespaces ("/activity" the page vs
-// "activity" the table), and folding them would merge a page task into a backend one and
-// drop the page. So a root-absolute non-/files/ path keeps its slash; only file assets fold.
-func normPlanPath(p string) string {
-	p = strings.ToLower(strings.TrimSpace(p))
-	// The shared layout's canonical path is `default`; the plan frame tells the planner
-	// `/layout` normalizes to it, so it must never read as a page route here (the
-	// app-shape route-sprawl check would count it).
-	if p == "/layout" {
-		return "default"
-	}
-	if isRootedNonAsset(p) {
-		return p // page-route namespace: keep the slash so it can't alias a bare name
-	}
-	p = strings.TrimPrefix(p, "/")
-	p = strings.TrimPrefix(p, "files/")
-	return p
 }
 
 // resolvePlanDep maps a planner-declared dependency string onto the id of the

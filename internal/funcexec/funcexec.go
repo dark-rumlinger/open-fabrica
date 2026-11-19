@@ -68,15 +68,24 @@ var checkoutImpl CheckoutFunc
 // tool package's init.
 func RegisterCheckout(f CheckoutFunc) { checkoutImpl = f }
 
-// systemTableRef matches a reference to a reserved of_ table at an identifier
-// boundary (so a column like number_of_items is not falsely rejected). Mirrors
-// the query endpoint's guard; the security-critical verb/stacked checks come
-// from the shared sqlguard package below.
-var systemTableRef = regexp.MustCompile(`(?i)\bof_\w*`)
+// MQTTPublishFunc publishes a message to a project's MQTT broker from ctx.mqtt.publish.
+type MQTTPublishFunc func(projectID int, topic string, payload []byte, qos byte, retain bool) error
+
+var mqttPublishImpl MQTTPublishFunc
+
+// RegisterMQTTPublish installs the ctx.mqtt.publish implementation at server wiring time.
+func RegisterMQTTPublish(f MQTTPublishFunc) { mqttPublishImpl = f }
+
+// PublishMQTT publishes to a project's live MQTT broker when wired (no-op when nil).
+func PublishMQTT(projectID int, topic string, payload []byte, qos byte, retain bool) error {
+	if mqttPublishImpl == nil {
+		return nil
+	}
+	return mqttPublishImpl(projectID, topic, payload, qos, retain)
+}
 
 // identifierRef matches one SQL identifier, used to test a query's names
-// against the project's PASSWORD columns at the same identifier boundary
-// systemTableRef uses.
+// against the project's PASSWORD columns at an identifier boundary.
 var identifierRef = regexp.MustCompile(`[A-Za-z_]\w*`)
 
 // Spec is a stored function's executable definition.
@@ -116,11 +125,23 @@ func deps(rt Runtime, spec Spec) funcsandbox.Deps {
 	if checkoutImpl != nil {
 		checkout = func(args map[string]any) (map[string]any, error) { return checkoutImpl(rt, args) }
 	}
+	var mqttPub func(topic, payload string, qos int, retain bool) error
+	if mqttPublishImpl != nil {
+		mqttPub = func(topic, payload string, qos int, retain bool) error {
+			if qos < 0 {
+				qos = 0
+			} else if qos > 1 {
+				qos = 1
+			}
+			return mqttPublishImpl(rt.ProjectID, topic, []byte(payload), byte(qos), retain)
+		}
+	}
 	return funcsandbox.Deps{
-		NowMS:    time.Now().UnixMilli(),
-		Budget:   spec.Timeout,
-		LLM:      rt.LLM, // nil-safe: the sandbox throws "not available" when nil
-		Checkout: checkout,
+		NowMS:       time.Now().UnixMilli(),
+		Budget:      spec.Timeout,
+		LLM:         rt.LLM, // nil-safe: the sandbox throws "not available" when nil
+		Checkout:    checkout,
+		MQTTPublish: mqttPub,
 
 		Query: func(query string, params []any) ([]map[string]any, error) {
 			// Fail closed, as the declared-write path does: without the
@@ -237,23 +258,9 @@ func guardReadOnlySelect(query string, hashed map[string]bool) (string, string) 
 	if len(query) > maxSQLTextBytes {
 		return "", "sql is too long"
 	}
-	trimmed := strings.TrimRight(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(query), ";")), " \t\r\n")
-	if trimmed == "" {
-		return "", "sql is required"
-	}
-	// EffectiveVerb resolves a leading `WITH` to the verb after its CTE definitions,
-	// so a read-only CTE is accepted here on the same terms as at build time and a
-	// WITH-wrapped write is still refused.
-	switch sqlguard.EffectiveVerb(trimmed) {
-	case "SELECT", "VALUES":
-	default:
-		return "", "ctx.query runs read-only statements only: SELECT, VALUES, or a WITH ... SELECT"
-	}
-	if sqlguard.HasStackedStatements(trimmed) {
-		return "", "multiple SQL statements are not allowed"
-	}
-	if m := systemTableRef.FindString(trimmed); m != "" {
-		return "", fmt.Sprintf("cannot reference system table: %s", strings.ToLower(m))
+	trimmed, rejectErr := sqlguard.CheckReadOnlySelect(query)
+	if rejectErr != "" {
+		return "", rejectErr
 	}
 	if m := hashColumnRef(trimmed, hashed); m != "" {
 		return "", fmt.Sprintf("cannot reference PASSWORD column: %s", m)

@@ -10,20 +10,20 @@ func ResolveNamedImports(focus string, bodies map[string]string) []ImportIssue {
 	return ResolveNamedImportsWith(focus, bodies, AnalyzeModules(bodies))
 }
 
-// A representative regression: sim.state.js exports setState/getState
-// and a DEFAULT state, but sim.terrain.js imports the NAMED { state }. The
+// A representative regression: app.state.js exports setState/getState
+// and a DEFAULT state, but app.view.js imports the NAMED { state }. The
 // runtime probe caught this stages late; this gate catches it at save time.
 func TestResolveNamedImports_NamedMissingButDefaultExists(t *testing.T) {
 	bodies := map[string]string{
-		"sim.state.js": `const state = {};
+		"app.state.js": `const state = {};
 export function setState(p) {}
 export function getState() { return state; }
 export default state;`,
-		"sim.terrain.js": `import * as THREE from 'three';
-import { state, setState } from './sim.state.js';
-export class Terrain {}`,
+		"app.view.js": `import * as THREE from 'three';
+import { state, setState } from './app.state.js';
+export class View {}`,
 	}
-	issues := ResolveNamedImports("sim.terrain.js", bodies)
+	issues := ResolveNamedImports("app.view.js", bodies)
 
 	var missing *ImportIssue
 	for i := range issues {
@@ -37,7 +37,7 @@ export class Terrain {}`,
 	if missing == nil {
 		t.Fatalf("expected a name_missing issue for `state`, got %+v", issues)
 	}
-	if missing.Imported != "state" || missing.Target != "sim.state.js" {
+	if missing.Imported != "state" || missing.Target != "app.state.js" {
 		t.Fatalf("wrong issue: %+v", *missing)
 	}
 	if !missing.HasDefault {
@@ -59,10 +59,10 @@ export class Terrain {}`,
 // be reported as target_absent (advisory), never name_missing (a reject).
 func TestResolveNamedImports_TargetNotSavedYetIsAdvisory(t *testing.T) {
 	bodies := map[string]string{
-		"sim.terrain.js": `import { state } from './sim.state.js';`,
-		// sim.state.js intentionally absent
+		"app.view.js": `import { state } from './app.state.js';`,
+		// app.state.js intentionally absent
 	}
-	issues := ResolveNamedImports("sim.terrain.js", bodies)
+	issues := ResolveNamedImports("app.view.js", bodies)
 	if len(issues) != 1 || issues[0].Reason != "target_absent" {
 		t.Fatalf("expected one target_absent issue, got %+v", issues)
 	}
@@ -112,22 +112,22 @@ func TestResolveNamedImports_CommentedImportIgnored(t *testing.T) {
 	}
 }
 
-// Producer side: editing state.js to drop the `setState` export breaks terrain.js
+// Producer side: editing state.js to drop the `setState` export breaks view.js
 // which still imports it.
 func TestBrokenImportersAfterExportChange(t *testing.T) {
 	bodies := map[string]string{
 		// new state.js body: setState removed
-		"sim.state.js":   `export function getState() {}`,
-		"sim.terrain.js": `import { setState } from './sim.state.js';`,
-		"sim.hud.js":     `import { getState } from './sim.state.js';`,
+		"app.state.js": `export function getState() {}`,
+		"app.view.js":  `import { setState } from './app.state.js';`,
+		"app.ui.js":    `import { getState } from './app.state.js';`,
 	}
 	removed := RemovedExports(`export function getState() {} export function setState() {}`, `export function getState() {}`)
 	if !contains(removed, "setState") {
 		t.Fatalf("RemovedExports should report setState, got %v", removed)
 	}
-	breaks := BrokenImportersAfterExportChange("sim.state.js", removed, bodies)
-	if len(breaks) != 1 || breaks[0].Importer != "sim.terrain.js" || breaks[0].Imported != "setState" {
-		t.Fatalf("expected one break (terrain/setState), got %+v", breaks)
+	breaks := BrokenImportersAfterExportChange("app.state.js", removed, bodies)
+	if len(breaks) != 1 || breaks[0].Importer != "app.view.js" || breaks[0].Imported != "setState" {
+		t.Fatalf("expected one break (view/setState), got %+v", breaks)
 	}
 }
 

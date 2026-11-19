@@ -235,8 +235,21 @@ function (op, sel, value, scope, info) {
     target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
     // A pointer step passes its aim as value; any other caller marks without the check.
     if (value) {
-      var cov = coverOf(target, JSON.parse(value));
-      if (cov) return cov;
+      var aim = JSON.parse(value);
+      var cov = coverOf(target, aim);
+      if (cov) {
+        // A sticky header/footer or floating bar can sit over the center alignment;
+        // try other scroll alignments before reporting the target as covered.
+        var blocks = ['nearest', 'end', 'start'];
+        for (var bi = 0; bi < blocks.length && cov; bi++) {
+          target.scrollIntoView({ block: blocks[bi], inline: 'center', behavior: 'instant' });
+          if (!coverOf(target, aim)) cov = null;
+        }
+        if (cov) {
+          target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+          return cov;
+        }
+      }
     }
     return { ok: true, rect: rectOf(target), draggable: target.getAttribute('draggable') === 'true', shadow: target.getRootNode() !== document };
   }

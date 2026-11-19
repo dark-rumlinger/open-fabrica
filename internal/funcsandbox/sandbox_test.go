@@ -1,8 +1,10 @@
 package funcsandbox
 
 import (
+	"container/list"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -391,5 +393,43 @@ func TestStatusFieldIsNotAlwaysAnEnvelope(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProgramCacheLRU(t *testing.T) {
+	progMu.Lock()
+	progCache = map[string]*list.Element{}
+	progOrder.Init()
+	progMu.Unlock()
+
+	src := func(i int) string {
+		return fmt.Sprintf("function handler(req, ctx) { return { id: %d }; }", i)
+	}
+
+	// Fill cache to capacity; entry 0 is inserted first (oldest).
+	for i := 0; i < maxCachedPrograms; i++ {
+		if _, err := getProgram(src(i)); err != nil {
+			t.Fatalf("getProgram(%d): %v", i, err)
+		}
+	}
+	// Touch entry 0 so entry 1 becomes the least-recently-used.
+	if _, err := getProgram(src(0)); err != nil {
+		t.Fatalf("getProgram(0): %v", err)
+	}
+	// Insert one more program to trigger single-entry LRU eviction.
+	if _, err := getProgram(src(maxCachedPrograms)); err != nil {
+		t.Fatalf("getProgram(max): %v", err)
+	}
+
+	progMu.Lock()
+	defer progMu.Unlock()
+	if len(progCache) != maxCachedPrograms {
+		t.Fatalf("cache len = %d, want %d", len(progCache), maxCachedPrograms)
+	}
+	if _, ok := progCache[src(0)]; !ok {
+		t.Errorf("recently touched entry 0 was evicted")
+	}
+	if _, ok := progCache[src(1)]; ok {
+		t.Errorf("least-recently-used entry 1 was not evicted")
 	}
 }

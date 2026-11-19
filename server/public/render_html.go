@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+
+	"openfabrica/store"
 )
 
 // seoOverride is the subset of of_seo_meta the renderer consumes. Fields are
@@ -26,11 +28,7 @@ type seoOverride struct {
 // pagePath. Missing rows are silent (typical case); we only log when the
 // query itself fails so a misconfigured DB shows up in logs.
 func loadSEOMeta(projectDB *sql.DB, pagePath string) *seoOverride {
-	var s seoOverride
-	err := projectDB.QueryRow(
-		`SELECT title, description, COALESCE(og_title, ''), COALESCE(og_description, ''), og_image, canonical_url, structured_data, twitter_card, locale
-		 FROM of_seo_meta WHERE page_path = ?`, pagePath,
-	).Scan(&s.Title, &s.Description, &s.OGTitle, &s.OGDescription, &s.OGImage, &s.CanonicalURL, &s.StructuredData, &s.TwitterCard, &s.Locale)
+	row, err := store.LoadSEOMeta(projectDB, pagePath)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -38,7 +36,17 @@ func loadSEOMeta(projectDB *sql.DB, pagePath string) *seoOverride {
 		slog.Warn("loadSEOMeta query failed", "path", pagePath, "error", err)
 		return nil
 	}
-	return &s
+	return &seoOverride{
+		Title:          row.Title.String,
+		Description:    row.Description.String,
+		OGTitle:        row.OGTitle,
+		OGDescription:  row.OGDescription,
+		OGImage:        row.OGImage.String,
+		CanonicalURL:   row.CanonicalURL.String,
+		StructuredData: row.StructuredData.String,
+		TwitterCard:    row.TwitterCard.String,
+		Locale:         row.Locale.String,
+	}
 }
 
 // isRTLLocale reports whether a BCP-47 tag's primary subtag is a known
@@ -77,21 +85,13 @@ func insertBeforeTag(doc, tag, payload string) string {
 // page content would cause double-loading.
 func stripSharedAssetRefs(content string, projectDB *sql.DB) string {
 	// Collect known asset filenames for matching.
-	assetNames := map[string]bool{}
-	rows, err := projectDB.Query("SELECT path FROM of_files WHERE kind = 'file' AND is_deleted = 0 AND (path LIKE '%.css' OR path LIKE '%.js')")
+	paths, err := store.ListCSSJSAssetPaths(projectDB)
 	if err != nil {
 		return content
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var fn string
-		if rows.Scan(&fn) == nil {
-			assetNames[strings.ToLower(fn)] = true
-		}
-	}
-	// A failed iteration is handled like a failed query: leave content as is.
-	if rows.Err() != nil {
-		return content
+	assetNames := make(map[string]bool, len(paths))
+	for _, fn := range paths {
+		assetNames[strings.ToLower(fn)] = true
 	}
 	if len(assetNames) == 0 {
 		return content
@@ -233,8 +233,7 @@ func resolveComponents(projectDB *sql.DB, content string) string {
 
 	cache := make(map[string]string, len(nameSet))
 	for name := range nameSet {
-		var componentContent string
-		if err := projectDB.QueryRow("SELECT body FROM of_files WHERE kind = 'component' AND path = ? AND is_deleted = 0", name).Scan(&componentContent); err == nil {
+		if componentContent, ok := store.LoadComponentBody(projectDB, name); ok {
 			cache[name] = componentContent
 		}
 	}

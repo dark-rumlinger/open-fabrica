@@ -22,14 +22,15 @@ func init() {
 		return (&DiagWriteFlows{Source: source}).Run(ctx)
 	}
 	tools.Define(tools.Tool{
-		Name:     "manage_testing",
-		Probe:    true,
-		Category: "observability",
+		Name:           "manage_testing",
+		Probe:          true,
+		PreservesFlows: true,
+		Category:       "observability",
 		// A flow replay allows 180s per flow and a page sweep several pages of browser
 		// work, far past the 2-minute default, whose expiry would read as an environment
 		// skip rather than a slow test.
 		MaxDuration: 10 * time.Minute,
-		OneLiner:    "Probe the running server (endpoints, URLs, auth, pages, modules, websockets); write and replay of_test.js user flows.",
+		OneLiner:    "Probe the running server (endpoints, URLs, auth, pages, modules, websockets).",
 		MaxResult:   8000,
 		// The admin chat card parses the result for its header ("2 of 4 flows
 		// failed", "5 flows, 45 steps"); a 500-byte truncation cuts flow results

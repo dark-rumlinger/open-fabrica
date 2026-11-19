@@ -47,6 +47,9 @@ type pageErrorCollector struct {
 	// the failure report of a flow step: a silent failure (a promise that never settles)
 	// shows nothing else, and the app's own log lines are the only way to see inside it.
 	logs []string
+	// inflight tracks same-origin Fetch/XHR/Document requests between EventRequestWillBeSent
+	// and EventLoadingFinished/EventLoadingFailed so flow settle can wait for them.
+	inflight map[network.RequestID]struct{}
 }
 
 // maxConsoleLogs bounds the console tail kept per tab, and maxConsoleLine one line of it.
@@ -72,7 +75,11 @@ type httpFail struct {
 // project can't fix), not the project's own asset. The runtime and network domains
 // must be enabled on the tab for the events to fire.
 func listenPageErrors(tabCtx context.Context, pageURL string) *pageErrorCollector {
-	c := &pageErrorCollector{reqURLs: make(map[network.RequestID]string), reqMethods: make(map[network.RequestID]string)}
+	c := &pageErrorCollector{
+		reqURLs:    make(map[network.RequestID]string),
+		reqMethods: make(map[network.RequestID]string),
+		inflight:   make(map[network.RequestID]struct{}),
+	}
 	probeHost := hostOf(pageURL)
 	chromedp.ListenTarget(tabCtx, func(ev any) {
 		switch e := ev.(type) {
@@ -115,13 +122,22 @@ func listenPageErrors(tabCtx context.Context, pageURL string) *pageErrorCollecto
 				c.mu.Lock()
 				c.reqURLs[e.RequestID] = e.Request.URL
 				c.reqMethods[e.RequestID] = e.Request.Method
+				if (e.Type == network.ResourceTypeFetch || e.Type == network.ResourceTypeXHR || e.Type == network.ResourceTypeDocument) &&
+					(probeHost == "" || hostOf(e.Request.URL) == probeHost) {
+					c.inflight[e.RequestID] = struct{}{}
+				}
 				c.mu.Unlock()
 			}
+		case *network.EventLoadingFinished:
+			c.mu.Lock()
+			delete(c.inflight, e.RequestID)
+			c.mu.Unlock()
 		case *network.EventLoadingFailed:
 			// Recover the failing URL (recorded on request-send) so we can both
 			// name the resource in the report and decide same- vs cross-origin.
 			c.mu.Lock()
 			failedURL := c.reqURLs[e.RequestID]
+			delete(c.inflight, e.RequestID)
 			c.mu.Unlock()
 
 			// Classify by origin then resource type (see loadFailureKind): cross-origin and
@@ -243,6 +259,13 @@ func (c *pageErrorCollector) takeHTTPFails() []httpFail {
 	out := c.httpFails
 	c.httpFails = nil
 	return out
+}
+
+// inflightCount returns the number of same-origin Fetch/XHR/Document requests currently in flight.
+func (c *pageErrorCollector) inflightCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.inflight)
 }
 
 // takeAPICalls returns the API responses recorded since the last call and clears them.

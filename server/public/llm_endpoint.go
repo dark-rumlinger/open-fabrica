@@ -20,38 +20,16 @@ import (
 	"openfabrica/internal/stringutil"
 	"openfabrica/providers/llm"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 // LLM endpoint handler
 
 // llmEndpointConfig holds the config for an LLM endpoint.
-type llmEndpointConfig struct {
-	Path             string
-	SystemPrompt     string
-	ModelID          string
-	MaxTokens        int
-	Temperature      float64
-	MaxHistory       int
-	RateLimit        int
-	DailyTokenBudget int
-	DailyTokensUsed  int
-	DayWindowStart   string
-	RequiresAuth     bool
-	CORSOrigins      string
-	ResponseSchema   string // JSON Schema doc; empty = unconstrained free-form text
-	KnowledgeBase    string // manage_knowledge base name; empty = plain chat (no retrieval)
-}
+type llmEndpointConfig = store.LLMEndpointRow
 
 func (h *Handler) loadLLMEndpoint(projectDB *sql.DB, path string) (*llmEndpointConfig, error) {
-	var ep llmEndpointConfig
-	err := projectDB.QueryRow(
-		"SELECT path, system_prompt, model_id, max_tokens, temperature, max_history, rate_limit, daily_token_budget, daily_tokens_used, day_window_start, requires_auth, cors_origins, response_schema, knowledge_base FROM of_llm_endpoints WHERE path = ?",
-		path,
-	).Scan(&ep.Path, &ep.SystemPrompt, &ep.ModelID, &ep.MaxTokens, &ep.Temperature, &ep.MaxHistory, &ep.RateLimit, &ep.DailyTokenBudget, &ep.DailyTokensUsed, &ep.DayWindowStart, &ep.RequiresAuth, &ep.CORSOrigins, &ep.ResponseSchema, &ep.KnowledgeBase)
-	if err != nil {
-		return nil, err
-	}
-	return &ep, nil
+	return store.LoadLLMEndpoint(projectDB, path)
 }
 
 // checkAndResetDailyBudget rolls the per-endpoint UTC-day counter forward when
@@ -70,17 +48,11 @@ func checkAndResetDailyBudget(projectDB *sql.DB, ep *llmEndpointConfig) (bool, i
 		// concurrent first-of-day requests race the reset (the second one
 		// silently no-ops on the UNIQUE(path, day) constraint).
 		if ep.DayWindowStart != "" && ep.DailyTokensUsed > 0 {
-			if _, err := projectDB.Exec(
-				"INSERT OR IGNORE INTO of_llm_usage_daily (path, day, tokens_used) VALUES (?, ?, ?)",
-				ep.Path, ep.DayWindowStart, ep.DailyTokensUsed,
-			); err != nil {
+			if err := store.ArchiveLLMEndpointDailyUsage(projectDB, ep.Path, ep.DayWindowStart, ep.DailyTokensUsed); err != nil {
 				slog.Warn("LLM endpoint: failed to archive previous day's usage", "path", ep.Path, "day", ep.DayWindowStart, "error", err)
 			}
 		}
-		if _, err := projectDB.Exec(
-			"UPDATE of_llm_endpoints SET daily_tokens_used = 0, day_window_start = ? WHERE path = ?",
-			today, ep.Path,
-		); err != nil {
+		if err := store.ResetLLMEndpointDailyBudget(projectDB, ep.Path, today); err != nil {
 			return false, 0, err
 		}
 		ep.DayWindowStart = today
@@ -107,59 +79,94 @@ func publicSpendAllowed(w http.ResponseWriter, reader *sql.DB, projectID int, pa
 	return false
 }
 
-// recordLLMUsage increments the per-endpoint daily counter by the given token
-// total. Best-effort: a failure here is logged but does not surface to the
-// end user, who already got their successful completion.
-func recordLLMUsage(projectDB *sql.DB, path string, tokens int) {
+// recordEndpointUsage adds a finished call's tokens to an endpoint's per-day counter on
+// `table`. Best-effort: a failure is logged (under `label`) but never surfaces to the caller,
+// who already got their answer. Shared by the LLM proxy and agent endpoints, which differed
+// only in the table name and the log label.
+func recordEndpointUsage(projectDB *sql.DB, table, label, path string, tokens int) {
 	if tokens <= 0 {
 		return
 	}
-	if _, err := projectDB.Exec(
-		"UPDATE of_llm_endpoints SET daily_tokens_used = daily_tokens_used + ? WHERE path = ?",
-		tokens, path,
-	); err != nil {
-		slog.Warn("LLM endpoint: failed to record usage", "path", path, "tokens", tokens, "error", err)
+	if err := store.AddEndpointDailyTokens(projectDB, table, path, tokens); err != nil {
+		slog.Warn(label+": failed to record usage", "path", path, "tokens", tokens, "error", err)
 	}
 }
 
-// llmRateLimiter tracks request counts per key for simple rate limiting. Keys
-// include the client IP, so idle keys are swept at most once per window to keep
-// the map from growing with every address that ever called.
-var llmRateLimiter = struct {
+// recordLLMUsage records a completion's tokens against the LLM proxy endpoint's daily counter.
+func recordLLMUsage(projectDB *sql.DB, path string, tokens int) {
+	recordEndpointUsage(projectDB, "of_llm_endpoints", "LLM endpoint", path, tokens)
+}
+
+// maxEndpointRateLimitKeys caps the number of tracked keys in endpointRateLimiter
+// so a flood of distinct source addresses cannot grow the map without bound.
+const maxEndpointRateLimitKeys = 50000
+
+// endpointRateLimiter tracks per-minute request counts per key for endpoint-level
+// rate limiting. Keys include the client IP, so idle keys are swept at most once
+// per window and the map is capped at maxEndpointRateLimitKeys.
+type endpointRateLimiter struct {
 	sync.Mutex
 	counts    map[string][]time.Time
 	lastSweep time.Time
-}{counts: make(map[string][]time.Time)}
+}
 
-// sweepIdleRateLimitKeys drops keys whose newest request is older than window.
-// Caller holds llmRateLimiter's lock.
-func sweepIdleRateLimitKeys(window time.Time) {
-	for k, ts := range llmRateLimiter.counts {
+func newEndpointRateLimiter() *endpointRateLimiter {
+	return &endpointRateLimiter{counts: make(map[string][]time.Time)}
+}
+
+// sweepIdleKeys drops keys whose newest request is older than window.
+// Caller holds rl.Mutex.
+func (rl *endpointRateLimiter) sweepIdleKeys(window time.Time) {
+	for k, ts := range rl.counts {
 		if len(ts) == 0 || !ts[len(ts)-1].After(window) {
-			delete(llmRateLimiter.counts, k)
+			delete(rl.counts, k)
 		}
 	}
 }
 
-// checkEndpointRateLimit returns true if the request is within the rate limit.
-// A maxPerMinute of 0 (or less) disables the cap: an unconfigured limit must
-// admit every request, not reject it (len(valid) >= 0 is always true).
-func checkEndpointRateLimit(key string, maxPerMinute int) bool {
+// evictOldestKey removes the key with the oldest latest timestamp when at cap.
+// Caller holds rl.Mutex.
+func (rl *endpointRateLimiter) evictOldestKey() {
+	var oldestKey string
+	var oldest time.Time
+	first := true
+	for k, ts := range rl.counts {
+		var latest time.Time
+		if len(ts) > 0 {
+			latest = ts[len(ts)-1]
+		}
+		if first || latest.Before(oldest) {
+			oldestKey, oldest, first = k, latest, false
+		}
+	}
+	if oldestKey != "" {
+		delete(rl.counts, oldestKey)
+	}
+}
+
+func (rl *endpointRateLimiter) allow(key string, maxPerMinute int) bool {
 	if maxPerMinute <= 0 {
 		return true
 	}
-	llmRateLimiter.Lock()
-	defer llmRateLimiter.Unlock()
+	rl.Lock()
+	defer rl.Unlock()
 
 	now := time.Now()
 	window := now.Add(-time.Minute)
-	if now.Sub(llmRateLimiter.lastSweep) >= time.Minute {
-		sweepIdleRateLimitKeys(window)
-		llmRateLimiter.lastSweep = now
+	if now.Sub(rl.lastSweep) >= time.Minute {
+		rl.sweepIdleKeys(window)
+		rl.lastSweep = now
+	}
+
+	timestamps, exists := rl.counts[key]
+	if !exists && len(rl.counts) >= maxEndpointRateLimitKeys {
+		rl.sweepIdleKeys(window)
+		if len(rl.counts) >= maxEndpointRateLimitKeys {
+			rl.evictOldestKey()
+		}
 	}
 
 	// Filter out expired entries.
-	timestamps := llmRateLimiter.counts[key]
 	valid := timestamps[:0]
 	for _, ts := range timestamps {
 		if ts.After(window) {
@@ -168,12 +175,28 @@ func checkEndpointRateLimit(key string, maxPerMinute int) bool {
 	}
 
 	if len(valid) >= maxPerMinute {
-		llmRateLimiter.counts[key] = valid
+		rl.counts[key] = valid
 		return false
 	}
 
-	llmRateLimiter.counts[key] = append(valid, now)
+	rl.counts[key] = append(valid, now)
 	return true
+}
+
+// checkEndpointRateLimit returns true if the request is within the rate limit.
+// A maxPerMinute of 0 (or less) disables the cap: an unconfigured limit must
+// admit every request, not reject it (len(valid) >= 0 is always true).
+func (h *Handler) checkEndpointRateLimit(key string, maxPerMinute int) bool {
+	if maxPerMinute <= 0 {
+		return true
+	}
+	h.endpointLimiterMu.Lock()
+	if h.endpointLimiter == nil {
+		h.endpointLimiter = newEndpointRateLimiter()
+	}
+	rl := h.endpointLimiter
+	h.endpointLimiterMu.Unlock()
+	return rl.allow(key, maxPerMinute)
 }
 
 // llmChatRequest is the JSON body for LLM chat/complete requests.
@@ -215,7 +238,7 @@ func (h *Handler) apiLLM(w http.ResponseWriter, r *http.Request, project *models
 	// Auth check.
 	if ep.RequiresAuth {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !h.validateProjectTokenOrJWT(project.ID, token) {
+		if _, ok := h.projectUserClaims(project.ID, token); !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -225,7 +248,7 @@ func (h *Handler) apiLLM(w http.ResponseWriter, r *http.Request, project *models
 	// loopback peer (the public HTTPS listener proxies over loopback), so a
 	// remote client can't spoof the header to dodge the per-IP limit.
 	rateLimitKey := fmt.Sprintf("%d:%s:%s", project.ID, ep.Path, middleware.RateLimitIdentity(r))
-	if !checkEndpointRateLimit(rateLimitKey, ep.RateLimit) {
+	if !h.checkEndpointRateLimit(rateLimitKey, ep.RateLimit) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}

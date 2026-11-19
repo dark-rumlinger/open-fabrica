@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"openfabrica/internal/browser"
 	"openfabrica/security"
-	"openfabrica/store"
 )
 
 // fakeFlowHooks stands in for the project: an outbox the test app writes to, seeded
@@ -153,7 +153,7 @@ func runHooksFlow(t *testing.T, hooks *fakeFlowHooks, src string) FlowResult {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	base = srv.URL
-	if _, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{}); err != nil {
+	if _, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{}); err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	} else {
 		cancel()

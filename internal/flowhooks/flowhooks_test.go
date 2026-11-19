@@ -37,7 +37,7 @@ func TestSeedUserCreatesARoleAccountAndToken(t *testing.T) {
 		`CREATE TABLE members (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT, display_name TEXT NOT NULL, age INTEGER NOT NULL, bio TEXT)`,
 	)
 	jwt := security.NewJWTManager("0123456789abcdef0123456789abcdef", time.Hour)
-	h := New(3, db, jwt, nil)
+	h := New(3, db, jwt, nil, nil)
 	u := probe.FlowSeedUser{Email: "of-test+x-admin@example.test", Username: "oftest_x_admin", Password: "Of-secret!9aZ", Role: "admin"}
 	if _, err := h.SeedUser(context.Background(), u); err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestSeedUserCreatesARoleAccountAndToken(t *testing.T) {
 	}
 
 	// No auth at all: a clear reason.
-	if _, err := New(3, testDB(t, `CREATE TABLE of_auth_endpoints (id INTEGER PRIMARY KEY, table_name TEXT, username_column TEXT, password_column TEXT, default_role TEXT, role_column TEXT)`), nil, nil).
+	if _, err := New(3, testDB(t, `CREATE TABLE of_auth_endpoints (id INTEGER PRIMARY KEY, table_name TEXT, username_column TEXT, password_column TEXT, default_role TEXT, role_column TEXT)`), nil, nil, nil).
 		SeedUser(context.Background(), u); err == nil || !strings.Contains(err.Error(), "no sign-in") {
 		t.Fatalf("err = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestWebhookSignatureMatchesTheServerCheck(t *testing.T) {
 		`CREATE TABLE of_webhooks (id INTEGER PRIMARY KEY, name TEXT, secret_encrypted TEXT NOT NULL DEFAULT '', is_enabled INTEGER)`,
 		`INSERT INTO of_webhooks VALUES (1, 'payments', '`+sealed+`', 1), (2, 'open', '', 1), (3, 'broken', 'not-ciphertext', 1)`,
 	)
-	h := New(3, db, nil, enc)
+	h := New(3, db, nil, enc, nil)
 	body := []byte(`{"type":"payment.completed"}`)
 	sig, err := h.WebhookSignature("payments", body)
 	if err != nil || sig != "sha256="+security.HMACSHA256Hex([]byte("whsec_1"), body) {
@@ -93,13 +93,13 @@ func TestWebhookSignatureMatchesTheServerCheck(t *testing.T) {
 			t.Errorf("%s: want an error", name)
 		}
 	}
-	if _, err := New(3, db, nil, nil).WebhookSignature("payments", body); err == nil {
+	if _, err := New(3, db, nil, nil, nil).WebhookSignature("payments", body); err == nil {
 		t.Error("signed without an encryption key")
 	}
 }
 
 func TestMessagesComeFromTheReplayOutbox(t *testing.T) {
-	h := New(41, nil, nil, nil)
+	h := New(41, nil, nil, nil, nil)
 	end := h.Begin()
 	defer end()
 	replayoutbox.Capture(41, replayoutbox.Message{Kind: "email", To: "a@b.c", Subject: "Hi", Body: "x"})
@@ -108,5 +108,18 @@ func TestMessagesComeFromTheReplayOutbox(t *testing.T) {
 	}
 	if err := h.RunSchedule(context.Background(), "digest"); err == nil {
 		t.Fatal("without a registered runner, runSchedule explains itself")
+	}
+
+	var gotID int
+	var gotName string
+	h2 := New(41, nil, nil, nil, func(_ context.Context, projectID int, name string) error {
+		gotID, gotName = projectID, name
+		return nil
+	})
+	if err := h2.RunSchedule(context.Background(), "digest"); err != nil {
+		t.Fatalf("RunSchedule with injected runner: %v", err)
+	}
+	if gotID != 41 || gotName != "digest" {
+		t.Fatalf("runner got (%d, %q), want (41, %q)", gotID, gotName, "digest")
 	}
 }

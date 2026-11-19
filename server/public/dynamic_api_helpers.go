@@ -1,9 +1,9 @@
 package public
 
 import (
-	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"openfabrica/db/models"
 	"openfabrica/security"
 	"openfabrica/store"
 )
@@ -53,57 +52,60 @@ var reservedParams = map[string]bool{
 	"search": true, "stats": true, "q": true, "fields": true,
 }
 
+// errEndpointMisconfigured marks an endpoint row that exists but cannot be served
+// safely. Callers answer 500 for it rather than the 404 of a missing endpoint.
+var errEndpointMisconfigured = errors.New("endpoint misconfigured")
+
 func (h *Handler) loadEndpoint(projectDB *sql.DB, path string) (*apiEndpoint, error) {
-	var ep apiEndpoint
-	var methodsJSON string
-	var publicColsJSON, requiredRole, ownerColumn, tenantColumn, lookupColumn sql.NullString
-	var writableColsJSON string
-	var corsOrigins, corsMethods, corsHeaders sql.NullString
-	err := projectDB.QueryRow(
-		"SELECT id, path, table_name, methods, public_columns, COALESCE(writable_columns,''), requires_auth, public_read, COALESCE(public_write,0), required_role, rate_limit, COALESCE(cors_origins,''), COALESCE(cors_methods,''), COALESCE(cors_headers,''), COALESCE(owner_column,''), COALESCE(owner_scope,''), COALESCE(tenant_column,''), COALESCE(lookup_column,''), COALESCE(cache_ttl,0), COALESCE(read_only,0) FROM of_api_endpoints WHERE path = ?",
-		path,
-	).Scan(&ep.ID, &ep.Path, &ep.TableName, &methodsJSON, &publicColsJSON, &writableColsJSON, &ep.RequiresAuth, &ep.PublicRead, &ep.PublicWrite, &requiredRole, &ep.RateLimit, &corsOrigins, &corsMethods, &corsHeaders, &ownerColumn, &ep.OwnerScope, &tenantColumn, &lookupColumn, &ep.CacheTTL, &ep.ReadOnly)
+	row, err := store.LoadAPIEndpoint(projectDB, path)
 	if err != nil {
 		return nil, err
 	}
-
-	ep.RequiredRole = requiredRole.String
-	ep.OwnerColumn = ownerColumn.String
-	ep.TenantColumn = tenantColumn.String
-	// Defensive: refuse to interpolate an owner_column that doesn't pass the
-	// canonical identifier check, even though writers validate at insert time.
-	// Treat a bad value as no RLS so the request fails closed on access checks
-	// rather than producing a SQL injection vector.
-	if ep.OwnerColumn != "" {
-		if err := security.ValidateColumnName(ep.OwnerColumn); err != nil {
-			slog.Error("public API endpoint has invalid owner_column", "path", ep.Path, "owner_column", ep.OwnerColumn, "error", err)
-			ep.OwnerColumn = ""
+	ep := apiEndpoint{
+		ID:           row.ID,
+		Path:         row.Path,
+		TableName:    row.TableName,
+		RequiresAuth: row.RequiresAuth,
+		PublicRead:   row.PublicRead,
+		PublicWrite:  row.PublicWrite,
+		RequiredRole: row.RequiredRole.String,
+		RateLimit:    row.RateLimit,
+		CORSOrigins:  row.CORSOrigins,
+		CORSMethods:  row.CORSMethods,
+		CORSHeaders:  row.CORSHeaders,
+		OwnerColumn:  row.OwnerColumn.String,
+		OwnerScope:   row.OwnerScope,
+		TenantColumn: row.TenantColumn.String,
+		LookupColumn: row.LookupColumn.String,
+		CacheTTL:     row.CacheTTL,
+		ReadOnly:     row.ReadOnly,
+	}
+	// An owner or tenant column that fails the identifier check cannot be
+	// interpolated, and dropping it would switch row-level security off. Refuse
+	// to serve the endpoint instead.
+	for name, col := range map[string]string{"owner_column": ep.OwnerColumn, "tenant_column": ep.TenantColumn} {
+		if col == "" {
+			continue
+		}
+		if err := security.ValidateColumnName(col); err != nil {
+			slog.Error("public API endpoint has an invalid scope column; refusing to serve", "path", ep.Path, "field", name, "value", col, "error", err)
+			return nil, fmt.Errorf("%w: %s %q", errEndpointMisconfigured, name, col)
 		}
 	}
-	if ep.TenantColumn != "" {
-		if err := security.ValidateColumnName(ep.TenantColumn); err != nil {
-			slog.Error("public API endpoint has invalid tenant_column", "path", ep.Path, "tenant_column", ep.TenantColumn, "error", err)
-			ep.TenantColumn = ""
-		}
-	}
-	ep.LookupColumn = lookupColumn.String
 	if ep.LookupColumn != "" {
 		if err := security.ValidateColumnName(ep.LookupColumn); err != nil {
 			slog.Error("public API endpoint has invalid lookup_column", "path", ep.Path, "lookup_column", ep.LookupColumn, "error", err)
 			ep.LookupColumn = ""
 		}
 	}
-	ep.CORSOrigins = corsOrigins.String
-	ep.CORSMethods = corsMethods.String
-	ep.CORSHeaders = corsHeaders.String
 	// Malformed stored JSON degrades to empty methods/columns rather than
 	// failing the endpoint load.
-	_ = json.Unmarshal([]byte(methodsJSON), &ep.Methods)
-	if publicColsJSON.Valid && publicColsJSON.String != "" {
-		_ = json.Unmarshal([]byte(publicColsJSON.String), &ep.PublicColumns)
+	_ = json.Unmarshal([]byte(row.MethodsJSON), &ep.Methods)
+	if row.PublicCols.Valid && row.PublicCols.String != "" {
+		_ = json.Unmarshal([]byte(row.PublicCols.String), &ep.PublicColumns)
 	}
-	if writableColsJSON != "" {
-		_ = json.Unmarshal([]byte(writableColsJSON), &ep.WritableColumns)
+	if row.WritableCols != "" {
+		_ = json.Unmarshal([]byte(row.WritableCols), &ep.WritableColumns)
 	}
 
 	// Load secure columns for this table. Fail closed: if the lookup errors, the
@@ -111,7 +113,7 @@ func (h *Handler) loadEndpoint(projectDB *sql.DB, path string) (*apiEndpoint, er
 	secureCols, err := store.LoadSecureColumns(projectDB, ep.TableName)
 	if err != nil {
 		slog.Error("public API endpoint secure-column lookup failed; refusing to serve", "path", ep.Path, "table", ep.TableName, "error", err)
-		return nil, fmt.Errorf("load secure columns for %s: %w", ep.TableName, err)
+		return nil, fmt.Errorf("%w: load secure columns for %s: %v", errEndpointMisconfigured, ep.TableName, err)
 	}
 	ep.SecureCols = secureCols
 
@@ -125,35 +127,6 @@ func methodAllowed(methods []string, method string) bool {
 		}
 	}
 	return false
-}
-
-func (h *Handler) validateProjectToken(projectID int, token string) bool {
-	if token == "" || h.deps.Encryptor == nil {
-		return false
-	}
-	project, err := models.GetProjectByID(h.deps.DB.DB, projectID)
-	if err != nil {
-		return false
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal([]byte(project.Config), &cfg); err != nil {
-		return false
-	}
-	// The project API key grants owner-level access (it bypasses row-level
-	// security), so it is held encrypted at rest in the project config under
-	// "api_key_encrypted", the same way provider keys are stored. A plaintext
-	// "api_key" is deliberately NOT honored: it would be a credential readable by
-	// anyone who can read the global database, and an injected one must not be
-	// able to bypass RLS.
-	enc, _ := cfg["api_key_encrypted"].(string)
-	if enc == "" {
-		return false
-	}
-	apiKey, decErr := h.deps.Encryptor.Decrypt(enc)
-	if decErr != nil || apiKey == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(apiKey), []byte(token)) == 1
 }
 
 // parseFilterParam extracts column name and SQL operator from a query param key.
@@ -210,62 +183,36 @@ func columnExists(projectDB *sql.DB, physTable, colName string) bool {
 	if !validTableName.MatchString(physTable) {
 		return false
 	}
-	rows, err := projectDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", physTable))
+	info, err := store.GetTableColumnInfo(projectDB, physTable)
 	if err != nil {
 		return false
 	}
-	defer rows.Close()
-	found := false
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dflt any
-		if rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk) != nil {
-			continue
-		}
-		if name == colName {
-			found = true
+	for _, c := range info {
+		if c.Name == colName {
+			return true
 		}
 	}
-	// A failed iteration is handled like a failed query: column reported absent.
-	if rows.Err() != nil {
-		return false
-	}
-	return found
+	return false
 }
 
-// columnType returns the declared type of a column (e.g. "TEXT", "INTEGER",
-// "BOOLEAN") exactly as recorded in the table schema, or "" when the column is
-// absent. Used to coerce query-string filter values to the storage class SQLite
-// actually holds (see coerceFilterValue).
-func columnType(projectDB *sql.DB, physTable, colName string) string {
+// columnTypesOnce reads a table's columns once as name -> declared type, so an apiList
+// request with k filters does ONE PRAGMA instead of ~2k per-column probes. Empty map when
+// the table name is unsafe or introspection fails, so every membership/type check against it
+// then reports "absent", exactly as the per-column helpers did on the same failure. The type
+// is used to coerce filter values to the storage class SQLite holds (see coerceFilterValue).
+func columnTypesOnce(projectDB *sql.DB, physTable string) map[string]string {
 	if !validTableName.MatchString(physTable) {
-		return ""
+		return map[string]string{}
 	}
-	rows, err := projectDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", physTable))
+	info, err := store.GetTableColumnInfo(projectDB, physTable)
 	if err != nil {
-		return ""
+		return map[string]string{}
 	}
-	defer rows.Close()
-	var found string
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dflt any
-		if rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk) != nil {
-			continue
-		}
-		if name == colName {
-			found = colType
-		}
+	out := make(map[string]string, len(info))
+	for _, c := range info {
+		out[c.Name] = c.Type
 	}
-	// A failed iteration is handled like a failed query: no declared type.
-	if rows.Err() != nil {
-		return ""
-	}
-	return found
+	return out
 }
 
 // coerceFilterValue maps a raw query-string filter value to the storage class
@@ -292,30 +239,18 @@ func getTextColumns(projectDB *sql.DB, physTable string, ep *apiEndpoint) []stri
 	if !validTableName.MatchString(physTable) {
 		return nil
 	}
-	rows, err := projectDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", physTable))
+	info, err := store.GetTableColumnInfo(projectDB, physTable)
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 	var cols []string
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dflt any
-		if rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk) != nil {
-			continue
-		}
-		if strings.EqualFold(colType, "TEXT") && name != "id" && name != "created_at" {
-			if !columnReadable(ep, name) {
+	for _, c := range info {
+		if strings.EqualFold(c.Type, "TEXT") && c.Name != "id" && c.Name != "created_at" {
+			if !columnReadable(ep, c.Name) {
 				continue
 			}
-			cols = append(cols, name)
+			cols = append(cols, c.Name)
 		}
-	}
-	// A failed iteration is handled like a failed query: no text columns.
-	if rows.Err() != nil {
-		return nil
 	}
 	return cols
 }
@@ -371,83 +306,7 @@ func autoLookupColumn(projectDB *sql.DB, physTable string) string {
 	if !validTableName.MatchString(physTable) {
 		return ""
 	}
-
-	// Map column name -> declared type, for TEXT filtering.
-	colTypes := make(map[string]string)
-	rows, err := projectDB.Query("SELECT name, type FROM pragma_table_info(?)", physTable)
-	if err != nil {
-		return ""
-	}
-	for rows.Next() {
-		var name, ctype string
-		if rows.Scan(&name, &ctype) == nil {
-			colTypes[name] = strings.ToUpper(strings.TrimSpace(ctype))
-		}
-	}
-	rows.Close()
-	if rows.Err() != nil {
-		return ""
-	}
-
-	// Walk the table's indexes and keep only single-column UNIQUE indexes
-	// whose one column is TEXT and isn't "id".
-	idxRows, err := projectDB.Query("SELECT name, \"unique\" FROM pragma_index_list(?)", physTable)
-	if err != nil {
-		return ""
-	}
-	type idx struct {
-		name   string
-		unique int
-	}
-	var idxs []idx
-	for idxRows.Next() {
-		var i idx
-		if idxRows.Scan(&i.name, &i.unique) == nil && i.unique == 1 {
-			idxs = append(idxs, i)
-		}
-	}
-	idxRows.Close()
-	if idxRows.Err() != nil {
-		return ""
-	}
-
-	var candidates []string
-	for _, i := range idxs {
-		colRows, err := projectDB.Query("SELECT name FROM pragma_index_info(?)", i.name)
-		if err != nil {
-			continue
-		}
-		var cols []string
-		for colRows.Next() {
-			var n string
-			if colRows.Scan(&n) == nil {
-				cols = append(cols, n)
-			}
-		}
-		colRows.Close()
-		if colRows.Err() != nil {
-			continue
-		}
-		if len(cols) != 1 {
-			continue
-		}
-		c := cols[0]
-		if c == "id" {
-			continue
-		}
-		// SQLite's "TEXT" stays TEXT; also accept the empty type (declared
-		// without an explicit type, treated as BLOB/TEXT affinity).
-		t := colTypes[c]
-		if t != "TEXT" && t != "" {
-			continue
-		}
-		candidates = append(candidates, c)
-	}
-
-	if len(candidates) == 1 {
-		return candidates[0]
-	}
-	return ""
+	return store.AutoLookupColumn(projectDB, physTable)
 }
 
 // columnReadable reports whether a client may filter, sort or aggregate on col.
@@ -555,44 +414,6 @@ func parseFieldsParam(r *http.Request, ep *apiEndpoint) string {
 		cols = append([]string{"id"}, cols...)
 	}
 	return strings.Join(cols, ", ")
-}
-
-// scanRowsToMaps converts sql.Rows into a slice of maps.
-func (h *Handler) scanRowsToMaps(rows *sql.Rows) []map[string]any {
-	defer rows.Close()
-
-	columns, err := rows.Columns()
-	if err != nil {
-		return nil
-	}
-
-	results := make([]map[string]any, 0)
-	for rows.Next() {
-		values := make([]any, len(columns))
-		valuePtrs := make([]any, len(columns))
-		for i := range values {
-			valuePtrs[i] = &values[i]
-		}
-
-		if err := rows.Scan(valuePtrs...); err != nil {
-			continue
-		}
-
-		row := make(map[string]any)
-		for i, col := range columns {
-			val := values[i]
-			if b, ok := val.([]byte); ok {
-				row[col] = string(b)
-			} else if f, ok := val.(float64); ok && f == float64(int64(f)) {
-				row[col] = int64(f)
-			} else {
-				row[col] = val
-			}
-		}
-		results = append(results, row)
-	}
-
-	return results
 }
 
 // stripSecureCols removes every secure column (PASSWORD "hash" and ENCRYPTED

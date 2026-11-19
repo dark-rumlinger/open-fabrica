@@ -16,19 +16,19 @@ import (
 func TestSave_EntryExports_RejectedProactivelyOnAttach(t *testing.T) {
 	ctx := setupClobberDB(t)
 	// Seed the page and the zero-import state leaf (the correct home for shared code).
-	if res, err := (&ArtSave{Kind: "page", FilePath: "/", Body: "<div id=game></div>"}).Run(ctx); err != nil || !res.Success {
+	if res, err := (&ArtSave{Kind: "page", FilePath: "/", Body: "<div id=app></div>"}).Run(ctx); err != nil || !res.Success {
 		t.Fatalf("seed page: err=%v res=%+v", err, res)
 	}
-	seedJS(t, ctx.DB, "voxel.state.js", `export const state = { camera: null };`)
+	seedJS(t, ctx.DB, "app.state.js", `export const state = { active: null };`)
 
 	// Save the page entry (attach_to='/') importing the state leaf but ALSO exporting
 	// a shared helper - the exact shape that later forces a leaf->entry cycle.
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "voxel.js",
+		FilePath: "app.js",
 		AttachTo: "/",
-		Body: `import { state } from './voxel.state.js';
-export function syncCamera(){ return state.camera; }`,
+		Body: `import { state } from './app.state.js';
+export function syncView(){ return state.active; }`,
 	}).Run(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -42,7 +42,7 @@ export function syncCamera(){ return state.camera; }`,
 	// Names the entry, the exported symbol, the zero-import leaf destination, and
 	// reassures that no other module needs editing this turn (the entry is caught
 	// before any leaf imports back, so a big-bang multi-file relocation is not needed).
-	for _, want := range []string{"voxel.js", "syncCamera", "voxel.state.js", "nothing else needs to change this turn"} {
+	for _, want := range []string{"app.js", "syncView", "app.state.js", "nothing else needs to change this turn"} {
 		if !contains(res.Error, want) {
 			t.Errorf("reject should mention %q, got: %s", want, res.Error)
 		}
@@ -87,16 +87,16 @@ export function remeshAround(x, y, z){ return blockAt(x, y, z) && state; }`,
 // export). This must not be flagged.
 func TestSave_EntryNoExports_Accepted(t *testing.T) {
 	ctx := setupClobberDB(t)
-	if res, err := (&ArtSave{Kind: "page", FilePath: "/", Body: "<div id=game></div>"}).Run(ctx); err != nil || !res.Success {
+	if res, err := (&ArtSave{Kind: "page", FilePath: "/", Body: "<div id=app></div>"}).Run(ctx); err != nil || !res.Success {
 		t.Fatalf("seed page: err=%v res=%+v", err, res)
 	}
-	seedJS(t, ctx.DB, "voxel.state.js", `export const state = { camera: null };`)
+	seedJS(t, ctx.DB, "app.state.js", `export const state = { active: null };`)
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "voxel.js",
+		FilePath: "app.js",
 		AttachTo: "/",
-		Body: `import { state } from './voxel.state.js';
+		Body: `import { state } from './app.state.js';
 function boot(){ return state; }
 boot();`,
 	}).Run(ctx)
@@ -114,14 +114,14 @@ boot();`,
 // entry. Only the page-attached root is the entry.
 func TestSave_LeafBeforeEntry_NotFlaggedAsEntry(t *testing.T) {
 	ctx := setupClobberDB(t)
-	seedJS(t, ctx.DB, "voxel.state.js", `export const state = { camera: null };`)
+	seedJS(t, ctx.DB, "app.state.js", `export const state = { active: null };`)
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "voxel.terrain.js", // a leaf: no attach_to, imported later by the entry
-		Body: `import { state } from './voxel.state.js';
-export function initTerrain(){ return state; }
-export function updateTerrain(){}`,
+		FilePath: "app.view.js", // a leaf: no attach_to, imported later by the entry
+		Body: `import { state } from './app.state.js';
+export function initView(){ return state; }
+export function updateView(){}`,
 	}).Run(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -137,20 +137,20 @@ export function updateTerrain(){}`,
 // proceed.
 func TestPatch_EntryPreexistingExports_NotReRejected(t *testing.T) {
 	ctx := setupClobberDB(t)
-	seedJS(t, ctx.DB, "voxel.state.js", `export const state = { camera: null };`)
+	seedJS(t, ctx.DB, "app.state.js", `export const state = { active: null };`)
 	// Seed the entry ALREADY exporting (seedJS bypasses the gate) and attach it.
-	seedJS(t, ctx.DB, "voxel.js", `import { state } from './voxel.state.js';
-export function syncCamera(){ return state.camera; }`)
-	if _, err := ctx.DB.Exec(`INSERT INTO of_page_assets (page_path, file_path, position) VALUES ('/', 'voxel.js', 0)`); err != nil {
+	seedJS(t, ctx.DB, "app.js", `import { state } from './app.state.js';
+export function syncView(){ return state.active; }`)
+	if _, err := ctx.DB.Exec(`INSERT INTO of_page_assets (page_path, file_path, position) VALUES ('/', 'app.js', 0)`); err != nil {
 		t.Fatalf("attach entry: %v", err)
 	}
 
 	// An unrelated edit that keeps the same export surface must not be re-rejected.
 	res, err := (&ArtPatch{
 		Kind:     "file",
-		FilePath: "voxel.js",
+		FilePath: "app.js",
 		Patches: []map[string]any{
-			{"search": "return state.camera;", "replace": "return state.camera; /* eye */"},
+			{"search": "return state.active;", "replace": "return state.active; /* ok */"},
 		},
 	}).Run(ctx)
 	if err != nil {

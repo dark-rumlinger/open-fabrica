@@ -86,3 +86,35 @@ func Slug(s string, maxLen int) string {
 	}
 	return out
 }
+
+// Levenshtein is the edit distance between a and b, counted in RUNES (a multi-byte
+// character is one edit, not several). One home for the fuzzy-anchor matcher and the
+// did-you-mean hints, which had separate copies; rune counting matches byte counting for
+// ASCII, so the did-you-mean callers (ASCII identifiers) are unaffected.
+func Levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	curr := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		curr[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			best := prev[j] + 1
+			if ins := curr[j-1] + 1; ins < best {
+				best = ins
+			}
+			if sub := prev[j-1] + cost; sub < best {
+				best = sub
+			}
+			curr[j] = best
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(rb)]
+}

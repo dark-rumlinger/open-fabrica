@@ -623,7 +623,7 @@ func similarity(a, b string) float64 {
 	if lb > m {
 		m = lb
 	}
-	return 1 - float64(levenshtein(a, b))/float64(m)
+	return 1 - float64(stringutil.Levenshtein(a, b))/float64(m)
 }
 
 // nearestRegions returns, for each unmatched patch anchor, the region of the
@@ -654,7 +654,7 @@ func nearestRegions(body string, notFound []string) []map[string]any {
 			if t == "" {
 				continue
 			}
-			d := levenshtein(probe, t)
+			d := stringutil.Levenshtein(probe, t)
 			if d < bestScore {
 				bestScore, bestIdx = d, i
 			}
@@ -721,35 +721,6 @@ func firstMeaningfulLine(s string) string {
 		}
 	}
 	return ""
-}
-
-// levenshtein computes edit distance with two rolling rows.
-func levenshtein(a, b string) int {
-	ra, rb := []rune(a), []rune(b)
-	prev := make([]int, len(rb)+1)
-	curr := make([]int, len(rb)+1)
-	for j := range prev {
-		prev[j] = j
-	}
-	for i := 1; i <= len(ra); i++ {
-		curr[0] = i
-		for j := 1; j <= len(rb); j++ {
-			cost := 1
-			if ra[i-1] == rb[j-1] {
-				cost = 0
-			}
-			best := prev[j] + 1
-			if ins := curr[j-1] + 1; ins < best {
-				best = ins
-			}
-			if sub := prev[j-1] + cost; sub < best {
-				best = sub
-			}
-			curr[j] = best
-		}
-		prev, curr = curr, prev
-	}
-	return prev[len(rb)]
 }
 
 // collapseWS returns s with every run of whitespace collapsed to a single space

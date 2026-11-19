@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"openfabrica/config"
 	"openfabrica/db"
@@ -43,25 +46,53 @@ type Handler struct {
 	// IP-rotating attacker cannot grind one account past the per-IP authLimiter.
 	authLockout *middleware.AccountLockout
 
+	// endpointLimiter enforces per-minute caps on dynamic/LLM/function/auth
+	// endpoints per handler instance (no process-global state).
+	endpointLimiter   *endpointRateLimiter
+	endpointLimiterMu sync.Mutex
+
+	// domainCache caches Host -> published *models.Project for a short TTL to
+	// avoid hitting SQLite on every static/API request.
+	domainCacheMu sync.RWMutex
+	domainCache   map[string]domainCacheEntry
+
 	// resolveModel substitutes the project-model resolution in tests; nil uses
 	// projectmodel.Resolve.
 	resolveModel func(projectID int) (llm.Provider, string, error)
+}
+
+type domainCacheEntry struct {
+	project   *models.Project
+	expiresAt time.Time
+}
+
+const (
+	domainCacheTTL        = 2 * time.Second
+	maxDomainCacheEntries = 4096
+)
+
+// stripHostPort removes the port from an HTTP Host header while preserving
+// IPv6 literals (e.g. "[::1]:5735" -> "::1", "[::1]" -> "::1").
+func stripHostPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return host[1 : len(host)-1]
+	}
+	return host
 }
 
 // ProjectResolver is middleware that resolves the project from the Host header
 // and injects it into the request context.
 func (h *Handler) ProjectResolver(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		// Strip port if present.
-		if idx := strings.LastIndex(host, ":"); idx != -1 {
-			host = host[:idx]
-		}
+		host := stripHostPort(r.Host)
 
 		// Each project is reached via its own domain, so resolve purely from the
 		// Host header. An unmatched host is a 404 rather than a guess at some
 		// other tenant's project.
-		project, err := models.GetProjectByDomain(h.deps.DB.DB, host)
+		project, err := h.lookupProjectByDomain(host)
 		if err != nil {
 			if wantsHTML(r) {
 				serveErrorPage(w, http.StatusNotFound, "Project Not Found", "")
@@ -84,6 +115,45 @@ func (h *Handler) ProjectResolver(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), projectContextKey, project)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (h *Handler) lookupProjectByDomain(host string) (*models.Project, error) {
+	now := time.Now()
+	h.domainCacheMu.RLock()
+	if h.domainCache != nil {
+		if entry, ok := h.domainCache[host]; ok && now.Before(entry.expiresAt) {
+			h.domainCacheMu.RUnlock()
+			return entry.project, nil
+		}
+	}
+	h.domainCacheMu.RUnlock()
+
+	project, err := models.GetProjectByDomain(h.deps.DB.DB, host)
+	if err != nil {
+		return nil, err
+	}
+	if project != nil && project.Published {
+		h.domainCacheMu.Lock()
+		if h.domainCache == nil {
+			h.domainCache = make(map[string]domainCacheEntry)
+		}
+		if len(h.domainCache) >= maxDomainCacheEntries {
+			for k, e := range h.domainCache {
+				if !now.Before(e.expiresAt) {
+					delete(h.domainCache, k)
+				}
+			}
+			if len(h.domainCache) >= maxDomainCacheEntries {
+				clear(h.domainCache)
+			}
+		}
+		h.domainCache[host] = domainCacheEntry{
+			project:   project,
+			expiresAt: now.Add(domainCacheTTL),
+		}
+		h.domainCacheMu.Unlock()
+	}
+	return project, nil
 }
 
 // resolveCSP returns the Content-Security-Policy for this request. The precedence
@@ -109,16 +179,13 @@ func getProject(r *http.Request) *models.Project {
 
 // serveDocsJSON serves the auto-generated OpenAPI spec from of_files.
 func (h *Handler) serveDocsJSON(w http.ResponseWriter, project *models.Project, projectDB *sql.DB) {
-	var storage, body, diskPath sql.NullString
-	err := projectDB.QueryRow(
-		"SELECT storage, body, disk_path FROM of_files WHERE kind = 'file' AND path = 'api-docs.json' AND scope = 'global' AND is_deleted = 0",
-	).Scan(&storage, &body, &diskPath)
+	f, err := store.LoadGlobalPublicFile(projectDB, "api-docs.json")
 	if err != nil {
 		writeError(w, http.StatusNotFound, "API docs not generated yet")
 		return
 	}
 
-	data, err := store.ReadArtifactBytes(storage, body, diskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
+	data, err := store.ReadArtifactBytes(f.Storage, f.Body, f.DiskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "API docs not found")
 		return
@@ -238,9 +305,7 @@ type buildStep struct {
 // unknown stage leaves every step "todo" so the stepper still renders.
 func publicBuildSteps(stage string) []buildStep {
 	active := -1 // index of the step the build is on; -1 lights nothing
-	// Engine stage codes are lowercase (of_runs.stage); lower-case defensively
-	// so a stray legacy uppercase value still maps.
-	switch strings.ToLower(stage) {
+	switch stage {
 	case "expand", "plan":
 		active = 0
 	case "build":

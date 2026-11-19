@@ -12,7 +12,7 @@ import (
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
-	"openfabrica/store"
+	"openfabrica/internal/browser"
 )
 
 // Behavioural tests for the platform-owned js/e2ee.js. Everything else in the
@@ -45,7 +45,7 @@ func e2eeHarness(t *testing.T) func(name string, out any) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	alloc, cancelAlloc, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{})
+	alloc, cancelAlloc, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{})
 	if err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	}

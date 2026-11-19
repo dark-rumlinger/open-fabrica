@@ -22,18 +22,15 @@ let publicBase = '';
 export function renderProjectWebhooks(container, projectId, section, project) {
   const scope = createScope();
   publicBase = publicOrigin(project, state.get('systemStatus'));
-  const canWrite = state.isAdmin();
 
   // --- Event Hooks tab: outbound/inbound webhooks ---
   const hooksBody = h('div', { className: 'list-block' });
-  if (canWrite) {
-    hooksBody.appendChild(h('div', { className: 'list-toolbar flex items-center justify-end mb-3' }, [
-      h('button', {
-        className: 'btn btn--primary btn--sm',
-        onClick: () => showCreateModal(projectId, () => list.reload()),
-      }, [h('span', { innerHTML: icon('plus') }), ' ' + t('wh.create')]),
-    ]));
-  }
+  hooksBody.appendChild(h('div', { className: 'list-toolbar flex items-center justify-end mb-3' }, [
+    h('button', {
+      className: 'btn btn--primary btn--sm',
+      onClick: () => showCreateModal(projectId, () => list.reload()),
+    }, [h('span', { innerHTML: icon('plus') }), ' ' + t('wh.create')]),
+  ]));
 
   const listEl = h('div');
   hooksBody.appendChild(listEl);
@@ -47,7 +44,7 @@ export function renderProjectWebhooks(container, projectId, section, project) {
       iconName: 'link',
       title: t('wh.empty.title'),
       description: t('wh.empty.description'),
-      action: canWrite ? { label: t('wh.create'), onClick: () => showCreateModal(projectId, () => list.reload()) } : null,
+      action: { label: t('wh.create'), onClick: () => showCreateModal(projectId, () => list.reload()) },
     },
     errorMsg: t('wh.loadFailed'),
   });
@@ -118,7 +115,6 @@ function renderTrigger(trig, projectId, reload) {
     actions: [
       {
         label: trig.is_enabled ? t('tasks.disable') : t('tasks.enable'),
-        adminOnly: true,
         onClick: () => runAction(() => post(`/admin/api/projects/${projectId}/triggers/${trig.id}/toggle`), {
           success: trig.is_enabled ? t('common.disabled') : t('common.enabled'),
           onDone: reload,
@@ -126,7 +122,7 @@ function renderTrigger(trig, projectId, reload) {
         }),
       },
       {
-        label: t('common.delete'), kind: 'danger', adminOnly: true,
+        label: t('common.delete'), kind: 'danger',
         onClick: () => modal.confirmDanger(t('wh.trig.deleteTitle'), t('wh.trig.deleteBody', { name: trig.name }),
           () => runAction(() => del(`/admin/api/projects/${projectId}/triggers/${trig.id}`), {
             success: t('wh.deleted'),
@@ -171,10 +167,9 @@ function renderWebhook(wh, projectId, reload) {
     badge: h('div', { className: 'flex gap-2' }, [dirBadge, enabledBadge]),
     actions: [
       { label: t('wh.details'), onClick: () => showDetail(projectId, wh) },
-      { label: t('common.edit'), adminOnly: true, onClick: () => showEditModal(projectId, wh, reload) },
+      { label: t('common.edit'), onClick: () => showEditModal(projectId, wh, reload) },
       {
         label: wh.is_enabled ? t('tasks.disable') : t('tasks.enable'),
-        adminOnly: true,
         onClick: () => runAction(() => post(`/admin/api/projects/${projectId}/webhooks/${wh.id}/toggle`), {
           success: wh.is_enabled ? t('common.disabled') : t('common.enabled'),
           onDone: reload,
@@ -182,7 +177,7 @@ function renderWebhook(wh, projectId, reload) {
         }),
       },
       {
-        label: t('common.delete'), kind: 'danger', adminOnly: true,
+        label: t('common.delete'), kind: 'danger',
         onClick: () => modal.confirmDanger(t('wh.deleteTitle'), t('wh.deleteBody', { name: wh.name }),
           () => runAction(() => del(`/admin/api/projects/${projectId}/webhooks/${wh.id}`), {
             success: t('wh.deleted'),
@@ -242,38 +237,36 @@ async function showDetail(projectId, wh) {
     // cannot: the admin page may only talk to its own origin, and it would
     // not prove the receiver checks the signature.
     const resultLine = h('p', { className: 'text-sm mt-2', role: 'status' });
-    if (state.isAdmin()) {
-      content.appendChild(h('button', {
-        className: 'btn btn--sm btn--secondary mt-3',
-        onClick: async (e) => {
-          const btn = e.currentTarget;
-          btn.disabled = true;
-          btn.textContent = t('wh.sending');
-          resultLine.textContent = '';
-          try {
-            const res = await post(`/admin/api/projects/${projectId}/webhooks/${wh.id}/test`);
-            if (res.success) {
-              resultLine.style.color = 'var(--success)';
-              resultLine.textContent = t('wh.delivered', { status: res.status_code, ms: res.duration_ms });
-            } else {
-              resultLine.style.color = 'var(--danger)';
-              resultLine.textContent = res.status_code
-                ? (res.response
-                  ? t('wh.receiverAnsweredWith', { status: res.status_code, response: res.response })
-                  : t('wh.receiverAnswered', { status: res.status_code }))
-                : t('wh.unreachable', { error: humanizeError(res.error || t('tg.unknownError')) });
-            }
-          } catch (err) {
+    content.appendChild(h('button', {
+      className: 'btn btn--sm btn--secondary mt-3',
+      onClick: async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = t('wh.sending');
+        resultLine.textContent = '';
+        try {
+          const res = await post(`/admin/api/projects/${projectId}/webhooks/${wh.id}/test`);
+          if (res.success) {
+            resultLine.style.color = 'var(--success)';
+            resultLine.textContent = t('wh.delivered', { status: res.status_code, ms: res.duration_ms });
+          } else {
             resultLine.style.color = 'var(--danger)';
-            resultLine.textContent = t('wh.testFailed', { error: humanizeError(err.message) });
-          } finally {
-            btn.disabled = false;
-            btn.textContent = t('wh.sendTest');
+            resultLine.textContent = res.status_code
+              ? (res.response
+                ? t('wh.receiverAnsweredWith', { status: res.status_code, response: res.response })
+                : t('wh.receiverAnswered', { status: res.status_code }))
+              : t('wh.unreachable', { error: humanizeError(res.error || t('tg.unknownError')) });
           }
-        },
-      }, t('wh.sendTest')));
-      content.appendChild(resultLine);
-    }
+        } catch (err) {
+          resultLine.style.color = 'var(--danger)';
+          resultLine.textContent = t('wh.testFailed', { error: humanizeError(err.message) });
+        } finally {
+          btn.disabled = false;
+          btn.textContent = t('wh.sendTest');
+        }
+      },
+    }, t('wh.sendTest')));
+    content.appendChild(resultLine);
   }
 
   if (detail.direction === 'incoming') {

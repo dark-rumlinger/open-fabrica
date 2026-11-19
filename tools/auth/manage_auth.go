@@ -130,7 +130,7 @@ func (a *AuthDelete) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 type AuthVerifyPassword struct {
 	TableName string `arg:"table_name,required" desc:"User table."`
 	UserID    int    `arg:"user_id,required"    desc:"Row id of the user."`
-	Password  string `arg:"password,required"   desc:"Plaintext to verify."`
+	Password  string `arg:"password,required"   desc:"Plaintext to verify." sensitive:"true"`
 }
 
 func (a *AuthVerifyPassword) Doc() string {

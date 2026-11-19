@@ -21,6 +21,10 @@ import (
 // in-memory chatThread carries the prior conversation across wakes so a short
 // reply like "yes" still has its referent.
 func (w *Worker) handleChatWake(ctx context.Context, userMessage string) {
+	w.handleChatWakeWithImages(ctx, userMessage, nil)
+}
+
+func (w *Worker) handleChatWakeWithImages(ctx context.Context, userMessage string, images []llm.MessageImage) {
 	// Entering is a fresh intent to run: drop a stop left set by a prior session
 	// that ended before the between-turns check could consume it (a stop landing
 	// on the final no-tool turn), so it cannot end this run before it starts. A
@@ -28,7 +32,7 @@ func (w *Worker) handleChatWake(ctx context.Context, userMessage string) {
 	// drive(); LIVE never passes through it.
 	w.clearStopRequest()
 
-	spec := w.liveWakeSpec(userMessage)
+	spec := w.liveWakeSpecWithImages(userMessage, images)
 
 	sess := w.newStageSession(StageLive)
 	res, err := w.runSpec(ctx, sess, spec)
@@ -41,6 +45,12 @@ func (w *Worker) handleChatWake(ctx context.Context, userMessage string) {
 	}
 
 	w.publishLiveOutcome(res, err)
+	if err == nil && !res.Paused && res.Ending != EndFailed && res.ToolCalls > 0 {
+		w.bs().previewPNG = nil
+		if w.saveBuildPreview(ctx) {
+			w.publishVerbatim(fmt.Sprintf("<!--of-preview:/admin/api/projects/%d/preview.png?v=%d-->", w.projectID, time.Now().Unix()))
+		}
+	}
 }
 
 // liveOverflowNote is the deterministic marker a reseeded live segment carries
@@ -63,6 +73,10 @@ func liveReseed(wakeSeed []llm.Message) func() ([]llm.Message, error) {
 
 // liveWakeSpec assembles the session spec for one owner-chat wake.
 func (w *Worker) liveWakeSpec(userMessage string) SessionSpec {
+	return w.liveWakeSpecWithImages(userMessage, nil)
+}
+
+func (w *Worker) liveWakeSpecWithImages(userMessage string, images []llm.MessageImage) SessionSpec {
 	spec := DefaultSpec(StageLive)
 	spec.Guard = &RepeatGuard{}
 	spec.System = w.liveSystemPrompt()
@@ -71,6 +85,10 @@ func (w *Worker) liveWakeSpec(userMessage string) SessionSpec {
 	// cross-artifact discovery surface (manage_codebase) live fixes reach for
 	// first - keeps "where does X come from" off the list-then-read path.
 	spec.PreloadTools = livePreloadTools()
+	if !w.userFlowsEnabled() {
+		spec.OmitToolActions = testingOmitFlows
+		spec.ExtraHiddenGuides = map[string]bool{"user_flows": true}
+	}
 	spec.OnModelDone = w.liveFlowCoverage(time.Now())
 
 	framed := userMessage
@@ -93,6 +111,9 @@ func (w *Worker) liveWakeSpec(userMessage string) SessionSpec {
 		history: w.chatThread,
 		task:    framed,
 	}.messages()
+	if len(images) > 0 && len(spec.Seed) > 0 {
+		spec.Seed[len(spec.Seed)-1].Images = images
+	}
 	spec.Reseed = liveReseed(spec.Seed)
 	return spec
 }
@@ -163,23 +184,27 @@ func livePreloadTools() []string {
 func (w *Worker) liveSystemPrompt() string {
 	// Guarded like buildSystemPrompt so a registry-only Worker (tests) can
 	// render; a nil DB yields zero caps, listing only ungated tools.
-	var caps llm.Capabilities
-	if w.deps != nil && w.deps.DB != nil {
-		var err error
-		caps, err = llm.LoadCapabilities(w.deps.DB.DB)
-		if err != nil && w.logger != nil {
-			w.logger.Warn("load capabilities failed", "error", err)
-		}
-	}
+	caps := w.loadCapabilities("liveSystemPrompt")
 	sel := pack.Select(w.effectivePacks(), StageLive)
 	// The preloaded set's routing prose. A preloaded tool reaches the model as a wire
 	// schema whose description is its 130-char one-liner, and the only other path that
 	// emits WhenToUse is the find_tool handler - which the model is told not to use on
 	// these. The set is fixed, so this rides the cached prefix.
 	extra := ""
-	preloaded := livePreloadTools()
-	if prose := w.deps.ToolRegistry.RoutingProse(preloaded, caps, StageLive); prose != "" {
-		extra = "## Your always-loaded tools\n\n" + prose
+	var toolIndex string
+	var hiddenGuides map[string]bool
+	flowsOn := w.userFlowsEnabled()
+	var omitActions map[string]map[string]bool
+	if !flowsOn {
+		omitActions = testingOmitFlows
+	}
+	if w.deps.ToolRegistry != nil {
+		preloaded := livePreloadTools()
+		if prose := w.deps.ToolRegistry.RoutingProseFiltered(preloaded, caps, StageLive, omitActions); prose != "" {
+			extra = "## Your always-loaded tools\n\n" + prose
+		}
+		toolIndex = w.deps.ToolRegistry.DeferredIndex(preloaded, caps, StageLive)
+		hiddenGuides = userFlowsHiddenGuides(capabilityDeadGuides(w.effectivePacks(), w.deps.ToolRegistry, caps), flowsOn)
 	}
 	return pack.Assemble(pack.AssembleInput{
 		Stage:     StageLive,
@@ -188,9 +213,10 @@ func (w *Worker) liveSystemPrompt() string {
 		// DeferredIndex, not Index: a preloaded tool already arrives with its full wire
 		// schema AND its routing prose above, so listing it a third time in the catalogue
 		// bills the same names and verbs again on every LIVE turn.
-		ToolIndex:    w.deps.ToolRegistry.DeferredIndex(preloaded, caps, StageLive),
+		ToolIndex:    toolIndex,
 		Extra:        extra,
-		HiddenGuides: capabilityDeadGuides(w.effectivePacks(), w.deps.ToolRegistry, caps),
+		Conditions:   map[string]bool{"flows": flowsOn},
+		HiddenGuides: hiddenGuides,
 	}).System
 }
 
@@ -234,12 +260,19 @@ func (w *Worker) publishLiveOutcome(res SessionResult, err error) {
 		))
 	case res.Ending == EndExhausted && res.ToolCalls > 0:
 		// A budget ran out mid-fix: work happened, but the model never got a turn
-		// to send its closing summary. Don't go silent - tell the owner the change
-		// landed but the run was cut short.
-		w.publishMessage(pickPhrase(
-			"I've applied the change, but ran out of steps before I could wrap up. Tell me to continue if anything still looks off.",
-			"That's updated, though I hit my step limit before finishing the check. Let me know if it's not quite right and I'll carry on.",
-		))
+		// to send its closing summary. Don't go silent - and don't claim a change
+		// landed if every call was read-only.
+		if res.Writes > 0 {
+			w.publishMessage(pickPhrase(
+				"I've applied the change, but ran out of steps before I could wrap up. Tell me to continue if anything still looks off.",
+				"That's updated, though I hit my step limit before finishing the check. Let me know if it's not quite right and I'll carry on.",
+			))
+		} else {
+			w.publishMessage(pickPhrase(
+				"I spent several turns investigating without making an edit yet and stopped to avoid spinning. Tell me to continue or point me at the specific part you want changed.",
+				"I got caught up reading through the files and didn't apply the change before hitting the limit. Say the word and I'll jump straight to the edit.",
+			))
+		}
 	case res.Content == "" && res.ToolCalls > 0:
 		w.publishMessage(pickPhrase(
 			"All done, the change is live.",

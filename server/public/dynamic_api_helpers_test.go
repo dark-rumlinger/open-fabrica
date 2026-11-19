@@ -190,3 +190,17 @@ func TestRowIDColumn_InvalidLookupColumnIgnored(t *testing.T) {
 		t.Fatalf("non-existent lookup_column should fall through to autodetect; got col=%q", col)
 	}
 }
+
+// migratedTestDB returns a real, fully migrated project database with stmts
+// applied. It is the writer pool: one connection, so the handler under test
+// reads what the statements wrote.
+func migratedTestDB(t *testing.T, stmts ...string) *sql.DB {
+	t.Helper()
+	_, pdb := spineDispatchDB(t)
+	for _, stmt := range stmts {
+		if _, err := pdb.Writer().Exec(stmt); err != nil {
+			t.Fatalf("stmt %q: %v", stmt, err)
+		}
+	}
+	return pdb.Writer()
+}

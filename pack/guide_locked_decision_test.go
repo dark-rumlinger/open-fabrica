@@ -74,4 +74,21 @@ func TestRenderGuidesCoreLockedTrimsUnchosenBranches(t *testing.T) {
 	if !strings.Contains(mm, "manage_matchmaking") {
 		t.Error("a matchmaking lock must keep its own bullet")
 	}
+
+	// Guides that declare tools surface them at the top of the rendered <guide>
+	// block and expand bare capability shorthands (`create_auth`) to their concrete
+	// `tool action=verb` call.
+	var auth []Pack
+	for _, g := range Capabilities(ps) {
+		if g.Slug == "auth_contract" {
+			auth = []Pack{g}
+		}
+	}
+	renderedAuth := RenderGuidesCore(auth)
+	if !strings.Contains(renderedAuth, "Tools for this guide: `manage_auth`") {
+		t.Errorf("auth_contract should list its declared tools at the top of <guide>; got:\n%s", renderedAuth)
+	}
+	if !strings.Contains(renderedAuth, "`create_auth` (`manage_auth action=create`)") {
+		t.Errorf("auth_contract should expand `create_auth` shorthand inline; got:\n%s", renderedAuth)
+	}
 }

@@ -1,0 +1,42 @@
+# Systemd unit template for Raspberry Pi / headless Linux hosts.
+#
+# Install:
+#   sudo useradd --system --home /var/lib/openfabrica --shell /usr/sbin/nologin openfabrica
+#   sudo mkdir -p /var/lib/openfabrica && sudo chown openfabrica:openfabrica /var/lib/openfabrica
+#   sudo install -m 0755 openfabrica /usr/local/bin/openfabrica
+#   sudo cp deploy/openfabrica.service /etc/systemd/system/openfabrica.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now openfabrica
+#
+# Optional: for post-build runtime verification and PDF generation on Debian / Raspberry Pi OS:
+#   sudo apt-get update && sudo apt-get install -y chromium fonts-freefont-ttf
+
+[Unit]
+Description=Open Fabrica self-hosted app builder and host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openfabrica
+Group=openfabrica
+WorkingDirectory=/var/lib/openfabrica
+
+Environment=OPENFABRICA_DATA_DIR=/var/lib/openfabrica/data
+Environment=OPENFABRICA_NO_BROWSER=1
+# Soft heap ceiling: use 512MiB on 1 GB boards (Pi 3 / Zero 2 W), 1GiB+ on 2 GB+ boards.
+Environment=OPENFABRICA_MEMORY_LIMIT=1GiB
+# Headless Chrome cold-start timeout defaults to 15s on ARM/ARM64 (adapts up to 30s).
+# Uncomment to pin a fixed value if needed on slower SD cards:
+# Environment=OPENFABRICA_BROWSER_TIMEOUT=20s
+
+ExecStart=/usr/local/bin/openfabrica
+Restart=on-failure
+RestartSec=5s
+
+# Allow binding ports 80/443 for on-demand Let's Encrypt HTTPS without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

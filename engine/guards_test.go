@@ -517,3 +517,37 @@ func TestRepeatGuard_StallForceStopPreserved(t *testing.T) {
 		t.Fatalf("expected a force-stop after %d identical calls, got %v", repeatedCallStallThreshold, v)
 	}
 }
+
+// Identical failing calls must still force-stop at repeatedCallStallThreshold rather
+// than being masked forever by the per-target repeated_result_block (threshold 3).
+func TestRepeatGuard_FailingStallForceStops(t *testing.T) {
+	g, st := RepeatGuard{}, NewGuardState()
+	args := map[string]any{"action": "save", "file_path": "/files/island.state.js", "version": 1}
+	fail := `{"success":false,"code":"missing_arg","error":"missing required arg \"body\""}`
+
+	for i := 0; i < repeatedCallStallThreshold-1; i++ {
+		run(g, st, "manage_files", args, fail, false)
+	}
+	v := g.Before(st, nil, "manage_files", args)
+	if v == nil || !v.Block || !v.Stop {
+		t.Fatalf("expected Stop=true after %d identical failing calls, got %v", repeatedCallStallThreshold, v)
+	}
+}
+
+// Repeating missing_arg on the same (tool, action) across different target paths
+// (e.g. default, /, /files/island.css) force-stops instead of looping per file.
+func TestRepeatGuard_MissingArgAcrossTargetsForceStops(t *testing.T) {
+	g, st := RepeatGuard{}, NewGuardState()
+	fail := `{"success":false,"code":"missing_arg","error":"missing required arg \"body\""}`
+	paths := []string{"default", "default", "default", "/", "/", "/"}
+	for _, p := range paths {
+		args := map[string]any{"action": "save", "file_path": p, "version": 1}
+		if v := run(g, st, "manage_files", args, fail, false); v != nil && v.Stop {
+			t.Fatalf("stopped too early on %q", p)
+		}
+	}
+	v := g.Before(st, nil, "manage_files", map[string]any{"action": "save", "file_path": "/files/island.css"})
+	if v == nil || !v.Block || !v.Stop {
+		t.Fatalf("expected Stop=true after %d missing_arg failures across targets, got %v", missingArgStallThreshold, v)
+	}
+}

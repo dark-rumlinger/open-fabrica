@@ -1,24 +1,29 @@
 ![Build end](docs/assets/before_after.png)
 
 [![Latest release](https://img.shields.io/github/v/release/dark-rumlinger/open-fabrica?display_name=tag&sort=semver)](https://github.com/dark-rumlinger/open-fabrica/releases)
+[![CI](https://github.com/dark-rumlinger/open-fabrica/actions/workflows/ci.yml/badge.svg)](https://github.com/dark-rumlinger/open-fabrica/actions/workflows/ci.yml)
 [![Single binary](https://img.shields.io/badge/deploy-single%20binary-blue)](https://github.com/dark-rumlinger/open-fabrica/releases)
-[![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)](https://github.com/dark-rumlinger/open-fabrica/releases)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![X](https://img.shields.io/badge/X-@open__fabrica-000000?logo=x&logoColor=white)](https://x.com/open_fabrica)
+[![Windows](https://img.shields.io/badge/Windows-0078D6?logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0wIDMuNDQ5TDkuNzUgMi4xdjkuNDUxSDBtMTAuOTQ5LTkuNjAyTDI0IDB2MTEuNEgxMC45NDlNMCAxMi42aDkuNzV2OS40NTFMMCAyMC42OTlNMTAuOTQ5IDEyLjZIMjRWMjRsLTEyLjktMS44MDEiLz48L3N2Zz4%3D&logoColor=white)](https://github.com/dark-rumlinger/open-fabrica/releases)
 [![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://github.com/dark-rumlinger/open-fabrica/releases)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](https://github.com/dark-rumlinger/open-fabrica/releases)
+[![Raspberry Pi](https://img.shields.io/badge/Raspberry%20Pi-A22846?logo=raspberrypi&logoColor=white)](https://github.com/dark-rumlinger/open-fabrica/releases)
 
-# The Era of Open Fabrica
+# Open Fabrica: We promise, you'll be amazed
 
-**Build anything you dream of with one (literally) click. Instantly served to the world from your own machine. 100% private.**
+**Build ANYTHING you dream of with one (literally) click. Instantly served to the world from your own machine. 100% private.**
 
-You don't need to know anything about hosting, databases, APIs or a certain "tech stack". Open Fabrica IS the stack. All in one single, portable file. 
+Forget everything you think you know about good software, developing, hosting, databases, APIs or a certain "tech stack". Open Fabrica IS the stack. All in one single, portable file. 
 
-You have to experience her to believe it.
+You'll learn to love and understand her better as you go. 
 
 ## Ideas are Everywhere
 
-Open Fabrica is meant for everyone. Literally. From school kids to teachers and from scientists to managers. Everyone has amazing ideas and now there are no more (technical) hurdles. Everything just works.
+Open Fabrica is meant for everyone. Literally. From school kids to teachers and from scientists to managers. Everyone has amazing ideas and now there are no more technical or financial hurdles to overcome. It just works.
 
-So get your cheap coding plan or run a local model and start changing the world.
+So get your cheap coding plan or run a local model and start changing the world, one idea at a time.
 
 ## What Can I Build?
 
@@ -26,29 +31,28 @@ So get your cheap coding plan or run a local model and start changing the world.
 
 - LLM-powered tools (chatbots, automated customer support, code generators etc.)
 - File sharing platforms
-- Apps for shops and businesses (like a coffee order board)
+- Realtime apps for shops and businesses (like a coffee order board)
 - Web(apps/sites)
 - 2D/3D multiplayer games
 - Encrypted (audio/video/text) communication apps
 - Realtime collaboration tools
+- IoT & smart-home hubs (Raspberry Pi, ESP32, and sensor dashboards over built-in MQTT)
 
-*We're certain you'll make things we haven't even thought of.*
+*Just give her your wildest ideas and she'll figure it out.*
 
 ![Build end](docs/assets/build_2.jpg)
 
 ## Quick Start
 
-1. **Download latest binary** from [Releases](https://github.com/dark-rumlinger/open-fabrica/releases).
-2. **Run it.** Double-click the file, or run `./openfabrica` in your terminal.
-3. **Open** `http://localhost:5734` in your browser.
-4. **Pick an AI provider.** The setup wizard lists the built-in providers (Anthropic, OpenAI, Gemini, OpenRouter, Z.ai, Ollama, llama.cpp, plus a few subscription coding plans) and asks for an API key. Ollama and llama.cpp need no key, so a local model works as soon as it is running. Any other OpenAI-compatible endpoint can be added later from the AI Providers page.
-5. **Describe your idea.** Open Fabrica takes it from there.
+1. **Download** from [Releases](https://github.com/dark-rumlinger/open-fabrica/releases).
+2. **Run** Double-click the file, or run `./openfabrica` in your terminal.
+3. **Describe your idea** She takes it from there, now sit back and relax.
 
-*The video below guides you through the simple setup process:*
+*The video below guides you through the 1 minute setup process:*
 
 [![1 minute setup](docs/assets/setup.png)](https://www.youtube.com/watch?v=n17afF0SnDo)
 
-## Features
+## (Some) of its Features
 
 - **Fully self-contained** binary which runs everywhere.
 - **Instantly live** by eliminating the concept of hosting.
@@ -58,6 +62,7 @@ So get your cheap coding plan or run a local model and start changing the world.
 - **Email** (SendGrid, Mailgun, Resend, or any JSON endpoint).
 - **Web Push** with auto-managed VAPID keys, plus an in-app notification inbox (list, unread count, mark read) served to each signed-in user.
 - **Real-time** chat rooms, live feeds, P2P calling, and file uploads, with optional end-to-end encryption.
+- **Built-in MQTT 3.1.1 broker** (WebSocket `/mqtt` and optional raw TCP) with per-device ACLs, persisted retained messages, LWT, and topic rules into SQLite or server functions.
 - **Image generation** via OpenAI or a local Stable Diffusion (Automatic1111) instance.
 - **Stock photos** from Pexels, Pixabay, and Unsplash, picked automatically.
 - **PDF generation** for invoices, receipts, tickets, and reports: one-off documents rendered while building, or an endpoint that fills an HTML template from each request's data and returns the PDF (needs a local Chromium based browser).
@@ -96,14 +101,13 @@ So get your cheap coding plan or run a local model and start changing the world.
 If you only run locally, the Quick Start is all you need. If you expose generated apps to the internet or enable payments, do these first:
 
 - **Back up your encryption key with your data.** `data/.security/encryption.key` decrypts every stored secret (API keys, OAuth tokens, payment credentials, TOTP seeds). Lose it and those are unrecoverable. Back it up *together with* the `data/` folder, kept somewhere the data backup alone can't leak it.
-- **Set a spend ceiling.** Unattended AI, the build/self-repair loop **plus** event triggers, scheduled jobs, and server functions, calls the LLM on your key. A safe ~1M-token-per-project-per-day ceiling ships **on by default** and is a single shared pool across all of those paths (change it in the wizard or **Settings → Daily AI spend limit**, or set `OPENFABRICA_ENGINE_DAILY_TOKEN_BUDGET=0` for unlimited). When a project hits the ceiling those calls pause instead of billing all night. The AI chat and agent endpoints your app's visitors call draw on a **separate** pool (1M tokens per project per day by default), so a busy public chatbot cannot pause your builds. Each project can set its own token limit for both pools and one **dollar cap** over everything (**Project → Settings → Advanced → Daily AI limits**), priced from each model's recorded prices.
+- **Set a spend ceiling.** Unattended AI, the build/self-repair loop **plus** event triggers, scheduled jobs, and server functions, calls the LLM on your key. A safe 5M-token-per-project-per-day ceiling ships **on by default** and is a single shared pool across all of those paths (change it in the wizard or **Settings → Daily AI spend limit**, or set `OPENFABRICA_ENGINE_DAILY_TOKEN_BUDGET=0` for unlimited). When a project hits the ceiling those calls pause instead of billing all night. The AI chat and agent endpoints your app's visitors call draw on a **separate** pool (1M tokens per project per day by default), so a busy public chatbot cannot pause your builds. Each project can set its own token limit for both pools and one **dollar cap** over everything (**Project → Settings → Advanced → Daily AI limits**), priced from each model's recorded prices.
 - **Isolate untrusted/multi-user apps.** The public CSP is permissive by design. Serve each project on its **own domain/subdomain** so one app can't reach another's same-origin storage, and tighten the CSP instance-wide via `OPENFABRICA_PUBLIC_CSP` or per project in **Project → Settings → Advanced**.
-- **Cap memory for untrusted apps.** Model-authored server functions run in a JS sandbox that limits CPU and output but **not heap**, so a runaway handler can exhaust memory and crash the whole instance. Set a soft ceiling with `OPENFABRICA_MEMORY_LIMIT` (e.g. `1GiB`) so GC pushes back before the process climbs into the OS OOM-killer, and for a hard backstop run under an OS/container memory limit with auto-restart. The shipped [`Dockerfile`](Dockerfile) wires `--memory` + `GOMEMLIMIT` for you; on bare metal use systemd `MemoryMax=`/`Restart=` or a cgroup. This is a floor, not tenant isolation. See [Security](docs/SECURITY.md).
+- **Cap memory for untrusted apps.** Model-authored server functions run in a JS sandbox that limits CPU and output but **not heap**, so a runaway handler can exhaust memory and crash the whole instance. Set a soft ceiling with `OPENFABRICA_MEMORY_LIMIT` (e.g. `1GiB`, or `512MiB` on 1 GB Raspberry Pi boards) so GC pushes back before the process climbs into the OS OOM-killer, and for a hard backstop run under an OS/container memory limit with auto-restart. The shipped [`Dockerfile`](Dockerfile) wires `--memory` + `GOMEMLIMIT` for you; on bare metal or Raspberry Pi / headless Linux use [`deploy/openfabrica.service`](deploy/openfabrica.service) (or systemd `MemoryMax=`/`Restart=`). This is a floor, not tenant isolation. See [Security](docs/SECURITY.md).
 - **Keep the admin panel on localhost** (the default). See **Security** below.
 
 Health probes on either port (both bypass auth and routing): `GET /health` (alias `/healthz`) is a **liveness** check that always returns `{"status":"ok"}` while the process can answer requests. `GET /ready` (alias `/readyz`) is a **readiness** check that pings the database and returns `{"status":"ready"}` (200) when it can serve, or `{"status":"unavailable"}` (503) when the database is unreachable, point your load balancer or orchestrator at `/ready`.
 
-![Build end](docs/assets/plato_quote.png)
 
 ## Self-Hosting and HTTPS
 
@@ -139,6 +143,7 @@ Zero-config by default. To tweak, use `config.json` or environment variables.
 | `OPENFABRICA_ADMIN_BIND` | 127.0.0.1 | Interface the admin panel binds to (loopback by default) |
 | `OPENFABRICA_ADMIN_EXPOSE` |  | Set to `1` to allow binding admin to a non-loopback address (required alongside a routable bind) |
 | `OPENFABRICA_PUBLIC_PORT` | 5733 | Port where your project is served |
+| `OPENFABRICA_MQTT_PORT` | 0 (WebSocket `/mqtt` only) | Optional raw TCP port for the built-in MQTT broker (e.g. `1883` for ESP32/embedded devices) |
 | `OPENFABRICA_DATA_DIR` | ./data | Where project data is stored |
 | `OPENFABRICA_DB_PATH` | `<data_dir>/openfabrica.db` | Path to the core SQLite database |
 | `OPENFABRICA_SEED_PATH` | ./seed.json | Provider seed applied on every start; the copy built into the binary is used when the file is missing |
@@ -160,6 +165,8 @@ Zero-config by default. To tweak, use `config.json` or environment variables.
 | `OPENFABRICA_ENGINE_STAGE_BUILD_TIMEOUT_MIN` | 90 | Wall-clock timeout (minutes) for the BUILD stage. |
 | `OPENFABRICA_PUBLIC_CSP` | (permissive) | Override the CSP on public project pages. The permissive default carries `'wasm-unsafe-eval'` so WebAssembly modules (TensorFlow.js, MediaPipe, ffmpeg.wasm, game engines) compile - the browser gates WASM behind CSP, and this keyword permits only WASM compilation, not JavaScript `eval()`. Put the literal `{nonce}` token in a `script-src` and the server mints a per-request nonce so inline scripts work without `'unsafe-inline'`. Or set it to the keyword `hardened` for a built-in strict preset (scripts locked to `'self'` + nonce + `'wasm-unsafe-eval'`; external images, fonts, and styles still load). Also settable per project. Empty string removes the header. |
 | `OPENFABRICA_NO_BROWSER` |  | Set to `1` or `true` to suppress auto-opening the admin URL on startup. |
+| `OPENFABRICA_CHROME_PATH` | auto-detected | Override the Chrome/Chromium/Edge binary used for runtime verification, web fetch fallback, and PDF generation (`CHROME_PATH` is also honored). |
+| `OPENFABRICA_BROWSER_TIMEOUT` | adaptive (`5s` `amd64`, `15s` `arm`/`arm64`, up to `30s`) | Pin the headless browser cold-start probe timeout (e.g. `20s`), disabling adaptive scaling. |
 | `OPENFABRICA_OLLAMA_KEEP_ALIVE` | 30m | How long Ollama keeps a model (and its prefix cache) resident between calls. `-1` keeps it resident, `0` unloads after each call. |
 | `OPENFABRICA_OLLAMA_NUM_CTX` |  | Ollama context window for build calls. Set it at least as large as the build prompt (~16k+ tokens) so the cached prefix isn't evicted. |
 
@@ -174,7 +181,7 @@ Requires **Go 1.26+**. No C compiler needed, the SQLite driver is pure Go.
 ```bash
 git clone https://github.com/dark-rumlinger/open-fabrica.git
 cd open-fabrica
-make dev        # run directly, or: go run ./cmd/openfabrica
+make dev        # generates embedded assets and runs in dev mode (or: go generate ./knowledge ./web && go run ./cmd/openfabrica)
 make build      # stripped, version-stamped binary in ./bin
 ```
 
@@ -198,14 +205,14 @@ Each stage is a registered `Stage` carrying its own timeout and start line; `def
 
 Every stage runs through one unified session loop (`engine/session.go`): an append-only, byte-stable transcript so provider prompt caches hit across iterations, plus a content-addressed replay cache (`of_llm_cache`) that makes crash resume and retries nearly free. Context overflow ends the segment and reseeds deterministically from database state, the same mechanism that powers crash recovery.
 
-All LLM-facing guidance lives in one **knowledge** tree (`knowledge/`): an always-on `mental-model.md`, recall-on-demand capability guides, canonical contracts, and per-stage frames + fragments. The `pack` package selects and renders them into each stage's byte-stable system prompt. Load-bearing **facts** (REST envelope, `auth_token` key, E2EE wire envelope, realtime frames, trigger events, payment flow) are defined once in `contracts/` and transcluded via `{{contract:<id>}}`, so a copy can't silently drift; a consistency test fails the build if it does. Tools live under `tools/`, each registering a declarative `tools.Tool`; every caller (build loop, live chat, jobs, triggers) runs them through one `tools.Executor.Invoke` path with a shared `tools.Env`, and tool tests use `tools/tooltest` against the real migrated schema. `engine/testdata/golden` pins the exact bytes of every stage's prompt, so a refactor that would silently re-bill the provider cache fails the build (`go test ./engine -run TestGoldenPromptBytes -update` after an intended prompt change). Guard tests (`TestNoCrossPackDuplication`, `TestGovernedDocsMatchContracts`, the `*_drift` tests) fail the build on a drifted copy.
+All LLM-facing guidance lives in one **knowledge** tree (`knowledge/`): an always-on `mental-model.md`, recall-on-demand capability guides, canonical contracts, and per-stage frames + fragments. The `pack` package selects and renders them into each stage's byte-stable system prompt. Load-bearing **facts** (REST envelope, `auth_token` key, E2EE wire envelope, realtime frames, trigger events, payment flow) are defined once in `contracts/` and transcluded via `{{contract:<id>}}`, so a copy can't silently drift; a consistency test fails the build if it does. Tools live under `tools/`, each registering a declarative `tools.Tool`; every caller (build loop, live chat, jobs, triggers) runs them through one `tools.Executor.Invoke` path with a shared `tools.Env`, and tool tests use `tools/tooltest` against the real migrated schema. Guard tests (`TestNoCrossPackDuplication`, `TestGovernedDocsMatchContracts`, the `*_drift` tests) fail the build on a drifted copy.
 
 ## License
 Open Fabrica is released under the [MIT License](LICENSE). Third-party components keep their own licenses, listed in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).
 
 ## Acknowledgements
 
-Open Fabrica stands on a lot of excellent open-source work. Special thanks to [Let's Encrypt](https://letsencrypt.org) for free HTTPS, and to the libraries it's built on:
+Open Fabrica stands on a lot of excellent open-source work. Special thanks to [Let's Encrypt](https://letsencrypt.org) for free HTTPS, [DuckDuckGo](https://duckduckgo.com) for zero-config default web search, and to the libraries it's built on:
 
 - **[modernc.org/sqlite](https://gitlab.com/cznic/sqlite)**: a pure-Go SQLite, and the reason the whole app ships as one binary with no cgo and cross-compiles anywhere.
 - **[goja](https://github.com/dop251/goja)**: the embedded JavaScript engine that runs model-authored server functions and multiplayer game logic in a sandbox.
@@ -220,8 +227,10 @@ Open Fabrica stands on a lot of excellent open-source work. Special thanks to [L
 Plus [google/uuid](https://github.com/google/uuid), [zap](https://github.com/uber-go/zap), and the Go team's [`golang.org/x`](https://pkg.go.dev/golang.org/x) `crypto`, `net`, and `text` packages.
 
 
-## Contact
+## Who's responsible for all of this?
 
-I'm Dark. If you need me checkout X ([@open_fabrica](https://x.com/open_fabrica)).
+Hello old friend I'm **Dark**. Reach out via X ([@open_fabrica](https://x.com/open_fabrica)).
+
+Remember, you can copy a product but you can't copy a vision.
 
 

@@ -8,6 +8,10 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 	"openfabrica/db/models"
 	"openfabrica/internal/msgcat"
 	"openfabrica/pack"
+	"openfabrica/providers/llm"
 )
 
 type expandStage struct{}
@@ -61,6 +66,9 @@ func (expandStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) 
 		owner: w.ownerContext(),
 		task:  "Owner's raw brief:\n\n" + brief + "\n\nRewrite it as described above. Output prose only.",
 	}.messages()
+	if imgs := w.loadBriefImages(); len(imgs) > 0 && len(spec.Seed) > 0 {
+		spec.Seed[len(spec.Seed)-1].Images = imgs
+	}
 
 	sess := w.newStageSession(StageExpand)
 	res, err := w.runSpec(ctx, sess, spec)
@@ -129,3 +137,41 @@ func ambitionDirective(level string) string {
 	}
 	return expandDirectives[level]
 }
+
+func (w *Worker) loadBriefImages() []llm.MessageImage {
+	if w.deps.ProjectDBManager == nil {
+		return nil
+	}
+	dir := filepath.Join(w.deps.ProjectDBManager.ProjectDir(w.projectID), "brief_images")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var out []llm.MessageImage
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		mime := "image/jpeg"
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".png":
+			mime = "image/png"
+		case ".webp":
+			mime = "image/webp"
+		case ".gif":
+			mime = "image/gif"
+		}
+		out = append(out, llm.MessageImage{MIMEType: mime, Data: data})
+		if len(out) >= 4 {
+			break
+		}
+	}
+	return out
+}
+
+var _ = fmt.Sprintf

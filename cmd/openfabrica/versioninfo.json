@@ -3,13 +3,13 @@
     "FileVersion": {
       "Major": 0,
       "Minor": 2,
-      "Patch": 4,
+      "Patch": 5,
       "Build": 0
     },
     "ProductVersion": {
       "Major": 0,
       "Minor": 2,
-      "Patch": 4,
+      "Patch": 5,
       "Build": 0
     },
     "FileFlagsMask": "3f",
@@ -22,11 +22,11 @@
     "Comments": "",
     "CompanyName": "Open Fabrica",
     "FileDescription": "Open Fabrica",
-    "FileVersion": "v0.2.4",
+    "FileVersion": "v0.2.5",
     "InternalName": "openfabrica",
     "OriginalFilename": "openfabrica.exe",
     "ProductName": "Open Fabrica",
-    "ProductVersion": "v0.2.4"
+    "ProductVersion": "v0.2.5"
   },
   "VarFileInfo": {
     "Translation": {

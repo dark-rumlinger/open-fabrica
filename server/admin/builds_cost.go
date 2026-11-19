@@ -3,6 +3,7 @@ package admin
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -10,6 +11,7 @@ import (
 
 	"openfabrica/internal/buildstate"
 	"openfabrica/providers/llm"
+	"openfabrica/store"
 )
 
 // Cost returns the token economics for one run.
@@ -46,26 +48,10 @@ func effectiveInputTokens(providerType, providerName, model string, input, cache
 // buildTokenSummary aggregates of_llm_calls for one run into a per-stage
 // token breakdown plus totals.
 func buildTokenSummary(db *sql.DB, runID string) (map[string]any, error) {
-	rows, err := db.Query(
-		`SELECT stage, COALESCE(provider_type, '') AS provider_type,
-		        COALESCE(provider_name, '') AS provider_name, COALESCE(model, '') AS model,
-		        COUNT(*) AS calls,
-		        COALESCE(SUM(input_tokens), 0)  AS input_tokens,
-		        COALESCE(SUM(output_tokens), 0) AS output_tokens,
-		        COALESCE(SUM(cache_read_input_tokens), 0)     AS cache_read,
-		        COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation,
-		        COALESCE(SUM(stable_prefix_bytes), 0)         AS sum_prefix_bytes,
-		        COALESCE(SUM(total_request_bytes), 0)         AS sum_total_bytes,
-		        COALESCE(MIN(NULLIF(total_request_bytes, 0)), 0) AS min_total_bytes
-		 FROM of_llm_calls
-		 WHERE run_id = ? AND source = 'engine'
-		 GROUP BY stage, provider_type, provider_name, model`,
-		runID,
-	)
+	aggs, err := store.LoadRunStageTokenAggs(db, runID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	type stageAgg struct {
 		stage       string
@@ -83,44 +69,35 @@ func buildTokenSummary(db *sql.DB, runID string) (map[string]any, error) {
 	stageOrder := []string{}
 	var totCalls, totInput, totOutput, totCacheRead, totCacheCreate, totEffective int64
 
-	for rows.Next() {
-		var stage, providerType, providerName, model string
-		var calls, inT, outT, cacheR, cacheC int64
-		var sumPrefix, sumTotal, minTotal int64
-		if scanErr := rows.Scan(&stage, &providerType, &providerName, &model, &calls, &inT, &outT, &cacheR, &cacheC, &sumPrefix, &sumTotal, &minTotal); scanErr != nil {
-			continue
-		}
-		agg, ok := stages[stage]
+	for _, r := range aggs {
+		agg, ok := stages[r.Stage]
 		if !ok {
-			agg = &stageAgg{stage: stage}
-			stages[stage] = agg
-			stageOrder = append(stageOrder, stage)
+			agg = &stageAgg{stage: r.Stage}
+			stages[r.Stage] = agg
+			stageOrder = append(stageOrder, r.Stage)
 		}
 		// Effective tokens are priced per model (cache discounts differ per
 		// vendor), so they accumulate here per grouped row rather than being
 		// derived from the stage sums afterwards.
-		effective := effectiveInputTokens(providerType, providerName, model, inT, cacheR, cacheC)
-		agg.calls += calls
-		agg.input += inT
-		agg.output += outT
-		agg.cacheRead += cacheR
-		agg.cacheCreate += cacheC
+		effective := effectiveInputTokens(r.ProviderType, r.ProviderName, r.Model, r.InputTokens, r.CacheRead, r.CacheCreate)
+		agg.calls += r.Calls
+		agg.input += r.InputTokens
+		agg.output += r.OutputTokens
+		agg.cacheRead += r.CacheRead
+		agg.cacheCreate += r.CacheCreate
 		agg.effective += effective
-		agg.sumPrefix += sumPrefix
-		agg.sumTotal += sumTotal
-		if minTotal > 0 && (agg.minTotal == 0 || minTotal < agg.minTotal) {
-			agg.minTotal = minTotal
+		agg.sumPrefix += r.SumPrefix
+		agg.sumTotal += r.SumTotal
+		if r.MinTotal > 0 && (agg.minTotal == 0 || r.MinTotal < agg.minTotal) {
+			agg.minTotal = r.MinTotal
 		}
 
-		totCalls += calls
-		totInput += inT
-		totOutput += outT
-		totCacheRead += cacheR
-		totCacheCreate += cacheC
+		totCalls += r.Calls
+		totInput += r.InputTokens
+		totOutput += r.OutputTokens
+		totCacheRead += r.CacheRead
+		totCacheCreate += r.CacheCreate
 		totEffective += effective
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 
 	pipelineOrder := map[string]int{"plan": 0, "build": 1, "live": 2}
@@ -197,14 +174,13 @@ func buildTokenSummary(db *sql.DB, runID string) (map[string]any, error) {
 		"stages": stageRows,
 		"totals": totals,
 	}
-	// Per-task cost is a best-effort overlay: it windows build-stage call cost
-	// onto task-completion events. Older DBs / minimal schemas without
-	// of_run_log (or created_at) simply omit `tasks` - it must never fail the
-	// summary or the Cost endpoint.
-	if taskRows, unattributed, taskErr := buildTaskAttribution(db, runID); taskErr == nil {
-		result["tasks"] = taskRows
-		result["tasks_unattributed"] = unattributed
+	// Per-task cost windows build-stage call cost onto task-completion events.
+	taskRows, unattributed, err := buildTaskAttribution(db, runID)
+	if err != nil {
+		return nil, fmt.Errorf("per-task cost: %w", err)
 	}
+	result["tasks"] = taskRows
+	result["tasks_unattributed"] = unattributed
 	return result, nil
 }
 
@@ -244,33 +220,20 @@ type taskCost struct {
 // loadBuildCalls returns the run's build-stage LLM calls in wall-clock order,
 // each pre-priced per model.
 func loadBuildCalls(db *sql.DB, runID string) ([]buildCall, error) {
-	rows, err := db.Query(
-		`SELECT COALESCE(provider_type,''), COALESCE(provider_name,''), COALESCE(model,''),
-		        input_tokens, output_tokens,
-		        cache_read_input_tokens, cache_creation_input_tokens,
-		        duration_ms, COALESCE(created_at,'')
-		   FROM of_llm_calls
-		  WHERE run_id = ? AND source = 'engine' AND stage = 'build'
-		  ORDER BY created_at, id`, runID)
+	rows, err := store.LoadRunBuildCalls(db, runID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var calls []buildCall
-	for rows.Next() {
-		var pt, pn, model, ts string
-		var inT, outT, cr, cc, dur int64
-		if scanErr := rows.Scan(&pt, &pn, &model, &inT, &outT, &cr, &cc, &dur, &ts); scanErr != nil {
-			continue
-		}
+	calls := make([]buildCall, 0, len(rows))
+	for _, r := range rows {
 		calls = append(calls, buildCall{
-			Effective: effectiveInputTokens(pt, pn, model, inT, cr, cc),
-			Output:    outT,
-			DurMs:     dur,
-			TS:        ts,
+			Effective: effectiveInputTokens(r.ProviderType, r.ProviderName, r.Model, r.InputTokens, r.CacheRead, r.CacheCreate),
+			Output:    r.OutputTokens,
+			DurMs:     r.DurationMs,
+			TS:        r.CreatedAt,
 		})
 	}
-	return calls, rows.Err()
+	return calls, nil
 }
 
 // attributeBuildCost windows build-stage LLM cost onto per-task completion
@@ -364,39 +327,25 @@ func attributeBuildCost(comps []taskCompletion, calls []buildCall) (rows []taskC
 // buildTaskAttribution loads a run's task-completion events and build-stage
 // calls, then windows the calls' effective cost onto the tasks (see
 // attributeBuildCost). Returns JSON-ready rows plus the unattributed residual.
-// A query error (e.g. no of_run_log, or an older of_llm_calls without
-// created_at) propagates so the caller treats it as "no per-task data".
 func buildTaskAttribution(db *sql.DB, runID string) ([]map[string]any, map[string]any, error) {
-	compRows, err := db.Query(
-		`SELECT ref, COALESCE(payload,''), COALESCE(created_at,'')
-		   FROM of_run_log
-		  WHERE run_id = ? AND kind = ? AND ref <> ''
-		  ORDER BY id`, runID, runLogTaskKind)
+	compRows, err := store.LoadRunTaskCompletions(db, runID, runLogTaskKind)
 	if err != nil {
 		return nil, nil, err
 	}
-	var comps []taskCompletion
-	for compRows.Next() {
-		var ref, payload, ts string
-		if scanErr := compRows.Scan(&ref, &payload, &ts); scanErr != nil {
-			continue
-		}
-		c := taskCompletion{TaskID: ref, TS: ts, Title: ref}
+	comps := make([]taskCompletion, 0, len(compRows))
+	for _, r := range compRows {
+		c := taskCompletion{TaskID: r.Ref, TS: r.CreatedAt, Title: r.Ref}
 		var p struct {
 			Iteration int    `json:"iteration"`
 			Title     string `json:"title"`
 		}
-		if json.Unmarshal([]byte(payload), &p) == nil {
+		if json.Unmarshal([]byte(r.Payload), &p) == nil {
 			c.Iteration = p.Iteration
 			if p.Title != "" {
 				c.Title = p.Title
 			}
 		}
 		comps = append(comps, c)
-	}
-	compRows.Close()
-	if err := compRows.Err(); err != nil {
-		return nil, nil, err
 	}
 
 	calls, err := loadBuildCalls(db, runID)

@@ -99,6 +99,19 @@ func (w *Worker) effectivePacks() []pack.Pack {
 	return ps
 }
 
+// loadCapabilities reads the install's configured provider capabilities,
+// failing closed (zero Capabilities) and logging once on error.
+func (w *Worker) loadCapabilities(caller string) llm.Capabilities {
+	if w.deps == nil || w.deps.DB == nil || w.deps.DB.DB == nil {
+		return llm.Capabilities{}
+	}
+	caps, err := llm.LoadCapabilities(w.deps.DB.DB)
+	if err != nil && w.logger != nil {
+		w.logger.Warn(caller+": load capabilities failed; capability-gated features hidden", "error", err)
+	}
+	return caps
+}
+
 // ownerContext renders the leading owner-context user message body. Lives in
 // the message stream (not the system prompt) and is byte-stable for the
 // project's lifetime: only the owner identity, NOT the volatile date - which is

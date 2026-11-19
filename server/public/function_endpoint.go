@@ -16,6 +16,7 @@ import (
 	"openfabrica/internal/funcexec"
 	"openfabrica/internal/funcsandbox"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 // Custom function endpoints (manage_function).
@@ -27,36 +28,10 @@ import (
 
 const maxFunctionBodyBytes = 256 * 1024 // request body read cap
 
-type functionEndpoint struct {
-	Path         string
-	Code         string
-	Methods      string // comma-separated, uppercased at save time
-	RequiresAuth bool
-	CORSOrigins  string
-	RateLimit    int
-	TimeoutMS    int
-	Secrets      string // JSON array of allowed secret names
-	Description  string // one line shown to a hosted agent
-}
+type functionEndpoint = store.FunctionEndpointConfig
 
-// loadFunctionEndpoint returns the config for a function endpoint, or an error
-// when no function is mounted at path.
 func (h *Handler) loadFunctionEndpoint(reader *sql.DB, path string) (*functionEndpoint, error) {
-	var ep functionEndpoint
-	err := reader.QueryRow(
-		"SELECT path, code, methods, COALESCE(requires_auth,0), COALESCE(cors_origins,''), COALESCE(rate_limit,60), COALESCE(timeout_ms,0), COALESCE(secrets,''), COALESCE(description,'') FROM of_function_endpoints WHERE path = ?",
-		path,
-	).Scan(&ep.Path, &ep.Code, &ep.Methods, &ep.RequiresAuth, &ep.CORSOrigins, &ep.RateLimit, &ep.TimeoutMS, &ep.Secrets, &ep.Description)
-	if err != nil {
-		return nil, err
-	}
-	if ep.Methods == "" {
-		ep.Methods = "POST"
-	}
-	if ep.RateLimit <= 0 {
-		ep.RateLimit = 60
-	}
-	return &ep, nil
+	return store.LoadFunctionEndpoint(reader, path)
 }
 
 // serveFunctionIfExists dispatches to a function endpoint that owns exactly this
@@ -96,25 +71,19 @@ func (h *Handler) apiFunction(w http.ResponseWriter, r *http.Request, project *m
 		return
 	}
 
-	// Auth gate + best-effort identity for req.user (one call returns both the
-	// gate result and, for a user JWT, the claims).
+	// Best-effort identity for req.user, then the function's own gate.
 	var user map[string]any
+	authed := false
 	if ep.RequiresAuth {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		ok, claims := h.validateProjectTokenOrJWTWithClaims(project.ID, token)
-		if !ok {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		if claims != nil && claims.UserID > 0 {
+		claims, ok := h.projectUserClaims(project.ID, token)
+		authed = ok
+		if ok && claims.UserID > 0 {
 			user = map[string]any{"id": claims.UserID, "role": claims.Role}
 		}
 	}
-
-	// Rate limit by IP (per-minute window, same limiter the LLM/query endpoints use).
-	rateLimitKey := fmt.Sprintf("fn:%d:%s:%s", project.ID, ep.Path, middleware.RateLimitIdentity(r))
-	if !checkEndpointRateLimit(rateLimitKey, ep.RateLimit) {
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+	if status, msg := h.functionGate(project.ID, ep, authed, middleware.RateLimitIdentity(r)); status != 0 {
+		writeError(w, status, msg)
 		return
 	}
 
@@ -144,6 +113,20 @@ func (h *Handler) apiFunction(w http.ResponseWriter, r *http.Request, project *m
 	}
 
 	writeFunctionResponse(w, resp)
+}
+
+// functionGate applies a function endpoint's own access rules to one call: its
+// auth requirement, then its per-minute rate limit keyed by identity. Every way
+// of invoking a function (HTTP, an agent's tool) passes through it. A zero
+// status means the call may run.
+func (h *Handler) functionGate(projectID int, ep *functionEndpoint, authed bool, identity string) (int, string) {
+	if ep.RequiresAuth && !authed {
+		return http.StatusUnauthorized, "unauthorized"
+	}
+	if !h.checkEndpointRateLimit(fmt.Sprintf("fn:%d:%s:%s", projectID, ep.Path, identity), ep.RateLimit) {
+		return http.StatusTooManyRequests, "rate limit exceeded"
+	}
+	return 0, ""
 }
 
 // buildFunctionRequest assembles the req object: method, path, query, a

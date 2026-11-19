@@ -32,7 +32,7 @@ func TestNewToolEnvSetsEveryField(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &appDeps{
-		cfg:          &config.Config{PublicPort: 5733},
+		cfg:          &config.Config{PublicPort: 5733, ExtraDownloadExtensions: []string{".wasm"}, WebFetchMaxAssetMB: 25},
 		database:     database,
 		projectDBMgr: db.NewProjectDBManager(dir),
 		encryptor:    enc,

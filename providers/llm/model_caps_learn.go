@@ -10,7 +10,10 @@
 // is the number of registered rules.
 package llm
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // QuirkRule is one endpoint rejection this transport knows how to recover from.
 type QuirkRule struct {
@@ -115,4 +118,40 @@ func RetryOnQuirkErr(transport string, k ModelKey, req CompletionRequest, attemp
 		return struct{}{}, attempt()
 	})
 	return err
+}
+
+// RequestHasImages reports whether any message in req carries inline image parts.
+func RequestHasImages(r CompletionRequest) bool {
+	for _, m := range r.Messages {
+		if len(m.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesVisionUnsupported recognises endpoint rejections for image attachments on
+// text-only models (OpenAI-compat, Z.ai GLM, llama.cpp, Ollama, Anthropic) so
+// RetryOnQuirk can learn CapVision=No and retry with StripImages.
+func MatchesVisionUnsupported(e *Error) bool {
+	if e == nil {
+		return false
+	}
+	low := strings.ToLower(e.Message)
+	if e.Status == 500 {
+		return strings.Contains(low, "mmproj") || strings.Contains(low, "image input is not supported")
+	}
+	if e.Code != CodeBadRequest && e.Status != 400 {
+		return false
+	}
+	return strings.Contains(low, "allowed values: ['text']") ||
+		strings.Contains(low, `allowed values: ["text"]`) ||
+		strings.Contains(low, "image_url") ||
+		strings.Contains(low, "mmproj") ||
+		strings.Contains(low, "missing data required for image") ||
+		((strings.Contains(low, "image") || strings.Contains(low, "vision") || strings.Contains(low, "multimodal")) &&
+			(strings.Contains(low, "not supported") ||
+				strings.Contains(low, "unsupported") ||
+				strings.Contains(low, "does not support") ||
+				strings.Contains(low, "not enabled")))
 }

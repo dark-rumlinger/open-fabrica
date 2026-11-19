@@ -41,6 +41,7 @@ var argAliases = map[string][]string{
 	"query_text":     {"query", "fts_query", "semantic_query"},
 	"fts_query":      {"query", "query_text", "semantic_query"},
 	"semantic_query": {"query", "query_text", "fts_query"},
+	"column_defs":    {"columns", "schema"},
 }
 
 // normalizeArgAliases fills a canonical arg from a known alias when the canonical

@@ -9,7 +9,7 @@ import (
 
 	"github.com/chromedp/chromedp"
 
-	"openfabrica/store"
+	"openfabrica/internal/browser"
 )
 
 // These exercise the census against a REAL headless Chrome: the pure verdict is
@@ -26,7 +26,7 @@ func censusFixture(t *testing.T, html string) []ValidationIssue {
 	}))
 	t.Cleanup(srv.Close)
 
-	alloc, cancelAlloc, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{})
+	alloc, cancelAlloc, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{})
 	if err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	}

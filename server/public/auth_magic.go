@@ -21,6 +21,7 @@ import (
 
 	"openfabrica/security"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 // magicTokenHash is what of_magic_tokens stores: the link carries the raw token,
@@ -33,15 +34,12 @@ func magicTokenHash(token string) string {
 func (h *Handler) handleMagic(w http.ResponseWriter, r *http.Request, projectID int,
 	readDB *sql.DB, writeDB *sql.DB, physTable string, ae *authEndpointConfig, sub string) {
 
-	var ttlMinutes int
-	var emailTemplate, redirectURL string
-	if err := readDB.QueryRow(
-		"SELECT email_template, redirect_url, ttl_minutes FROM of_magic_link_endpoints WHERE path = ?",
-		ae.Path,
-	).Scan(&emailTemplate, &redirectURL, &ttlMinutes); err != nil {
+	mlCfg, err := store.LoadMagicLinkEndpoint(readDB, ae.Path)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "magic-link not enabled for this auth endpoint")
 		return
 	}
+	emailTemplate, redirectURL, ttlMinutes := mlCfg.EmailTemplate, mlCfg.RedirectURL, mlCfg.TTLMinutes
 
 	switch sub {
 	case "request":
@@ -91,7 +89,7 @@ func (h *Handler) magicRequest(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 	// Spent and long-expired tokens have no use; drop them as requests arrive.
-	_, _ = writeDB.Exec("DELETE FROM of_magic_tokens WHERE created_at < datetime('now', '-1 day')")
+	store.PruneExpiredMagicTokens(writeDB)
 
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
@@ -105,16 +103,12 @@ func (h *Handler) magicRequest(w http.ResponseWriter, r *http.Request, projectID
 	// the verify step creates a new account on redemption.
 	var existingID sql.NullInt64
 	if validTableName.MatchString(physTable) && validTableName.MatchString(ae.UsernameColumn) {
-		_ = readDB.QueryRow(
-			fmt.Sprintf("SELECT id FROM %s WHERE %s = ?", security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn)), email,
-		).Scan(&existingID)
+		if id, err := store.FindAuthUserIDByUsername(readDB, physTable, ae.UsernameColumn, email); err == nil {
+			existingID = sql.NullInt64{Int64: int64(id), Valid: true}
+		}
 	}
 
-	if _, err := writeDB.Exec(`
-		INSERT INTO of_magic_tokens (token, auth_endpoint_path, email, user_id, expires_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		magicTokenHash(token), ae.Path, email, existingID, expires,
-	); err != nil {
+	if err := store.InsertMagicLoginToken(writeDB, magicTokenHash(token), ae.Path, email, existingID, expires); err != nil {
 		writeError(w, http.StatusInternalServerError, "save token: "+err.Error())
 		return
 	}
@@ -135,8 +129,7 @@ func (h *Handler) magicRequest(w http.ResponseWriter, r *http.Request, projectID
 	subject := "Your sign-in link"
 	htmlBody := fmt.Sprintf(`<p>Click to sign in: <a href="%s">%s</a></p><p>This link expires in %d minutes.</p>`, verifyURL, verifyURL, ttlMinutes)
 	if emailTemplate != "" {
-		var s, hb string
-		_ = readDB.QueryRow("SELECT subject, body_html FROM of_email_templates WHERE name = ?", emailTemplate).Scan(&s, &hb) // missing template falls back to the default email
+		s, hb := store.LoadEmailTemplate(readDB, emailTemplate)
 		if s != "" {
 			subject = s
 		}
@@ -148,7 +141,7 @@ func (h *Handler) magicRequest(w http.ResponseWriter, r *http.Request, projectID
 	// project's of_email_config. This avoids importing action_runner from the
 	// public HTTP layer.
 	jobPayload := fmt.Sprintf(`{"to":%q,"subject":%q,"body_html":%q}`, email, subject, htmlBody)
-	if _, err := writeDB.Exec(`INSERT INTO of_jobs (type, payload, status, max_attempts) VALUES ('send_email', ?, 'pending', 3)`, jobPayload); err != nil {
+	if err := store.EnqueueSendEmailJob(writeDB, jobPayload); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not queue sign-in email")
 		return
 	}
@@ -167,39 +160,33 @@ func (h *Handler) magicVerify(w http.ResponseWriter, r *http.Request, projectID 
 		return
 	}
 
-	var email string
-	var userIDN sql.NullInt64
-	var expires time.Time
-	var used bool
-	if err := readDB.QueryRow(
-		`SELECT email, user_id, expires_at, used
-		 FROM of_magic_tokens WHERE token = ? AND auth_endpoint_path = ? AND purpose = 'login'`,
-		magicTokenHash(token), ae.Path,
-	).Scan(&email, &userIDN, &expires, &used); err != nil {
+	mt, err := store.LookupMagicToken(readDB, magicTokenHash(token), ae.Path, "login")
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	if used || time.Now().After(expires) {
+	if mt.Used || time.Now().After(mt.ExpiresAt) {
 		writeError(w, http.StatusUnauthorized, "token expired or already used")
 		return
 	}
+	email := mt.Email
 
 	// Mark used immediately so this token is single-use even if the redirect
 	// is replayed. This must succeed before we mint a JWT: if the write fails
 	// and we issued a token anyway, the link would stay redeemable until TTL.
 	// The WHERE used = 0 makes the claim atomic: of two concurrent redemptions only
 	// one sees a row change, so a link cannot mint two sessions or two accounts.
-	res, err := writeDB.Exec("UPDATE of_magic_tokens SET used = 1 WHERE token = ? AND used = 0", magicTokenHash(token))
+	ok, err := store.ConsumeMagicToken(writeDB, magicTokenHash(token))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not redeem token")
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "token expired or already used")
 		return
 	}
 
-	userID := int(userIDN.Int64)
+	userID := int(mt.UserID.Int64)
 	role := ae.DefaultRole
 	if userID == 0 {
 		// First-time login -> create the user with a random unguessable password.
@@ -217,22 +204,20 @@ func (h *Handler) magicVerify(w http.ResponseWriter, r *http.Request, projectID 
 			writeError(w, http.StatusInternalServerError, "invalid auth config")
 			return
 		}
-		stmt := fmt.Sprintf("INSERT INTO %s (%s, %s, %s) VALUES (?, ?, ?)",
-			security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn), security.QuoteIdent(ae.PasswordColumn), security.QuoteIdent(ae.RoleColumn))
-		res, err := writeDB.Exec(stmt, email, hash, ae.DefaultRole)
+		quotedCols := []string{
+			security.QuoteIdent(ae.UsernameColumn),
+			security.QuoteIdent(ae.PasswordColumn),
+			security.QuoteIdent(ae.RoleColumn),
+		}
+		newID, err := store.InsertAuthUser(writeDB, physTable, quotedCols, []any{email, hash, ae.DefaultRole})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "create user: "+err.Error())
-			return
-		}
-		newID, err := res.LastInsertId()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "create user: could not read new user id")
 			return
 		}
 		userID = int(newID)
 		h.publishAuthRegister(projectID, ae, userID, authMethodMagicLink, map[string]any{ae.UsernameColumn: email})
 	} else if validTableName.MatchString(physTable) && validTableName.MatchString(ae.RoleColumn) {
-		_ = readDB.QueryRow(fmt.Sprintf("SELECT %s FROM %s WHERE id = ?", security.QuoteIdent(ae.RoleColumn), security.QuoteIdent(physTable)), userID).Scan(&role) // missing role column keeps the default role
+		role = store.ReadAuthUserRole(readDB, physTable, ae.RoleColumn, userID, ae.DefaultRole)
 	}
 
 	// Second factor: the email link proves the inbox, not the TOTP an enrolled user set up.
@@ -247,7 +232,13 @@ func (h *Handler) magicVerify(w http.ResponseWriter, r *http.Request, projectID 
 		return
 	}
 
-	jwtToken, err := h.deps.JWTManager.Generate(security.TokenRequest{ProjectID: projectID, UserID: userID, Username: email, Role: role, Expiry: authTokenExpiry(ae)})
+	// A user with exactly one tenant gets it folded in, like a password login.
+	// With none or several the token is tenantless and the client picks through
+	// /tenant/switch.
+	jwtToken, _, _, err := h.generateUserTokenWithTenant(readDB, projectID, userID, email, role, "", ae)
+	if err == nil && jwtToken == "" {
+		jwtToken, err = h.generateUserToken(userID, email, role, projectID, ae)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "jwt: "+err.Error())
 		return

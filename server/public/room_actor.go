@@ -416,13 +416,7 @@ func (a *roomActor) cancelTimers() {
 }
 
 func (a *roomActor) loadOrInit() {
-	var state string
-	var rev int
-	err := a.pdb.Reader().QueryRow(
-		`SELECT state, rev FROM of_ws_room_state WHERE endpoint_path = ? AND tenant_id = ? AND room = ?`,
-		a.endpoint, a.tenantID, a.room,
-	).Scan(&state, &rev)
-	if err == nil && state != "" && state != "null" {
+	if state, rev, err := store.LoadWSRoomState(a.pdb.Reader(), a.endpoint, a.tenantID, a.room); err == nil && state != "" && state != "null" {
 		a.state = json.RawMessage(state)
 		a.rev = rev
 		return
@@ -431,14 +425,7 @@ func (a *roomActor) loadOrInit() {
 }
 
 func (a *roomActor) persist() {
-	_, err := a.pdb.Writer().Exec(
-		`INSERT INTO of_ws_room_state (endpoint_path, tenant_id, room, state, rev, updated_at)
-		 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(endpoint_path, tenant_id, room) DO UPDATE SET
-		   state = excluded.state, rev = excluded.rev, updated_at = CURRENT_TIMESTAMP`,
-		a.endpoint, a.tenantID, a.room, string(a.state), a.rev,
-	)
-	if err != nil {
+	if err := store.SaveWSRoomState(a.pdb.Writer(), a.endpoint, a.tenantID, a.room, string(a.state), a.rev); err != nil {
 		slog.Warn("ws room state persist failed", "room", a.key, "error", err)
 		return
 	}
@@ -446,10 +433,7 @@ func (a *roomActor) persist() {
 }
 
 func (a *roomActor) deleteState() {
-	_, _ = a.pdb.Writer().Exec(
-		`DELETE FROM of_ws_room_state WHERE endpoint_path = ? AND tenant_id = ? AND room = ?`,
-		a.endpoint, a.tenantID, a.room,
-	)
+	store.DeleteWSRoomState(a.pdb.Writer(), a.endpoint, a.tenantID, a.room)
 }
 
 func (a *roomActor) playerObj(id string) map[string]any {
@@ -510,25 +494,9 @@ func (a *roomActor) readSeed(client string) map[string]any {
 	if len(cols) == 0 {
 		return nil
 	}
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ? LIMIT 1",
-		strings.Join(cols, ", "), a.seedTable, a.seedKeyCol)
-	vals := make([]any, len(cols))
-	ptrs := make([]any, len(cols))
-	for i := range vals {
-		ptrs[i] = &vals[i]
-	}
-	if err := a.pdb.Reader().QueryRow(query, uid).Scan(ptrs...); err != nil {
+	out, err := store.LoadSingleRowByKey(a.pdb.Reader(), a.seedTable, a.seedKeyCol, uid, cols)
+	if err != nil {
 		return nil // no such player yet (or a read error) -> reducer uses its default
-	}
-	out := make(map[string]any, len(cols))
-	for i, c := range cols {
-		// SQLite hands TEXT back as []byte via interface{} scan; stringify so the
-		// value JSON-encodes as a string (not base64) into the event.
-		if b, ok := vals[i].([]byte); ok {
-			out[c] = string(b)
-		} else {
-			out[c] = vals[i]
-		}
 	}
 	return out
 }
@@ -544,16 +512,15 @@ func (a *roomActor) readShared() []map[string]any {
 	if a.sharedTable == "" || !store.ValidTableName.MatchString(a.sharedTable) {
 		return nil
 	}
-	colSpec := "*"
+	var cols []string
 	if len(a.sharedColumns) > 0 {
-		cols := make([]string, 0, len(a.sharedColumns))
+		cols = make([]string, 0, len(a.sharedColumns))
 		for _, c := range a.sharedColumns {
 			if !store.ValidColumnName.MatchString(c) {
 				return nil
 			}
 			cols = append(cols, c)
 		}
-		colSpec = strings.Join(cols, ", ")
 	} else {
 		// "*" would inject PASSWORD/ENCRYPTED values into event.shared, where a reducer could
 		// fold them into view() output. Expand to non-secure columns; fail closed if we can't.
@@ -572,7 +539,7 @@ func (a *roomActor) readShared() []map[string]any {
 			if serr != nil || len(schema) == 0 {
 				return nil
 			}
-			cols := make([]string, 0, len(schema))
+			cols = make([]string, 0, len(schema))
 			for c := range schema {
 				if _, isSecure := lowerSecure[strings.ToLower(c)]; isSecure {
 					continue
@@ -585,40 +552,10 @@ func (a *roomActor) readShared() []map[string]any {
 			if len(cols) == 0 {
 				return nil
 			}
-			colSpec = strings.Join(cols, ", ")
 		}
 	}
-	query := fmt.Sprintf("SELECT %s FROM %s LIMIT %d", colSpec, a.sharedTable, maxSharedRows)
-	rows, err := a.pdb.Reader().Query(query)
+	out, err := store.LoadTableRows(a.pdb.Reader(), a.sharedTable, cols, maxSharedRows)
 	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	colNames, err := rows.Columns()
-	if err != nil {
-		return nil
-	}
-	out := make([]map[string]any, 0, 16)
-	for rows.Next() {
-		vals := make([]any, len(colNames))
-		ptrs := make([]any, len(colNames))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if rows.Scan(ptrs...) != nil {
-			continue
-		}
-		m := make(map[string]any, len(colNames))
-		for i, c := range colNames {
-			if b, ok := vals[i].([]byte); ok {
-				m[c] = string(b)
-			} else {
-				m[c] = vals[i]
-			}
-		}
-		out = append(out, m)
-	}
-	if err := rows.Err(); err != nil {
 		return nil
 	}
 	return out
@@ -638,7 +575,13 @@ func (a *roomActor) applyWrites(writes []roomactor.Write) {
 			slog.Warn("reducer write rejected", "room", a.key, "table", w.Table, "error", err)
 			continue
 		}
-		if secure, err := store.LoadSecureColumns(a.pdb.Reader(), w.Table); err == nil && touchesSecureColumn(w, secure) {
+		// Fail closed: without the registry there is no telling a secret column apart.
+		secure, err := store.LoadSecureColumns(a.pdb.Reader(), w.Table)
+		if err != nil {
+			slog.Warn("reducer write rejected: secure-column lookup failed", "room", a.key, "table", w.Table, "error", err)
+			continue
+		}
+		if touchesSecureColumn(w, secure) {
 			slog.Warn("reducer write rejected: targets a PASSWORD/ENCRYPTED column", "room", a.key, "table", w.Table)
 			continue
 		}
@@ -734,6 +677,16 @@ func (h *wsHub) ensureActor(spec actorSpec) (*roomActor, bool) {
 	sharedColumns := spec.SharedColumns
 	pdb := spec.PDB
 
+	// A join into a live room running this code needs no compile.
+	h.actorsMu.Lock()
+	if a := h.actors[key]; a != nil && a.reducerSrc == reducerSrc {
+		a.refs++
+		h.actorsMu.Unlock()
+		return a, true
+	}
+	h.actorsMu.Unlock()
+
+	// Compile outside the lock: it would otherwise stall every join and leave.
 	red, err := roomactor.Compile(reducerSrc)
 	if err != nil {
 		slog.Warn("authoritative endpoint reducer failed to compile; falling back to relay", "endpoint", endpoint, "error", err)
@@ -744,11 +697,14 @@ func (h *wsHub) ensureActor(spec actorSpec) (*roomActor, bool) {
 	defer h.actorsMu.Unlock()
 	if a := h.actors[key]; a != nil {
 		a.refs++
-		// Hand a live room the new code rather than the reducer it spawned with.
+		// Hand a live room the new code and config rather than what it spawned with.
 		// The swap runs on the actor goroutine, which owns the reducer field.
 		if a.reducerSrc != reducerSrc {
 			a.reducerSrc = reducerSrc
-			a.post(actorMsg{kind: amReload, reducer: red})
+			a.post(actorMsg{kind: amReload, reducer: red, reloadCfg: &actorReloadCfg{
+				seedTable: seedTable, seedKeyCol: seedKeyCol, seedColumns: seedColumns,
+				sharedTable: sharedTable, sharedColumns: sharedColumns,
+			}})
 		}
 		return a, true
 	}
@@ -781,38 +737,46 @@ func (h *wsHub) ensureActor(spec actorSpec) (*roomActor, bool) {
 // showing the old behaviour. Driven by events.EventWSReducerChanged.
 func (h *wsHub) ReloadEndpointReducer(projectID int, endpoint string) {
 	prefix := fmt.Sprintf("%d:", projectID)
-	h.actorsMu.Lock()
-	defer h.actorsMu.Unlock()
+
+	// Collect the live rooms under the lock, then read and compile without it:
+	// both are slow, and the lock gates every authoritative join and leave.
 	var (
-		loaded bool
-		row    *wsendpoint.Row
-		red    *roomactor.Reducer
+		pdb  *db.ProjectDB
+		keys []string
 	)
+	h.actorsMu.Lock()
 	for key, a := range h.actors {
-		if a.endpoint != endpoint || !strings.HasPrefix(key, prefix) || a.pdb == nil {
-			continue
+		if a.endpoint == endpoint && strings.HasPrefix(key, prefix) && a.pdb != nil {
+			pdb = a.pdb
+			keys = append(keys, key)
 		}
-		if !loaded {
-			loaded = true
-			r, err := wsendpoint.Load(a.pdb.Reader(), endpoint)
-			if err != nil || r.Reducer == "" {
-				return
-			}
-			compiled, err := roomactor.Compile(r.Reducer)
-			if err != nil {
-				slog.Warn("reducer reload: new reducer failed to compile; live rooms keep the old one", "endpoint", endpoint, "error", err)
-				return
-			}
-			row, red = r, compiled
+	}
+	h.actorsMu.Unlock()
+	if pdb == nil {
+		return
+	}
+	row, err := wsendpoint.Load(pdb.Reader(), endpoint)
+	if err != nil || row.Reducer == "" {
+		return
+	}
+	for _, key := range keys {
+		// One compile per room: a Reducer owns a JS runtime that only its own
+		// actor goroutine may touch, so rooms can never share one.
+		red, err := roomactor.Compile(row.Reducer)
+		if err != nil {
+			slog.Warn("reducer reload: new reducer failed to compile; live rooms keep the old one", "endpoint", endpoint, "error", err)
+			return
 		}
-		if a.reducerSrc == row.Reducer {
-			continue // same code: a reload would only reset the room (ensureActor's rule too)
+		h.actorsMu.Lock()
+		// Same code: a reload would only reset the room (ensureActor's rule too).
+		if a := h.actors[key]; a != nil && a.endpoint == endpoint && a.reducerSrc != row.Reducer {
+			a.reducerSrc = row.Reducer
+			a.post(actorMsg{kind: amReload, reducer: red, reloadCfg: &actorReloadCfg{
+				seedTable: row.SeedTable, seedKeyCol: row.SeedKeyColumn, seedColumns: row.SeedColumnList(),
+				sharedTable: row.SharedTable, sharedColumns: row.SharedColumnList(),
+			}})
 		}
-		a.reducerSrc = row.Reducer
-		a.post(actorMsg{kind: amReload, reducer: red, reloadCfg: &actorReloadCfg{
-			seedTable: row.SeedTable, seedKeyCol: row.SeedKeyColumn, seedColumns: row.SeedColumnList(),
-			sharedTable: row.SharedTable, sharedColumns: row.SharedColumnList(),
-		}})
+		h.actorsMu.Unlock()
 	}
 }
 

@@ -69,10 +69,8 @@ export function renderResourceGrid(container, items, config) {
   // Nothing to show: the empty state carries the action on its own, rather
   // than a lone button floating at the top of a blank page while the message
   // underneath asks you to add something and offers no way to.
-  // Writes are admin-only server-side, so non-admins get no add controls.
-  const canWrite = state.isAdmin();
-  const canCreate = canWrite && config.showCreate && config.onCreate;
-  const canUpload = canWrite && config.showUpload && config.onUpload;
+  const canCreate = config.showCreate && config.onCreate;
+  const canUpload = config.showUpload && config.onUpload;
 
   if (!items || items.length === 0) {
     const primary = canCreate
@@ -124,7 +122,7 @@ export function renderResourceGrid(container, items, config) {
 /**
  * Render a single resource card.
  */
-function renderResourceCard(item, config) {
+export function renderResourceCard(item, config) {
   const name = config.getName(item);
   const meta = config.getMeta(item);
   const iconName = config.getIcon(item);
@@ -134,11 +132,8 @@ function renderResourceCard(item, config) {
   const hasVersions = item.version_count > 0 && config.versionsUrl && canViewVersions;
 
   const actionBtns = [];
-  const canWrite = state.isAdmin();
 
-  if (!canWrite) {
-    // read-only: no edit action
-  } else if (config.onEdit) {
+  if (config.onEdit) {
     actionBtns.push(h('button', {
       className: 'btn btn--ghost btn--sm',
       title: t('common.edit'),
@@ -172,7 +167,7 @@ function renderResourceCard(item, config) {
     }, [h('span', { innerHTML: icon('clock') })]));
   }
 
-  const canDelete = canWrite && (config.canDelete ? config.canDelete(item) : true);
+  const canDelete = config.canDelete ? config.canDelete(item) : true;
   if (canDelete) {
     actionBtns.push(h('button', {
       className: 'btn btn--ghost btn--sm',
@@ -196,10 +191,12 @@ function renderResourceCard(item, config) {
     );
   }
 
+  const titleText = config.getTooltip ? config.getTooltip(item) : name;
+
   return h('div', { className: 'asset-card' }, [
     h('div', { className: 'asset-card__preview' }, previewChildren),
     h('div', { className: 'asset-card__info' }, [
-      h('span', { className: 'asset-card__name' }, name),
+      h('span', { className: 'asset-card__name', title: titleText }, name),
       h('span', { className: 'text-xs text-secondary' }, meta),
     ]),
     h('div', { className: 'asset-card__actions' }, actionBtns),
@@ -275,7 +272,6 @@ async function showVersionHistory(item, config) {
   }
 
   const restoreUrl = restoreUrlFor(config.versionsUrl(item));
-  const canRestore = state.isAdmin();
 
   const list = h('div', { className: 'version-list' });
   versions.forEach((v, i) => {
@@ -286,7 +282,7 @@ async function showVersionHistory(item, config) {
         `${v.changed_by} \u00b7 ${date}`),
     ];
     // The newest row is the live version; restoring it would change nothing.
-    if (canRestore && i > 0) {
+    if (i > 0) {
       const btn = h('button', { className: 'btn btn--ghost btn--sm' }, t('rc.restore'));
       btn.addEventListener('click', () => confirmRestore(name, v, restoreUrl, config));
       cells.push(btn);
@@ -386,6 +382,14 @@ export function showUploadModal(config) {
         formData.append('file', file);
         if (descInput && descInput.value.trim()) {
           formData.append('description', descInput.value.trim());
+        }
+        const extra = typeof config.extraFormData === 'function' ? config.extraFormData() : config.extraFormData;
+        if (extra) {
+          for (const [key, val] of Object.entries(extra)) {
+            if (val !== undefined && val !== null && val !== '') {
+              formData.append(key, val);
+            }
+          }
         }
 
         try {

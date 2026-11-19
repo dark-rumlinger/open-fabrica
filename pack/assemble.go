@@ -279,7 +279,7 @@ func RenderGuidesCoreLocked(guides []Pack, locked map[string]string) string {
 	var b strings.Builder
 	seenContracts := map[string]bool{}
 	for _, g := range guides {
-		core := strings.TrimSpace(substituteContractsOnce(g.CoreBody(), seenContracts))
+		core := strings.TrimSpace(substituteContractsOnce(expandGuideShorthands(g.CoreBody()), seenContracts))
 		if len(locked) > 0 {
 			core = trimLockedDecisions(core, locked)
 		}
@@ -292,7 +292,11 @@ func RenderGuidesCoreLocked(guides []Pack, locked map[string]string) string {
 		if core == "" && len(idx) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "<guide slug=%q>\n%s\n", g.Slug, core)
+		fmt.Fprintf(&b, "<guide slug=%q>\n", g.Slug)
+		if tl := guideToolsLine(g.Tools); tl != "" {
+			b.WriteString(tl + "\n\n")
+		}
+		fmt.Fprintf(&b, "%s\n", core)
 		if len(idx) > 0 {
 			fmt.Fprintf(&b, "\nMore in this guide - recall a section when you reach its case (`manage_guides action=recall slug=%s section=<anchor>`):\n", g.Slug)
 			for _, s := range idx {
@@ -302,6 +306,44 @@ func RenderGuidesCoreLocked(guides []Pack, locked map[string]string) string {
 		b.WriteString("</guide>\n\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// guideToolsLine renders the declared front-matter tools of a guide as a one-line
+// header inside `<guide>`, so a guide that speaks in capability concepts or
+// shorthands (`create_auth`) immediately names the concrete tool(s) that back it.
+func guideToolsLine(tools []string) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if t = strings.TrimSpace(t); t != "" {
+			parts = append(parts, "`"+t+"`")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Tools for this guide: " + strings.Join(parts, ", ")
+}
+
+// expandGuideShorthands annotates the first bare backticked occurrence of each
+// single-tool capability shorthand in a rendered guide core with the exact
+// `tool action=verb` call it stands for (e.g. “ `create_auth` “ ->
+// “ `create_auth` (`manage_auth action=create`) “), so the builder does not have
+// to look back to the mental model's glossary when reading a guide.
+func expandGuideShorthands(core string) string {
+	for _, s := range Shorthands {
+		if len(s.Tools) != 1 || s.Tools[0][1] == s.Name {
+			continue
+		}
+		token := "`" + s.Name + "`"
+		call := "`" + s.Tools[0][0] + " action=" + s.Tools[0][1] + "`"
+		if strings.Contains(core, token) && !strings.Contains(core, call) {
+			core = strings.Replace(core, token, token+" ("+call+")", 1)
+		}
+	}
+	return core
 }
 
 // trimLockedDecisions drops the unchosen top-level bullets of every
@@ -379,7 +421,11 @@ func trimDecisionBlock(block []string, choice string) ([]string, bool) {
 	}
 	found := false
 	var out []string
-	out = append(out, block[0],
+	head := block[0]
+	if j := strings.Index(head, " (record in "); j >= 0 {
+		head = strings.TrimSpace(head[:j])
+	}
+	out = append(out, head,
 		"_(Locked in your plan: `"+choice+"`. The other branches are omitted; the lock is binding.)_")
 	for _, g := range groups[1:] {
 		if g.isBullet && !strings.Contains(strings.Join(g.lines, "\n"), marker) {

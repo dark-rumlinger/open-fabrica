@@ -34,12 +34,14 @@ import (
 	_ "openfabrica/providers/stocksearch/pixabay"    // register stock-search provider via init()
 	_ "openfabrica/providers/stocksearch/unsplash"   // register stock-search provider via init()
 	_ "openfabrica/providers/websearch/brave"        // register web-search provider via init()
+	_ "openfabrica/providers/websearch/duckduckgo"   // register web-search provider via init()
 	_ "openfabrica/providers/websearch/tavily"       // register web-search provider via init()
 	"openfabrica/tlsproxy"
 	_ "openfabrica/tools/all" // register every tool category via init()
+	"openfabrica/triggers"
 )
 
-var Version = "0.2.4"
+var Version = "0.2.5"
 
 // BuildTime is the binary build timestamp, injected at link time via
 // -X main.BuildTime=<RFC3339>. Empty in `go run` / dev builds. It is recorded on
@@ -241,7 +243,7 @@ func resolveEngineDailyTokenBudget(cfg *config.Config, database *db.DB) int {
 // until a domain makes the surface public. It never blocks startup - the operator
 // may have tightened these at a reverse proxy in front of the public port.
 func warnIfExposedWithPermissiveDefaults(cfg *config.Config, tlsMgr *tlsproxy.Manager) {
-	issues := permissiveDefaultIssues(tlsMgr.HasActiveDomains(), cfg.CORSOrigins, cfg.PublicCSP)
+	issues := config.PermissiveDefaultIssues(tlsMgr.HasActiveDomains(), cfg.CORSOrigins, cfg.PublicCSP)
 	if len(issues) == 0 {
 		return
 	}
@@ -250,12 +252,6 @@ func warnIfExposedWithPermissiveDefaults(cfg *config.Config, tlsMgr *tlsproxy.Ma
 		"Tighten before serving untrusted or multi-user apps (see the README's \"Before You Go Live\")",
 		"issues", issues,
 		"fix", "set OPENFABRICA_PUBLIC_CSP=hardened (locks scripts to self+nonce; or set a per-project CSP) and cors_origins to your app's origins")
-}
-
-// permissiveDefaultIssues is the startup warning's view of
-// config.PermissiveDefaultIssues, which the dashboard's live status also uses.
-func permissiveDefaultIssues(hasActiveDomains bool, corsOrigins []string, publicCSP string) []string {
-	return config.PermissiveDefaultIssues(hasActiveDomains, corsOrigins, publicCSP)
 }
 
 func printBanner(cfg *config.Config) {
@@ -274,7 +270,6 @@ func printBanner(cfg *config.Config) {
 	}
 
 	adminURL := fmt.Sprintf("http://localhost:%d", cfg.AdminPort)
-	publicURL := fmt.Sprintf("http://localhost:%d", cfg.PublicPort)
 
 	fmt.Fprintf(os.Stdout, `
 %s    ██████╗ ███████╗
@@ -287,7 +282,6 @@ func printBanner(cfg *config.Config) {
 
    ─────────────────────────────────
    %sAdmin:%s     %s
-   %sProjects:%s  %s
    ───────────────────────────────── 
    
    %sSpecial thanks to:
@@ -299,7 +293,6 @@ func printBanner(cfg *config.Config) {
 
 `, cyan, reset, reset, reset, dim, Version, reset,
 		green, reset, adminURL,
-		green, reset, publicURL,
 		dim, reset)
 }
 
@@ -327,7 +320,10 @@ func main() {
 
 	cfg := bootstrapProcess(configPath)
 
-	database, encryptor, jwtMgr, projectDBMgr := openDataLayer(cfg)
+	var tlsMgr *tlsproxy.Manager
+	database, encryptor, jwtMgr, projectDBMgr := openDataLayer(cfg, func() bool {
+		return tlsMgr != nil && tlsMgr.IsRunning()
+	})
 	defer func() { _ = database.Close() }()
 	defer projectDBMgr.CloseAll()
 
@@ -342,11 +338,11 @@ func main() {
 	actionsCtx, actionsCancel := context.WithCancel(engineCtx)
 	defer actionsCancel()
 
-	bus, actionRunner := wireEventBus(projectDBMgr, encryptor, actionsCtx)
+	bus, webhookDispatcher, actionRunner, drainActions := wireEventBus(projectDBMgr, encryptor, actionsCtx)
 
-	llmRegistry, toolRegistry, toolExecutor := initRegistries(database, actionRunner)
+	llmRegistry, toolRegistry, toolExecutor := initRegistries()
 
-	llmHTTPClient, budgetFn, dailyTokenBudget := initLLMClientAndBudget(cfg, database, encryptor, llmRegistry, actionRunner)
+	llmHTTPClient, budgetFn, dailyTokenBudget := initLLMClientAndBudget(cfg, database, encryptor, llmRegistry)
 
 	app := &appDeps{
 		cfg:           cfg,
@@ -362,14 +358,8 @@ func main() {
 		toolExecutor:  toolExecutor,
 	}
 	app.toolEnv = newToolEnv(app)
-	// The trigger runner's messaging actions (send_email/push) dispatch through
-	// manage_email/push instead of reimplementing provider auth and shaping.
-	actionRunner.SetTools(toolExecutor, app.toolEnv)
 
 	engineMgr, jobsMgr := newEngineAndJobs(engineCtx, app)
-	// Trigger llm_call actions ride out transient provider failures under the
-	// engine's retry policy.
-	actionRunner.SetLLMCaller(app.callLLM)
 
 	chatHandler := newChatHandler(app)
 	defer chatHandler.Close()
@@ -378,13 +368,14 @@ func main() {
 
 	bootWarnings, botService := startBackgroundWorkers(engineCtx, cfg, database, projectDBMgr, engineMgr, jobsMgr, bus, encryptor, dailyTokenBudget)
 
-	tlsMgr := startTLSProxy(cfg, database, bus, jwtMgr)
+	tlsMgr = startTLSProxy(cfg, database, bus)
 	netHelpers := startNetworkHelpers(cfg, database)
 	wireSelfDestruct(selfDestructDeps{
 		botService:    botService,
 		cfg:           cfg,
 		configPath:    configPath,
 		cancelActions: actionsCancel,
+		drainActions:  drainActions,
 		tlsMgr:        tlsMgr,
 		netHelpers:    netHelpers,
 		engineMgr:     engineMgr,
@@ -393,7 +384,18 @@ func main() {
 		projectDBMgr:  projectDBMgr,
 	})
 
-	srv := newServer(app, engineMgr, jobsMgr, chatHandler, tlsMgr, netHelpers, actionRunner, bootWarnings, botService)
+	srv := newServer(app, engineMgr, jobsMgr, chatHandler, tlsMgr, netHelpers, bootWarnings, botService)
+	actionRunner.BindRuntime(triggers.RuntimeDeps{
+		GlobalDB:      database.DB,
+		LLMRegistry:   llmRegistry,
+		LLMHTTPClient: llmHTTPClient,
+		BudgetFn:      budgetFn,
+		CallLLM:       app.callLLM,
+		ToolExec:      toolExecutor,
+		ToolEnv:       app.toolEnv,
+		Webhooks:      webhookDispatcher,
+		Broadcaster:   srv.WSBroadcaster(),
+	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -409,7 +411,7 @@ func main() {
 		slog.Error("server error", "error", serveErr)
 	}
 
-	gracefulShutdown(actionsCancel, tlsMgr, netHelpers, engineMgr, jobsMgr)
+	gracefulShutdown(actionsCancel, drainActions, botService, tlsMgr, netHelpers, engineMgr, jobsMgr)
 
 	// A listener that never came up (port in use, bad bind address) must not look
 	// like a clean stop, or restart-on-failure supervisors will not retry.

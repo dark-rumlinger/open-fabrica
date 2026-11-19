@@ -40,17 +40,15 @@ export async function renderProjectSettings(container, projectId, project, secti
     input.addEventListener('change', store);
   };
 
-  const readOnly = !state.isAdmin();
-  const nameInput = h('input', { className: 'input', value: draft.name ?? project.name, disabled: readOnly, required: true });
+  const nameInput = h('input', { className: 'input', value: draft.name ?? project.name, required: true });
   remember('name', nameInput);
-  const domainInput = h('input', { className: 'input', value: draft.domain ?? (project.domain || ''), placeholder: 'example.com', disabled: readOnly, pattern: '[a-zA-Z0-9][a-zA-Z0-9.\\-]*' });
+  const domainInput = h('input', { className: 'input', value: draft.domain ?? (project.domain || ''), placeholder: 'example.com', pattern: '[a-zA-Z0-9][a-zA-Z0-9.\\-]*' });
   remember('domain', domainInput);
   const descInput = h('textarea', {
     className: 'input',
     rows: '3',
     value: draft.description ?? (project.description || ''),
     placeholder: t('set.descPlaceholder'),
-    disabled: readOnly,
   });
 
   // Advisory domain pre-flight: checks DNS/HTTPS configuration without
@@ -59,7 +57,6 @@ export async function renderProjectSettings(container, projectId, project, secti
   const checkDomainBtn = h('button', {
     className: 'btn btn--secondary',
     type: 'button',
-    disabled: readOnly,
     onClick: async () => {
       const domain = domainInput.value.trim();
       if (!domain) {
@@ -89,7 +86,7 @@ export async function renderProjectSettings(container, projectId, project, secti
         domainStatus.textContent = '';
         toast.error(t('set.domainCheckFailed', { error: humanizeError(err.message) }));
       }
-      checkDomainBtn.disabled = readOnly;
+      checkDomainBtn.disabled = false;
     },
   }, t('set.check'));
   const domainRow = h('div', { style: 'display:flex; gap:8px; align-items:center;' }, [domainInput, checkDomainBtn]);
@@ -115,7 +112,7 @@ export async function renderProjectSettings(container, projectId, project, secti
     // ignore
   }
 
-  const picker = createModelPicker(providers, { currentModelId: project.llm_model_id, disabled: readOnly });
+  const picker = createModelPicker(providers, { currentModelId: project.llm_model_id });
   const { providerSelect, modelSelect } = picker;
 
   // Banned IPs: one IP address or CIDR range per line. Stored in the project
@@ -131,7 +128,6 @@ export async function renderProjectSettings(container, projectId, project, secti
     rows: '3',
     value: draft.bannedIps ?? initialBans.join('\n'),
     placeholder: '203.0.113.5\n198.51.100.0/24',
-    disabled: readOnly,
   });
 
   // Per-project Content-Security-Policy override for the public site. Empty
@@ -148,7 +144,6 @@ export async function renderProjectSettings(container, projectId, project, secti
     rows: '2',
     value: draft.csp ?? initialCSP,
     placeholder: "default-src 'self'; img-src 'self' data: https:; object-src 'none'",
-    disabled: readOnly,
   });
 
   // User-flow tests (of_test.js), experimental: off unless the owner turned them on.
@@ -159,7 +154,7 @@ export async function renderProjectSettings(container, projectId, project, secti
   } catch {
     // malformed config blob: keep the default (off)
   }
-  const userFlowsInput = h('input', { type: 'checkbox', checked: draft.userFlows ?? initialUserFlows, disabled: readOnly });
+  const userFlowsInput = h('input', { type: 'checkbox', checked: draft.userFlows ?? initialUserFlows });
   remember('userFlows', userFlowsInput, (el) => el.checked);
   remember('bannedIps', bannedIpsInput);
   remember('csp', cspInput);
@@ -241,19 +236,19 @@ export async function renderProjectSettings(container, projectId, project, secti
     formGroup(t('rc.description'), descInput, { hint: t('set.descHint') }),
     formGroup(t('composer.aiProvider'), providerSelect, { required: true, hint: t('set.providerHint') }),
     formGroup(t('composer.aiModel'), modelSelect, { required: true, hint: t('set.modelHint') }),
-    ...(state.isAdmin() ? [h('div', { className: 'mt-4' }, [saveButton()])] : []),
+    h('div', { className: 'mt-4' }, [saveButton()]),
   ]);
 
   // --- Sharing & status tab: reachability and distribution (admin only) ---
   // The publish strip reconciles published/pages/domain/HTTPS into one status
   // line and carries the publish/unpublish toggle. Anything still needing a human
   // is listed by the task card below it.
-  const publishStrip = state.isAdmin() ? createPublishStrip(projectId) : null;
+  const publishStrip = createPublishStrip(projectId);
 
   // Whatever is still waiting on a human - a DNS record at the registrar, a port
   // forward on the router, a look from a phone. Everything a machine can do
   // happens on its own, so this renders nothing once the list is empty.
-  const goLiveTasks = state.isAdmin() ? createGoLiveTasks(projectId) : null;
+  const goLiveTasks = createGoLiveTasks(projectId);
 
   const sharingBody = h('div', {}, [
     publishStrip,
@@ -262,7 +257,7 @@ export async function renderProjectSettings(container, projectId, project, secti
   ].filter(Boolean));
 
   // --- Advanced tab: security knobs (shared Save) plus destructive actions ---
-  const dangerZone = state.isAdmin() ? h('div', { className: 'danger-zone' }, [
+  const dangerZone = h('div', { className: 'danger-zone' }, [
     h('h4', { className: 'danger-zone__title' }, t('projects.delete')),
     h('p', { className: 'danger-zone__desc' }, t('set.deleteDesc')),
     h('button', {
@@ -290,7 +285,7 @@ export async function renderProjectSettings(container, projectId, project, secti
       h('span', { innerHTML: icon('trash') }),
       t('projects.delete'),
     ]),
-  ]) : null;
+  ]);
 
   const advancedBody = h('div', {}, [
     h('div', { className: 'card' }, [
@@ -302,7 +297,7 @@ export async function renderProjectSettings(container, projectId, project, secti
         h('label', { className: 'toggle' }, [userFlowsInput, t('composer.flowsTitle')]),
         h('p', { className: 'form-hint' }, t('set.flowsHint')),
       ]),
-      ...(state.isAdmin() ? [h('div', { className: 'mt-4' }, [saveButton()])] : []),
+      h('div', { className: 'mt-4' }, [saveButton()]),
     ]),
     h('div', { className: 'card' }, [
       h('h4', { className: 'card__title mb-4' }, t('tabs.advanced')),
@@ -313,10 +308,10 @@ export async function renderProjectSettings(container, projectId, project, secti
         h('summary', { className: 'form-hint', style: { cursor: 'pointer' } }, t('set.csp')),
         formGroup('', cspInput, { hint: t('set.cspHint') }),
       ]),
-      ...(state.isAdmin() ? [h('div', { className: 'mt-4' }, [saveButton()])] : []),
+      h('div', { className: 'mt-4' }, [saveButton()]),
     ]),
-    state.isAdmin() ? createSpendCard(projectId) : null,
-    state.isAdmin() ? createEngineCard(projectId) : null,
+    createSpendCard(projectId),
+    createEngineCard(projectId),
     dangerZone,
   ].filter(Boolean));
 
@@ -328,8 +323,7 @@ export async function renderProjectSettings(container, projectId, project, secti
     defaultTab: 'general',
     tabs: [
       { id: 'general', label: t('tabs.general'), content: generalBody },
-      // Sharing/status/export are admin-only; hide the whole tab for non-admins.
-      ...(state.isAdmin() ? [{ id: 'sharing', label: t('set.sharingStatus'), content: sharingBody }] : []),
+      { id: 'sharing', label: t('set.sharingStatus'), content: sharingBody },
       { id: 'advanced', label: t('tabs.advanced'), content: advancedBody },
     ],
   });

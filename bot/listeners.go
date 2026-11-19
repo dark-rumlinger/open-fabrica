@@ -27,6 +27,10 @@ func (s *BotService) onBrainMessage(e events.Event) {
 		safego.Go("bot-golive", func() { s.announceGoLive(e.ProjectID, info) })
 		return
 	}
+	if strings.HasPrefix(content, "<!--of-preview:") && strings.HasSuffix(content, "-->") {
+		safego.Go("bot-preview-photo", func() { s.broadcastPreviewPhoto(e.ProjectID) })
+		return
+	}
 	// The expanded brief opens with a marker line instead of a heading, so each
 	// person gets the heading in their own language.
 	if brief, ok := strings.CutPrefix(content, engine.ExpandedBriefMarker); ok {
@@ -167,13 +171,20 @@ const notifyQueueSize = 512
 func (s *BotService) queued(fn func(events.Event)) func(events.Event) {
 	s.notifyOnce.Do(func() {
 		s.notifyQueue = make(chan func(), notifyQueueSize)
+		s.notifyDone = make(chan struct{})
 		safego.Go("bot-notify", func() {
+			defer close(s.notifyDone)
 			for task := range s.notifyQueue {
 				safego.Run("bot-notify-task", task)
 			}
 		})
 	})
 	return func(e events.Event) {
+		s.notifyMu.RLock()
+		defer s.notifyMu.RUnlock()
+		if s.notifyClosed {
+			return
+		}
 		select {
 		case s.notifyQueue <- func() { fn(e) }:
 		default:

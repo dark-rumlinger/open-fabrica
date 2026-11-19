@@ -106,6 +106,9 @@ func NewLoggedProvider(inner Provider, logger LLMLogger, source, session string,
 
 func (lp *LoggedProvider) Name() string { return lp.inner.Name() }
 func (lp *LoggedProvider) Type() string { return lp.inner.Type() }
+func (lp *LoggedProvider) Unwrap() Provider {
+	return lp.inner
+}
 func (lp *LoggedProvider) Ping(ctx context.Context, model string) error {
 	return lp.inner.Ping(ctx, model)
 }

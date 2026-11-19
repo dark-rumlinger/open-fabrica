@@ -113,13 +113,14 @@ func TestLintProof_WeakExpectJs(t *testing.T) {
 		{ expectJs: "JSON.parse(localStorage.getItem('app.v1')).items.length === 1" },
 		{ expectJs: "document.querySelectorAll('.row').length >= 1" },
 		{ expectJs: "parseFloat(document.getElementById('x').textContent) >= 0.5" },
+		{ expectJs: "Array.from(document.querySelectorAll('.chat-row--system')).some(r => r.textContent.indexOf('left the island') >= 0)" },
 	] }] }`)
 	for _, want := range []string{"step 2", "step 3", "step 4", "reads a test-only global", "asserts on browser storage"} {
 		if !hasWarning(ws, want) {
 			t.Errorf("want a warning mentioning %q, got %v", want, ws)
 		}
 	}
-	if hasWarning(ws, "step 6") || hasWarning(ws, "step 7") {
-		t.Errorf("a positive count or a real threshold must not warn: %v", ws)
+	if hasWarning(ws, "step 6") || hasWarning(ws, "step 7") || hasWarning(ws, "step 8") {
+		t.Errorf("a positive count, real threshold, or indexOf >= 0 must not warn: %v", ws)
 	}
 }

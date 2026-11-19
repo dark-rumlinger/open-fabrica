@@ -46,10 +46,10 @@ export function label(id){ return elementLabel(id); }`,
 	}
 }
 
-// Cycle-aware "did you mean": nms.terrain.js (a leaf) tried
-// `import { state, rnd } from './nms.state.js'`, but `rnd` was defined in the entry
-// nms.js (which pulls the terrain leaf in via a dynamic import()). The plain hint
-// would say "did you mean import { rnd } from './nms.js'" - steering the leaf to
+// Cycle-aware "did you mean": app.view.js (a leaf) tried
+// `import { state, rnd } from './app.state.js'`, but `rnd` was defined in the entry
+// app.js (which pulls the view leaf in via a dynamic import()). The plain hint
+// would say "did you mean import { rnd } from './app.js'" - steering the leaf to
 // import UP from the entry, deepening the leaf->entry coupling. The cycle-aware hint
 // must instead steer to MOVING rnd into the zero-import state leaf the model reached
 // for, which is the clean architecture.
@@ -57,20 +57,20 @@ func TestSave_UnresolvedImport_EntryExportSuggestsSharedLeaf(t *testing.T) {
 	db := setupBulkDB(t)
 	ctx := &tools.ToolContext{DB: db, ReadTracker: tools.NewReadTracker()}
 	// Zero-import state leaf (imports no project module); it lacks rnd.
-	seedJS(t, db, "nms.state.js", `export const state = {};`)
-	// Entry: defines rnd + register/hooks, and pulls the terrain leaf in dynamically.
-	seedJS(t, db, "nms.js", `import * as THREE from 'three';
+	seedJS(t, db, "app.state.js", `export const state = {};`)
+	// Entry: defines rnd + register/hooks, and pulls the view leaf in dynamically.
+	seedJS(t, db, "app.js", `import * as THREE from 'three';
 export function rnd(seed){ return seed; }
 export function register(s){}
 export const hooks = {};
-import('./nms.terrain.js');`)
+import('./app.view.js');`)
 
 	res, err := (&ArtSave{
 		Kind:     "file",
-		FilePath: "nms.terrain.js",
-		Body: `import { register, hooks } from './nms.js';
-import { state, rnd } from './nms.state.js';
-export function generatePlanet(){ return rnd(state.seed); }`,
+		FilePath: "app.view.js",
+		Body: `import { register, hooks } from './app.js';
+import { state, rnd } from './app.state.js';
+export function renderView(){ return rnd(state.seed); }`,
 	}).Run(ctx)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -78,10 +78,10 @@ export function generatePlanet(){ return rnd(state.seed); }`,
 	if res == nil || res.Success || res.Code != "unresolved_import" {
 		t.Fatalf("rnd missing from the state leaf must be rejected as unresolved_import, got %+v", res)
 	}
-	if !contains(res.Error, "Move `rnd` into") || !contains(res.Error, "nms.state.js") {
+	if !contains(res.Error, "Move `rnd` into") || !contains(res.Error, "app.state.js") {
 		t.Errorf("hint should steer to moving rnd into the zero-import store module, got: %s", res.Error)
 	}
-	if contains(res.Error, "did you mean `import { rnd } from './nms.js';`") {
+	if contains(res.Error, "did you mean `import { rnd } from './app.js';`") {
 		t.Errorf("hint must NOT suggest importing the shared symbol up from the entry, got: %s", res.Error)
 	}
 }

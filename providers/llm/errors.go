@@ -30,6 +30,17 @@ func ReadErrorBody(resp *http.Response) string {
 	return string(body)
 }
 
+// ClassifyStatusError converts an HTTP-style status code and error body into a
+// typed *Error. Used by ClassifyHTTPError and by streaming parsers that receive
+// in-band error objects carrying an HTTP status code after a 200 OK header.
+func ClassifyStatusError(provider string, status int, body string) *Error {
+	return &Error{
+		Code:    codeFromStatus(status, body),
+		Status:  status,
+		Message: fmt.Sprintf("%s: API error %d: %s", provider, status, body),
+	}
+}
+
 // ClassifyHTTPError converts an HTTP response from an LLM provider into a
 // typed *Error with a Code the retry layer can route on. Callers pass the
 // response (with status != 200) plus the provider identifier used in the

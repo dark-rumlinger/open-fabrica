@@ -12,11 +12,15 @@ func TestParseFeatures(t *testing.T) {
 	got, err := parseFeatures("```json\n" + `{"features":[
 		{"name":"Wall board","behaviours":["three columns", " ", "cards glide between columns"]},
 		{"name":"  "},
+		{"name":"Responsive and smooth experience","behaviours":["smooth and fast transitions between pages","responsive fluidly to mobile"]},
+		{"name":"Reveal and lazy-load animations","behaviours":["images fade in on scroll"]},
+		{"name":"Accessibility focus states","behaviours":["visible focus states for keyboard users"]},
+		{"name":"Accessibility settings panel","behaviours":["high-contrast toggle"]},
 		{"name":"Staff page","behaviours":["advance with one tap","undo the last move"]}]}` + "\n```")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].ID != "f1" || got[1].ID != "f2" || got[1].Name != "Staff page" {
+	if len(got) != 3 || got[0].ID != "f1" || got[1].ID != "f2" || got[1].Name != "Accessibility settings panel" || got[2].ID != "f3" || got[2].Name != "Staff page" {
 		t.Fatalf("features = %+v", got)
 	}
 	if len(got[0].Behaviours) != 2 {
@@ -24,6 +28,17 @@ func TestParseFeatures(t *testing.T) {
 	}
 	if _, err := parseFeatures("nothing"); err == nil {
 		t.Error("an unreadable reply is an error")
+	}
+}
+
+func TestMinFeaturesFor(t *testing.T) {
+	if got := minFeaturesFor("short brief"); got != 0 {
+		t.Errorf("short brief min = %d, want 0", got)
+	}
+	// A 600-word expanded brief for a 3-feature site must not force a 6-feature retry.
+	longBrief := strings.Repeat("word ", 600)
+	if got := minFeaturesFor(longBrief); got != 2 {
+		t.Errorf("long brief min = %d, want 2", got)
 	}
 }
 

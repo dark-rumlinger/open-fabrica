@@ -66,17 +66,3 @@ func (j *JWTManager) authenticate(next http.Handler, allowQueryToken bool) http.
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
-
-// RequireRole middleware checks that the authenticated user has the required role
-func RequireRole(role string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			claims, ok := r.Context().Value(ClaimsKey).(*Claims)
-			if !ok || claims.Role != role {
-				httpx.WriteError(w, http.StatusForbidden, "insufficient permissions")
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}

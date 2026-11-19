@@ -10,6 +10,7 @@ package content
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -64,11 +65,21 @@ func projectDefinedClasses(db dbh.Handle) map[string]bool {
 	// Standalone stylesheets. PathContains narrows the scan; the suffix check below
 	// (in bodyRendersMarkup's mirror) is unnecessary here because ExtractStyleSurface
 	// on a non-CSS body simply yields no selector preludes.
-	cssFiles, _ := store.ArtifactList(db, store.ArtifactListOpts{Kind: "file", PathContains: ".css", IncludeBody: true})
+	// An unreadable listing yields no defined classes, which keeps this advisory
+	// silent (it only speaks for a project with a real design system).
+	cssFiles, err := store.ArtifactList(db, store.ArtifactListOpts{Kind: "file", PathContains: ".css", IncludeBody: true})
+	if err != nil {
+		slog.Warn("style contract: listing stylesheets failed", "error", err)
+		return map[string]bool{}
+	}
 	collect(cssFiles)
 	// Inline <style> carried by markup artifacts (a design system authored in the
 	// layout rather than a file).
-	inlineStyled, _ := store.ArtifactList(db, store.ArtifactListOpts{Kinds: []string{"layout", "page", "component"}, IncludeBody: true})
+	inlineStyled, err := store.ArtifactList(db, store.ArtifactListOpts{Kinds: []string{"layout", "page", "component"}, IncludeBody: true})
+	if err != nil {
+		slog.Warn("style contract: listing markup artifacts failed", "error", err)
+		return map[string]bool{}
+	}
 	collect(inlineStyled)
 	return defined
 }

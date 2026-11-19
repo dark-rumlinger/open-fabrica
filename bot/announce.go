@@ -2,6 +2,8 @@ package bot
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -24,6 +26,10 @@ func (s *BotService) announceGoLive(pid int, info *goLiveInfo) {
 		}
 	}
 	s.mu.RUnlock()
+	var previewPNG []byte
+	if s.deps.ProjectDBManager != nil {
+		previewPNG, _ = os.ReadFile(filepath.Join(s.deps.ProjectDBManager.ProjectDir(pid), "preview.png"))
+	}
 	for _, st := range watchers {
 		if p, ok := s.provider(st.Provider); ok {
 			sc := s.goLiveCard(s.voice(st), project, info)
@@ -34,10 +40,46 @@ func (s *BotService) announceGoLive(pid int, info *goLiveInfo) {
 			if _, err := p.SendCard(st.ChatID, sc.text, kb, false); err != nil {
 				s.logger.Warn("go-live card send failed", "error", err)
 			}
+			if len(previewPNG) > 0 {
+				if ps, ok := p.(PhotoSender); ok {
+					if err := ps.SendPhoto(st.ChatID, "preview.png", previewPNG, ""); err != nil {
+						s.logger.Warn("go-live preview photo send failed", "error", err)
+					}
+				}
+			}
 			st.LiveCardStale.Store(true)
 		}
 	}
 	s.alertOthers(pid, "live", "🎉 <b>%s</b> is live!")
+}
+
+// broadcastPreviewPhoto sends the project's latest preview.png to every watcher
+// whose provider supports inline photos (used after LIVE-stage edits).
+func (s *BotService) broadcastPreviewPhoto(pid int) {
+	if s.deps.ProjectDBManager == nil {
+		return
+	}
+	png, err := os.ReadFile(filepath.Join(s.deps.ProjectDBManager.ProjectDir(pid), "preview.png"))
+	if err != nil || len(png) == 0 {
+		return
+	}
+	s.mu.RLock()
+	var watchers []*UserState
+	for _, st := range s.users {
+		if st.ActiveProjectID == pid {
+			watchers = append(watchers, st)
+		}
+	}
+	s.mu.RUnlock()
+	for _, st := range watchers {
+		if p, ok := s.provider(st.Provider); ok {
+			if ps, ok := p.(PhotoSender); ok {
+				if err := ps.SendPhoto(st.ChatID, "preview.png", png, ""); err != nil {
+					s.logger.Warn("live preview photo send failed", "error", err)
+				}
+			}
+		}
+	}
 }
 
 // alertCooldown stops a burst of similar events (a batch of questions) from

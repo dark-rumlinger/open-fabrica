@@ -44,7 +44,7 @@ func TestBuildAPIRequestContextAuthoredSharesReadsScopesWrites(t *testing.T) {
 	ep := &apiEndpoint{OwnerColumn: "user_id", OwnerScope: store.OwnerScopeAuthored, RequiresAuth: true}
 
 	getReq, uid := authoredMemberRequest(t, jwt, "GET", "")
-	rcGet, _, ok := h.buildAPIRequestContext(httptest.NewRecorder(), getReq, &models.Project{ID: 1}, ep)
+	rcGet, ok := h.buildAPIRequestContext(httptest.NewRecorder(), getReq, &models.Project{ID: 1}, ep)
 	if !ok {
 		t.Fatal("authored GET denied for an authenticated member")
 	}
@@ -56,7 +56,7 @@ func TestBuildAPIRequestContextAuthoredSharesReadsScopesWrites(t *testing.T) {
 	}
 
 	putReq, _ := authoredMemberRequest(t, jwt, "PUT", `{"body":"x"}`)
-	rcPut, _, ok := h.buildAPIRequestContext(httptest.NewRecorder(), putReq, &models.Project{ID: 1}, ep)
+	rcPut, ok := h.buildAPIRequestContext(httptest.NewRecorder(), putReq, &models.Project{ID: 1}, ep)
 	if !ok {
 		t.Fatal("authored PUT denied for an authenticated member")
 	}
@@ -75,7 +75,7 @@ func TestBuildAPIRequestContextOwnerScopesReads(t *testing.T) {
 	ep := &apiEndpoint{OwnerColumn: "user_id", OwnerScope: "", RequiresAuth: true}
 
 	getReq, _ := authoredMemberRequest(t, jwt, "GET", "")
-	rc, _, ok := h.buildAPIRequestContext(httptest.NewRecorder(), getReq, &models.Project{ID: 1}, ep)
+	rc, ok := h.buildAPIRequestContext(httptest.NewRecorder(), getReq, &models.Project{ID: 1}, ep)
 	if !ok {
 		t.Fatal("owner GET denied for an authenticated member")
 	}
@@ -99,7 +99,7 @@ func TestApiListAuthoredReturnsEveryAuthorsRows(t *testing.T) {
 	count := func(ep *apiEndpoint) int {
 		t.Helper()
 		req, _ := authoredMemberRequest(t, jwt, "GET", "")
-		rc, _, ok := h.buildAPIRequestContext(httptest.NewRecorder(), req, &models.Project{ID: 1}, ep)
+		rc, ok := h.buildAPIRequestContext(httptest.NewRecorder(), req, &models.Project{ID: 1}, ep)
 		if !ok {
 			t.Fatal("GET denied")
 		}
@@ -141,7 +141,7 @@ func TestApiUpdateAuthoredScopedToAuthor(t *testing.T) {
 	update := func(rowID string) int {
 		t.Helper()
 		req, _ := authoredMemberRequest(t, jwt, "PUT", `{"body":"edited"}`)
-		rc, _, ok := h.buildAPIRequestContext(httptest.NewRecorder(), req, &models.Project{ID: 1}, ep)
+		rc, ok := h.buildAPIRequestContext(httptest.NewRecorder(), req, &models.Project{ID: 1}, ep)
 		if !ok {
 			t.Fatal("PUT denied")
 		}

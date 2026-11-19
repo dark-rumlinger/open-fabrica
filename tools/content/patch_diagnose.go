@@ -112,7 +112,7 @@ func unanchoredIdenticalResult(body string, pr PatchResult, total int, stopDirec
 		"matched_rolled_back":  pr.Applied,
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "patch refused, so NO change was applied and the file is UNCHANGED: %d of %d edit(s) have `replace` identical to `search` AND that text is not in the file: %s. An identical hunk changes nothing wherever it lands, so this is NOT an anchor to re-read for: do NOT `get` the file to find it. Text that is not in the file reads like the RESULT you want. `search` must be text the file holds NOW, and `replace` is what that text becomes.",
+	fmt.Fprintf(&b, "patch refused, so "+patchUnchanged+": %d of %d edit(s) have `replace` identical to `search` AND that text is not in the file: %s. An identical hunk changes nothing wherever it lands, so this is NOT an anchor to re-read for: do NOT `get` the file to find it. Text that is not in the file reads like the RESULT you want. `search` must be text the file holds NOW, and `replace` is what that text becomes.",
 		len(pr.Unanchored), total, strings.Join(quotedLabels(pr.Unanchored), ", "))
 	var anchors []map[string]any
 	for _, s := range pr.Unanchored {

@@ -23,19 +23,17 @@ type streamEndpointConfig struct {
 }
 
 func (h *Handler) loadStreamEndpoint(projectDB *sql.DB, path string) (*streamEndpointConfig, error) {
-	var se streamEndpointConfig
-	var eventTypesJSON string
-	var tableName sql.NullString
-	err := projectDB.QueryRow(
-		"SELECT path, event_types, table_name, requires_auth FROM of_stream_endpoints WHERE path = ?",
-		path,
-	).Scan(&se.Path, &eventTypesJSON, &tableName, &se.RequiresAuth)
+	row, err := store.LoadStreamEndpoint(projectDB, path)
 	if err != nil {
 		return nil, err
 	}
-	se.TableName = tableName.String
-	if eventTypesJSON != "" {
-		if err := json.Unmarshal([]byte(eventTypesJSON), &se.EventTypes); err != nil {
+	se := streamEndpointConfig{
+		Path:         row.Path,
+		TableName:    row.TableName,
+		RequiresAuth: row.RequiresAuth,
+	}
+	if row.EventTypesJSON != "" {
+		if err := json.Unmarshal([]byte(row.EventTypesJSON), &se.EventTypes); err != nil {
 			slog.Warn("invalid event_types JSON in stream endpoint", "path", path, "error", err)
 		}
 	}
@@ -66,18 +64,17 @@ func (h *Handler) apiStream(w http.ResponseWriter, r *http.Request, projectID in
 	if token == "" {
 		token = r.URL.Query().Get("token")
 	}
-	valid, claims := h.validateProjectTokenOrJWTWithClaims(projectID, token)
+	claims, valid := h.projectUserClaims(projectID, token)
 	if se.RequiresAuth && !valid {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	scope := &streamScope{
-		h:            h,
-		projectDB:    projectDB,
-		isProjectKey: valid && claims == nil,
-		cache:        map[string]*apiEndpoint{},
+		h:         h,
+		projectDB: projectDB,
+		cache:     map[string]*apiEndpoint{},
 	}
-	if claims != nil {
+	if valid {
 		scope.userID, scope.userRole = claims.UserID, claims.Role
 		scope.tenantID, scope.tenantRole = claims.TenantID, claims.TenantRole
 	}
@@ -103,13 +100,8 @@ func (h *Handler) apiStream(w http.ResponseWriter, r *http.Request, projectID in
 		}
 		// When the endpoint is scoped to one table, only push row events whose
 		// payload "table" matches; other tables' events are not this stream's.
-		// The "endpoint" key is accepted too: some projects follow an older manage_sse
-		// wording where table_name was the create_api endpoint path, so they carry a
-		// route here and would otherwise stream nothing at all, silently and forever.
 		if se.TableName != "" {
-			t, _ := e.Payload["table"].(string)
-			ep, _ := e.Payload["endpoint"].(string)
-			if t != se.TableName && ep != se.TableName {
+			if t, _ := e.Payload["table"].(string); t != se.TableName {
 				return false
 			}
 		}
@@ -218,17 +210,16 @@ func parseLastEventID(r *http.Request) uint64 {
 // arrive from many goroutines at once, so one subscription's callback can run
 // concurrently with itself. mu guards the endpoint cache against that.
 type streamScope struct {
-	h            *Handler
-	projectDB    *sql.DB
-	userID       int
-	userRole     string
-	tenantID     int
-	tenantRole   string
-	isProjectKey bool
-	mu           sync.Mutex
-	cache        map[string]*apiEndpoint
-	scopedKnown  bool
-	anyScoped    bool
+	h           *Handler
+	projectDB   *sql.DB
+	userID      int
+	userRole    string
+	tenantID    int
+	tenantRole  string
+	mu          sync.Mutex
+	cache       map[string]*apiEndpoint
+	scopedKnown bool
+	anyScoped   bool
 }
 
 // endpointFor resolves and memoises the emitting endpoint's config. A miss is
@@ -263,11 +254,8 @@ func (s *streamScope) projectHasScopedEndpoint() bool {
 	// A read error answers "scoped": withholding an unattributable event is the
 	// safe side of a database we could not consult.
 	s.anyScoped = true
-	var n int
-	if err := s.projectDB.QueryRow(
-		`SELECT COUNT(*) FROM of_api_endpoints WHERE COALESCE(owner_column,'') != '' OR COALESCE(tenant_column,'') != ''`,
-	).Scan(&n); err == nil {
-		s.anyScoped = n > 0
+	if scoped, err := store.HasAnyScopedAPIEndpoint(s.projectDB); err == nil {
+		s.anyScoped = scoped
 	}
 	return s.anyScoped
 }
@@ -296,8 +284,8 @@ func (s *streamScope) allow(evType events.EventType, payload map[string]any) boo
 	// Mirror the REST read gate before any row-level decision: an endpoint that
 	// requires auth (and does not expose public reads) must not stream to a
 	// subscriber who could not GET it, and a required_role must hold here as well.
-	// A project key keeps its owner-level access, admin satisfies every role gate.
-	if ep.RequiresAuth && !ep.PublicRead && !s.isProjectKey {
+	// admin satisfies every role gate.
+	if ep.RequiresAuth && !ep.PublicRead {
 		if s.userID == 0 {
 			return false
 		}
@@ -308,9 +296,9 @@ func (s *streamScope) allow(evType events.EventType, payload map[string]any) boo
 	if ep.OwnerColumn == "" && ep.TenantColumn == "" {
 		return true // unscoped endpoint, unscoped stream
 	}
-	// The same bypasses the REST path grants: a project API key has owner-level
-	// access, and public_read endpoints expose unscoped reads on purpose.
-	if s.isProjectKey || ep.PublicRead {
+	// The same bypass the REST path grants: public_read endpoints expose unscoped
+	// reads on purpose.
+	if ep.PublicRead {
 		return true
 	}
 	// authored owner_scope shares reads, so the live stream mirrors the REST GET:

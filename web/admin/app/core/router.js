@@ -152,18 +152,10 @@ export function start() {
 // plain link and keeps the browser's default.
 const APP_ROUTE_RE = /^\/(new|projects|providers|messaging-apps|service-providers|settings|usage|users|questions)(\/|$)/;
 
-/**
- * Map a link href to a router path, or null when it is not an in-app link.
- * Chat messages stored before the move to real paths carry the hash form
- * (/#/projects/1/settings), which this router never resolves; those are
- * rewritten here, and the old Share link lands on Sharing rather than General.
- */
+/** Map a link href to a router path, or null when it is not an in-app link. */
 export function appPath(href) {
   if (typeof href !== 'string') return null;
-  const legacy = href.startsWith('/#/');
-  const path = legacy ? href.slice(2) : href;
-  if (!APP_ROUTE_RE.test(path)) return null;
-  return legacy && /^\/projects\/\d+\/settings$/.test(path) ? `${path}-sharing` : path;
+  return APP_ROUTE_RE.test(href) ? href : null;
 }
 
 /**

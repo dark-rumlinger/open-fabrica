@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"openfabrica/db"
 	"openfabrica/tools"
 )
 
@@ -52,5 +53,57 @@ func TestBuildIntentSeedOmitsEmptyDesignSystem(t *testing.T) {
 		if got := w.buildIntentSeed(plan); strings.Contains(got, "Design system (") {
 			t.Errorf("%s: the seed renders an empty token block", name)
 		}
+	}
+}
+
+// The reducer wire contract is an extended guide section, so only a plan that
+// locked the authoritative model carries it in the seed; tick and relay builds
+// must not pay for it on every turn.
+func TestReducerContractRidesSeedOnlyWhenAuthoritative(t *testing.T) {
+	w := &Worker{deps: &Deps{ToolRegistry: tools.DefaultRegistry()}}
+	const marker = "The room reducer (`manage_authoritative set_reducer`)"
+
+	auth := &Plan{Decisions: []PlanDecision{{Topic: "realtime model", Choice: "authoritative"}}}
+	shared := w.buildSharedSeed(auth)
+	if !strings.Contains(shared, marker) {
+		t.Error("authoritative-locked plan seed lacks the room-reducer contract")
+	}
+	if strings.Contains(shared, "{{contract:") {
+		t.Error("seed carries an unresolved contract token")
+	}
+
+	tick := &Plan{Decisions: []PlanDecision{{Topic: "realtime model", Choice: "tick"}}}
+	if strings.Contains(w.buildSharedSeed(tick), marker) {
+		t.Error("tick-locked plan seed carries the room-reducer contract")
+	}
+	if strings.Contains(w.buildSharedSeed(&Plan{}), marker) {
+		t.Error("decision-free plan seed carries the room-reducer contract")
+	}
+}
+
+// A task owning entry + store with task-level exports: the checklist's import
+// scaffold must point siblings at the STORE module (the un-edited owned
+// module), never the entry, since that is where the save gate requires the
+// symbols to live.
+func TestChecklistScaffoldHomesExportsInStore(t *testing.T) {
+	mgr := db.NewProjectDBManager(t.TempDir())
+	t.Cleanup(mgr.CloseAll)
+	pdb, err := mgr.Create(1)
+	if err != nil {
+		t.Fatalf("create project db: %v", err)
+	}
+	if _, err := AddTasks(pdb, "run_1", []Task{
+		{ID: "spine", Title: "Spine", Paths: []string{"/", "/files/game.js", "/files/game.state.js"},
+			Exports: []string{"setState(patch)", "getState()"}},
+		{ID: "hud", Title: "HUD", Paths: []string{"/files/game.hud.js"}, Edits: []string{"/files/game.js"}},
+	}); err != nil {
+		t.Fatalf("AddTasks: %v", err)
+	}
+	out := renderChecklist(pdb.Reader())
+	if !strings.Contains(out, "from 'game.state'") {
+		t.Errorf("scaffold should import from the store module game.state, got:\n%s", out)
+	}
+	if strings.Contains(out, "from 'game'") {
+		t.Errorf("scaffold must not point siblings at the entry, got:\n%s", out)
 	}
 }

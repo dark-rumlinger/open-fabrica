@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"openfabrica/internal/diskpath"
 	"openfabrica/internal/sqliteretry"
@@ -28,6 +31,11 @@ type ProjectDB struct {
 	reader    *sql.DB // read pool (concurrent reads), use Reader() to access
 	writer    *sql.DB // write pool (single connection, serializes writes)
 	ProjectID int
+	lastUsed  atomic.Int64 // UnixNano timestamp of last Open/Create/Get
+}
+
+func (s *ProjectDB) touch() {
+	s.lastUsed.Store(time.Now().UnixNano())
 }
 
 // Reader returns the multi-connection read pool.
@@ -65,6 +73,9 @@ type ProjectDBManager struct {
 	mu      sync.RWMutex
 	dataDir string
 	dbs     map[int]*ProjectDB
+
+	opMu    sync.Mutex
+	opLocks map[int]*sync.Mutex
 }
 
 // NewProjectDBManager creates a manager for per-project databases.
@@ -72,7 +83,25 @@ func NewProjectDBManager(dataDir string) *ProjectDBManager {
 	return &ProjectDBManager{
 		dataDir: dataDir,
 		dbs:     make(map[int]*ProjectDB),
+		opLocks: make(map[int]*sync.Mutex),
 	}
+}
+
+// projectLock returns the per-project lifecycle mutex so slow disk operations
+// (migrations, VACUUM INTO, asset copy, delete) serialize per project without
+// holding m.mu across all other projects.
+func (m *ProjectDBManager) projectLock(projectID int) *sync.Mutex {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	if m.opLocks == nil {
+		m.opLocks = make(map[int]*sync.Mutex)
+	}
+	l, ok := m.opLocks[projectID]
+	if !ok {
+		l = &sync.Mutex{}
+		m.opLocks[projectID] = l
+	}
+	return l
 }
 
 // DataDir returns the configured instance data directory. Exposed so the tool
@@ -113,36 +142,49 @@ func (m *ProjectDBManager) Exists(projectID int) bool {
 func (m *ProjectDBManager) Open(projectID int) (*ProjectDB, error) {
 	m.mu.RLock()
 	if sdb, ok := m.dbs[projectID]; ok {
+		sdb.touch()
 		m.mu.RUnlock()
 		return sdb, nil
 	}
 	m.mu.RUnlock()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	pl := m.projectLock(projectID)
+	pl.Lock()
+	defer pl.Unlock()
 
-	// Double-check after acquiring write lock.
+	// Double-check after acquiring per-project lock.
+	m.mu.RLock()
 	if sdb, ok := m.dbs[projectID]; ok {
+		sdb.touch()
+		m.mu.RUnlock()
 		return sdb, nil
 	}
+	m.mu.RUnlock()
 
 	sdb, err := m.openProjectDB(projectID)
 	if err != nil {
 		return nil, err
 	}
 
+	m.mu.Lock()
 	m.dbs[projectID] = sdb
+	m.mu.Unlock()
 	return sdb, nil
 }
 
 // Create creates a new project database and runs migrations.
 func (m *ProjectDBManager) Create(projectID int) (*ProjectDB, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	pl := m.projectLock(projectID)
+	pl.Lock()
+	defer pl.Unlock()
 
+	m.mu.RLock()
 	if sdb, ok := m.dbs[projectID]; ok {
+		sdb.touch()
+		m.mu.RUnlock()
 		return sdb, nil
 	}
+	m.mu.RUnlock()
 
 	// Ensure the project directory exists.
 	dbPath := m.dbPath(projectID)
@@ -155,7 +197,9 @@ func (m *ProjectDBManager) Create(projectID int) (*ProjectDB, error) {
 		return nil, err
 	}
 
+	m.mu.Lock()
 	m.dbs[projectID] = sdb
+	m.mu.Unlock()
 	slog.Info("Project database created", "project_id", projectID, "path", dbPath)
 	return sdb, nil
 }
@@ -215,10 +259,14 @@ func (m *ProjectDBManager) CopyFrom(sourceID, newID int) (*ProjectDB, error) {
 		return nil, fmt.Errorf("opening source project %d: %w", sourceID, err)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	pl := m.projectLock(newID)
+	pl.Lock()
+	defer pl.Unlock()
 
-	if _, ok := m.dbs[newID]; ok {
+	m.mu.RLock()
+	_, alreadyOpen := m.dbs[newID]
+	m.mu.RUnlock()
+	if alreadyOpen {
 		return nil, fmt.Errorf("target project %d is already open", newID)
 	}
 
@@ -270,13 +318,9 @@ func (m *ProjectDBManager) CopyFrom(sourceID, newID int) (*ProjectDB, error) {
 	// confusing to inherit (logs, chat, jobs, analytics tied to the source).
 	for _, stmt := range EphemeralResetStmts {
 		if _, err := sdb.ExecWrite(stmt); err != nil {
-			// Tolerate missing tables; not all schema versions populate every table.
-			if !strings.Contains(err.Error(), "no such table") {
-				sdb.writer.Close()
-				sdb.reader.Close()
-				delete(m.dbs, newID)
-				return nil, cleanupOnError(fmt.Errorf("resetting state (%s): %w", stmt, err))
-			}
+			sdb.writer.Close()
+			sdb.reader.Close()
+			return nil, cleanupOnError(fmt.Errorf("resetting state (%s): %w", stmt, err))
 		}
 	}
 
@@ -284,11 +328,12 @@ func (m *ProjectDBManager) CopyFrom(sourceID, newID int) (*ProjectDB, error) {
 	if err := diskpath.RemapProject(sdb, sourceID, dstDir); err != nil {
 		sdb.writer.Close()
 		sdb.reader.Close()
-		delete(m.dbs, newID)
 		return nil, cleanupOnError(fmt.Errorf("relinking copied files: %w", err))
 	}
 
+	m.mu.Lock()
 	m.dbs[newID] = sdb
+	m.mu.Unlock()
 	slog.Info("project database copied", "source_id", sourceID, "new_id", newID, "path", dstDBPath)
 	return sdb, nil
 }
@@ -333,13 +378,20 @@ func copyPath(src, dst string) error {
 
 // Delete closes a project's database and removes the DB file from disk.
 func (m *ProjectDBManager) Delete(projectID int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	pl := m.projectLock(projectID)
+	pl.Lock()
+	defer pl.Unlock()
 
-	if sdb, ok := m.dbs[projectID]; ok {
+	m.mu.Lock()
+	sdb, ok := m.dbs[projectID]
+	if ok {
+		delete(m.dbs, projectID)
+	}
+	m.mu.Unlock()
+
+	if ok {
 		sdb.writer.Close()
 		sdb.reader.Close()
-		delete(m.dbs, projectID)
 	}
 
 	// Remove the entire project directory (includes project.db, assets, files).
@@ -347,6 +399,10 @@ func (m *ProjectDBManager) Delete(projectID int) error {
 	if err := os.RemoveAll(projectDir); err != nil {
 		return fmt.Errorf("removing project directory: %w", err)
 	}
+
+	m.opMu.Lock()
+	delete(m.opLocks, projectID)
+	m.opMu.Unlock()
 
 	slog.Info("project database deleted", "project_id", projectID)
 	return nil
@@ -356,7 +412,58 @@ func (m *ProjectDBManager) Delete(projectID int) error {
 func (m *ProjectDBManager) Get(projectID int) *ProjectDB {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.dbs[projectID]
+	sdb := m.dbs[projectID]
+	if sdb != nil {
+		sdb.touch()
+	}
+	return sdb
+}
+
+// EvictIdle closes and un-caches project databases that have not been accessed
+// within maxIdle, bounding open SQLite connections and WAL handles on instances
+// with many projects. Returns the number of closed databases.
+func (m *ProjectDBManager) EvictIdle(maxIdle time.Duration) int {
+	if maxIdle <= 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxIdle).UnixNano()
+
+	m.mu.Lock()
+	var evicted []*ProjectDB
+	for id, sdb := range m.dbs {
+		if sdb.lastUsed.Load() < cutoff {
+			delete(m.dbs, id)
+			evicted = append(evicted, sdb)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, sdb := range evicted {
+		_ = sdb.writer.Close()
+		_ = sdb.reader.Close()
+		slog.Debug("evicted idle project database", "project_id", sdb.ProjectID)
+	}
+	return len(evicted)
+}
+
+// StartIdleEviction runs a background loop that periodically evicts idle
+// project databases until ctx is cancelled.
+func (m *ProjectDBManager) StartIdleEviction(ctx context.Context, interval, maxIdle time.Duration) {
+	if interval <= 0 || maxIdle <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				m.EvictIdle(maxIdle)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // CloseAll closes all open project databases. Called on shutdown.
@@ -397,6 +504,7 @@ func (m *ProjectDBManager) openProjectDB(projectID int) (*ProjectDB, error) {
 	}
 
 	sdb := &ProjectDB{reader: readDB, writer: writeDB, ProjectID: projectID}
+	sdb.touch()
 
 	if err := runProjectMigrations(sdb); err != nil {
 		writeDB.Close()

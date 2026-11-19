@@ -304,9 +304,15 @@ func (c *Client) buildRequestBody(req llm.CompletionRequest, stream bool) map[st
 		var tools []map[string]any
 		for _, t := range req.Tools {
 			if t.Type == "web_search" {
-				// OpenAI uses web_search_options as a top-level parameter
-				// (works with search models like gpt-4o-search-preview, gpt-5-search-api).
-				body["web_search_options"] = map[string]any{}
+				if c.cfg.EffectiveShape() == providercfg.ShapeOpenRouter {
+					tools = append(tools, map[string]any{
+						"type": "openrouter:web_search",
+					})
+				} else {
+					// OpenAI uses web_search_options as a top-level parameter
+					// (works with search models like gpt-4o-search-preview, gpt-5-search-api).
+					body["web_search_options"] = map[string]any{}
+				}
 				continue
 			}
 			tool := map[string]any{
@@ -340,7 +346,7 @@ func (c *Client) buildRequestBody(req llm.CompletionRequest, stream bool) map[st
 		}
 	}
 
-	applyReasoningMode(body, req.Thinking, k)
+	c.applyReasoningMode(body, req.Thinking, req.Effort, k)
 
 	if req.ResponseSchema != nil {
 		var schema any
@@ -360,33 +366,79 @@ func (c *Client) buildRequestBody(req llm.CompletionRequest, stream bool) map[st
 		}
 	}
 
+	// On OpenRouter, a model can be served by multiple upstream providers with
+	// different parameter support. Setting require_parameters ensures OpenRouter
+	// only routes to endpoints that support tools, response_format, or reasoning.
+	if c.cfg.EffectiveShape() == providercfg.ShapeOpenRouter &&
+		(body["tools"] != nil || body["response_format"] != nil || body["reasoning"] != nil) {
+		body["provider"] = map[string]any{
+			"require_parameters": true,
+		}
+	}
+
 	return body
 }
 
-// applyReasoningMode sets the reasoning-mode toggle for Z.ai GLM, DeepSeek-R1,
-// Qwen-thinking, and the OpenRouter passthrough of any of these. Both shapes
-// (thinking.type and enable_thinking) are emitted so the same flag works across
-// gateways, and they always agree. nil leaves provider defaults alone. A model
-// whose endpoint refuses the disabled mode gets thinking enabled at the cheapest
-// legal level instead, as close to the caller's "off" as the endpoint permits.
-func applyReasoningMode(body map[string]any, thinking *bool, k llm.ModelKey) {
+// applyReasoningMode sets the reasoning-mode toggle for the target endpoint.
+// OpenRouter uses its unified `reasoning` object across all upstream providers;
+// direct OpenAI-compatible gateways (Z.ai GLM, DeepSeek-R1, Qwen-thinking, vLLM)
+// use `thinking.type` and `enable_thinking`. nil leaves provider defaults alone.
+// A model whose endpoint refuses the disabled mode gets reasoning/thinking enabled
+// at the cheapest legal level instead, as close to the caller's "off" as permitted.
+func (c *Client) applyReasoningMode(body map[string]any, thinking *bool, effort string, k llm.ModelKey) {
+	if c.cfg.EffectiveShape() == providercfg.ShapeOpenRouter {
+		applyOpenRouterReasoningMode(body, thinking, effort, k)
+		return
+	}
 	switch {
 	case thinking == nil:
-		// No opinion: leave provider defaults alone.
+		if effort != "" && llm.Caps.Allowed(k, llm.CapReasoningEffort) {
+			body["reasoning_effort"] = effort
+		}
 	case !llm.Caps.Allowed(k, llm.CapThinkingField):
 		// The endpoint 400s on the toggle field itself (strict OpenAI-style
 		// "unknown parameter"): omit it in both directions.
 	case *thinking:
 		body["thinking"] = map[string]any{"type": "enabled"}
 		body["enable_thinking"] = true
+		if effort != "" && llm.Caps.Allowed(k, llm.CapReasoningEffort) {
+			body["reasoning_effort"] = effort
+		}
 	case llm.Caps.Allowed(k, llm.CapThinkingOff):
 		body["thinking"] = map[string]any{"type": "disabled"} // Z.ai canonical
-		body["enable_thinking"] = false                       // vLLM / OpenViking / OpenRouter shim
+		body["enable_thinking"] = false                       // vLLM / OpenViking shim
 	default:
 		body["thinking"] = map[string]any{"type": "enabled"}
 		body["enable_thinking"] = true
 		if llm.Caps.Allowed(k, llm.CapReasoningEffort) {
 			body["reasoning_effort"] = forcedReasoningEffort
+		}
+	}
+}
+
+func applyOpenRouterReasoningMode(body map[string]any, thinking *bool, effort string, k llm.ModelKey) {
+	switch {
+	case !llm.Caps.Allowed(k, llm.CapThinkingField):
+		// The endpoint 400s on the reasoning field itself: omit it in all cases.
+	case thinking == nil:
+		// No explicit thinking toggle, but honour an explicit effort hint if set.
+		if effort != "" && llm.Caps.Allowed(k, llm.CapReasoningEffort) {
+			body["reasoning"] = map[string]any{"effort": effort}
+		}
+	case *thinking:
+		r := map[string]any{"enabled": true}
+		if effort != "" && llm.Caps.Allowed(k, llm.CapReasoningEffort) {
+			r["effort"] = effort
+		}
+		body["reasoning"] = r
+	case llm.Caps.Allowed(k, llm.CapThinkingOff):
+		body["reasoning"] = map[string]any{"enabled": false}
+	default:
+		// Endpoint refuses to disable reasoning; ask for the cheapest legal effort.
+		if llm.Caps.Allowed(k, llm.CapReasoningEffort) {
+			body["reasoning"] = map[string]any{"effort": forcedReasoningEffort}
+		} else {
+			body["reasoning"] = map[string]any{"enabled": true}
 		}
 	}
 }
@@ -486,6 +538,12 @@ func (c *Client) buildMessages(req llm.CompletionRequest) []map[string]any {
 			stampOpenAICacheControl(msg, c.cfg.CacheTTL)
 		}
 
+		// Preserve OpenRouter's opaque reasoning_details blocks on assistant turns
+		// so multi-turn tool-call loops with reasoning models keep their context.
+		if m.Role == llm.RoleAssistant && len(m.ReasoningDetails) > 0 {
+			msg["reasoning_details"] = m.ReasoningDetails
+		}
+
 		msgs = append(msgs, msg)
 	}
 	// Stamp the reserved breakpoint on the final message so the whole
@@ -510,17 +568,9 @@ func (c *Client) cacheBreakpoints(req llm.CompletionRequest) (map[int]bool, bool
 	if !c.emitCacheControl {
 		return map[int]bool{}, false
 	}
-	const maxBreakpoints = 4
-	budget := maxBreakpoints
-	if req.CacheSystem && req.System != "" {
-		budget-- // system block consumes one
-	}
-	stampFinal := req.CacheSystem && len(req.Messages) > 0
-	candidates := req.Messages
-	if stampFinal {
-		budget-- // final-message block, stamped after the message loop
-		candidates = req.Messages[:len(req.Messages)-1]
-	}
+	// OpenAI-format tools live in a separate top-level array, so no breakpoint is reserved
+	// for them (reserveTool=false).
+	candidates, budget, stampFinal := llm.CacheBreakpointBudget(req, false)
 	return llm.CacheBreakpointIndices(candidates, budget), stampFinal
 }
 
@@ -566,9 +616,10 @@ type apiMessage struct {
 	// but never appear in content or tool_calls, so callers must capture this or
 	// discard budget-billed output. Reasoning is the OpenAI / xAI alias; providers
 	// populate one or the other, never both.
-	ReasoningContent *string       `json:"reasoning_content,omitempty"`
-	Reasoning        *string       `json:"reasoning,omitempty"`
-	ToolCalls        []apiToolCall `json:"tool_calls,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	Reasoning        *string         `json:"reasoning,omitempty"`
+	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
+	ToolCalls        []apiToolCall   `json:"tool_calls,omitempty"`
 }
 
 type apiToolCall struct {
@@ -595,11 +646,11 @@ type apiUsage struct {
 	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
 }
 
-// promptTokensDetails carries OpenAI's automatic prompt-cache hit count.
-// Populated by GPT-4o family models and o1 models when the prefix exceeds
-// the 1024-token automatic-cache threshold.
+// promptTokensDetails carries OpenAI's automatic prompt-cache hit count and
+// OpenRouter's cache write count.
 type promptTokensDetails struct {
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 // normalizeStopReason maps an OpenAI finish_reason to our internal stop_reason
@@ -628,27 +679,33 @@ func normalizeStopReason(finishReason string) string {
 // face value. InputTokens must never go negative, since it is SUM(input_tokens) in
 // the daily budget tally, where a negative row would push a default spend limit away
 // from its ceiling and never trip.
-func normalizeUsage(promptTokens, completionTokens, cachedTokens int) llm.Usage {
-	input := promptTokens - cachedTokens
-	if cachedTokens > promptTokens {
+func normalizeUsage(promptTokens, completionTokens, cachedTokens, cacheWriteTokens int) llm.Usage {
+	input := promptTokens - cachedTokens - cacheWriteTokens
+	if cachedTokens+cacheWriteTokens > promptTokens {
 		input = promptTokens
 	}
 	return llm.Usage{
-		InputTokens:          max(input, 0),
-		OutputTokens:         completionTokens,
-		CacheReadInputTokens: cachedTokens,
+		InputTokens:              max(input, 0),
+		OutputTokens:             completionTokens,
+		CacheReadInputTokens:     cachedTokens,
+		CacheCreationInputTokens: cacheWriteTokens,
 	}
+}
+
+func usageFromAPI(u apiUsage) llm.Usage {
+	cachedTokens, cacheWriteTokens := 0, 0
+	if u.PromptTokensDetails != nil {
+		cachedTokens = u.PromptTokensDetails.CachedTokens
+		cacheWriteTokens = u.PromptTokensDetails.CacheWriteTokens
+	}
+	return normalizeUsage(u.PromptTokens, u.CompletionTokens, cachedTokens, cacheWriteTokens)
 }
 
 // parseResponse converts an OpenAI API response to our format.
 func (c *Client) parseResponse(resp *apiResponse) *llm.CompletionResponse {
-	cachedTokens := 0
-	if resp.Usage.PromptTokensDetails != nil {
-		cachedTokens = resp.Usage.PromptTokensDetails.CachedTokens
-	}
 	out := &llm.CompletionResponse{
 		Model: resp.Model,
-		Usage: normalizeUsage(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, cachedTokens),
+		Usage: usageFromAPI(resp.Usage),
 	}
 
 	if len(resp.Choices) > 0 {
@@ -671,6 +728,9 @@ func (c *Client) parseResponse(resp *apiResponse) *llm.CompletionResponse {
 		} else if choice.Message.Reasoning != nil {
 			out.ReasoningContent = *choice.Message.Reasoning
 		}
+		if len(choice.Message.ReasoningDetails) > 0 && string(choice.Message.ReasoningDetails) != "null" {
+			out.ReasoningDetails = choice.Message.ReasoningDetails
+		}
 
 		for _, tc := range choice.Message.ToolCalls {
 			out.ToolCalls = append(out.ToolCalls, llm.ToolCall{
@@ -691,6 +751,12 @@ type streamChunkResponse struct {
 	Model   string              `json:"model"`
 	Choices []streamChunkChoice `json:"choices"`
 	Usage   *apiUsage           `json:"usage,omitempty"`
+	Error   *streamChunkError   `json:"error,omitempty"`
+}
+
+type streamChunkError struct {
+	Code    any    `json:"code,omitempty"`
+	Message string `json:"message"`
 }
 
 type streamChunkChoice struct {
@@ -700,11 +766,12 @@ type streamChunkChoice struct {
 }
 
 type streamChunkDelta struct {
-	Role             string        `json:"role,omitempty"`
-	Content          *string       `json:"content,omitempty"`
-	ReasoningContent *string       `json:"reasoning_content,omitempty"` // Z.ai / DeepSeek / Qwen-thinking
-	Reasoning        *string       `json:"reasoning,omitempty"`         // OpenAI / xAI alias
-	ToolCalls        []apiToolCall `json:"tool_calls,omitempty"`
+	Role             string          `json:"role,omitempty"`
+	Content          *string         `json:"content,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"` // Z.ai / DeepSeek / Qwen-thinking
+	Reasoning        *string         `json:"reasoning,omitempty"`         // OpenAI / xAI alias
+	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"` // OpenRouter structured reasoning blocks
+	ToolCalls        []apiToolCall   `json:"tool_calls,omitempty"`
 }
 
 // parseSSEStream parses Server-Sent Events from the OpenAI streaming API.
@@ -742,8 +809,6 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 
 	err := llm.ScanSSEData(body, "openai", func(data string) error {
 		if data == "[DONE]" {
-			flushToolCalls()
-			callback(llm.StreamChunk{Done: true, StopReason: stopReason, Usage: usage})
 			return io.EOF
 		}
 
@@ -752,13 +817,29 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 			return nil
 		}
 
+		// OpenRouter sends mid-stream failures in-band as a top-level error object
+		// after the 200 OK SSE stream has already opened.
+		if chunk.Error != nil {
+			errMsg := chunk.Error.Message
+			if errMsg == "" {
+				errMsg = "unknown stream error"
+			}
+			var streamErr error
+			if status, ok := streamErrorStatus(chunk.Error.Code); ok {
+				streamErr = llm.ClassifyStatusError(c.name, status, errMsg)
+			} else {
+				streamErr = &llm.Error{
+					Code:    llm.CodeServer,
+					Message: fmt.Sprintf("%s: stream error: %s", c.name, errMsg),
+				}
+			}
+			callback(llm.StreamChunk{Error: streamErr})
+			return streamErr
+		}
+
 		// Capture usage if present (OpenAI sends it in the final chunks when stream_options is set)
 		if chunk.Usage != nil {
-			cachedTokens := 0
-			if chunk.Usage.PromptTokensDetails != nil {
-				cachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
-			}
-			u := normalizeUsage(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, cachedTokens)
+			u := usageFromAPI(*chunk.Usage)
 			usage = &u
 		}
 
@@ -782,6 +863,9 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 			callback(llm.StreamChunk{Reasoning: *delta.ReasoningContent})
 		} else if delta.Reasoning != nil && *delta.Reasoning != "" {
 			callback(llm.StreamChunk{Reasoning: *delta.Reasoning})
+		}
+		if len(delta.ReasoningDetails) > 0 && string(delta.ReasoningDetails) != "null" {
+			callback(llm.StreamChunk{ReasoningDetails: delta.ReasoningDetails})
 		}
 
 		// Tool calls (built up incrementally). Each delta carries an `index` for the
@@ -824,6 +908,11 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 
 		// Check for finish
 		if choice.FinishReason != nil {
+			if *choice.FinishReason == "error" {
+				streamErr := fmt.Errorf("openai: stream terminated with error")
+				callback(llm.StreamChunk{Error: streamErr})
+				return streamErr
+			}
 			// Map OpenAI finish reasons to our normalized stop_reason.
 			stopReason = normalizeStopReason(*choice.FinishReason)
 			// Flush tool calls on stop
@@ -842,9 +931,25 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 		return err
 	}
 
-	// If we got here without [DONE], send done anyway
+	// The one terminal chunk: sent here whether the stream ended on [DONE] or a plain
+	// EOF. Calls still buffered are flushed first.
+	flushToolCalls()
 	callback(llm.StreamChunk{Done: true, StopReason: stopReason, Usage: usage})
 	return nil
+}
+
+// streamErrorStatus extracts an HTTP status code from a mid-stream error's
+// `code` field (JSON numbers arrive as float64 when decoded into any).
+func streamErrorStatus(code any) (int, bool) {
+	switch v := code.(type) {
+	case float64:
+		s := int(v)
+		return s, s >= 400 && s < 600
+	case int:
+		return v, v >= 400 && v < 600
+	default:
+		return 0, false
+	}
 }
 
 // Embed generates embedding vectors for the given texts using the OpenAI embeddings

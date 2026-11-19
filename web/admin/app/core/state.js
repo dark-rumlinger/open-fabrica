@@ -96,9 +96,3 @@ export function currentUserId() {
   return typeof id === 'number' ? id : null;
 }
 
-/**
- * Returns true if the current user has the admin role.
- */
-export function isAdmin() {
-  return currentUser().role === 'admin';
-}

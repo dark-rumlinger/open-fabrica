@@ -36,11 +36,13 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
 
+	"openfabrica/internal/browser"
 	"openfabrica/internal/dbh"
 	"openfabrica/internal/flowsnap"
+
 	"openfabrica/internal/replayid"
+
 	"openfabrica/security"
-	"openfabrica/store"
 )
 
 const (
@@ -50,6 +52,9 @@ const (
 	// run (and throw) before the next step starts. Assertions poll on their own, so
 	// this only needs to cover a synchronous handler plus its first microtasks.
 	flowSettle = 350 * time.Millisecond
+	// flowSettleNetworkCap caps how long settle additionally waits for in-flight
+	// same-origin Fetch/XHR/Document requests triggered by the step to finish.
+	flowSettleNetworkCap = 1500 * time.Millisecond
 	// flowPoll is the interval between attempts while a step waits for its target.
 	flowPoll = 100 * time.Millisecond
 	// flowPixelPoll is the (slower) interval between screenshots for expectChanged.
@@ -195,11 +200,11 @@ func FlowWriteDBFromContext(ctx context.Context) dbh.Handle {
 
 // launchFlowBrowser starts the browser a flow run uses; a variable so tests can
 // simulate a host without Chrome.
-var launchFlowBrowser = store.LaunchBrowser
+var launchFlowBrowser = browser.LaunchBrowser
 
 // SetFlowBrowserLauncherForTest swaps the launcher flow runs use and returns a
 // restore func. Tests only: it lets packages above probe exercise the no-Chrome path.
-func SetFlowBrowserLauncherForTest(fn func(context.Context, store.BrowserConfig) (context.Context, context.CancelFunc, error)) func() {
+func SetFlowBrowserLauncherForTest(fn func(context.Context, browser.BrowserConfig) (context.Context, context.CancelFunc, error)) func() {
 	prev := launchFlowBrowser
 	launchFlowBrowser = fn
 	return func() { launchFlowBrowser = prev }
@@ -222,7 +227,7 @@ func RunFlowTests(ctx context.Context, suite *FlowSuite, baseURL, hostHeader, on
 	if hostHeader != "" {
 		origin = replaceHostInURL(baseURL, hostHeader)
 	}
-	allocCtx, cancelAlloc, err := launchFlowBrowser(ctx, store.BrowserConfig{HostResolverMap: hostHeader, ExtraFlags: flowBrowserFlags(origin)})
+	allocCtx, cancelAlloc, err := launchFlowBrowser(ctx, browser.BrowserConfig{HostResolverMap: hostHeader, ExtraFlags: flowBrowserFlags(origin)})
 	if err != nil {
 		res.Skipped = fmt.Sprintf("headless browser unavailable: %v", err)
 		return res
@@ -479,7 +484,7 @@ func (r *flowRun) run() (issue *ValidationIssue) {
 	}
 	// Give async work the last step kicked off (a fetch whose .then throws) the full
 	// idle window the load probe uses before calling the flow clean.
-	time.Sleep(store.RuntimeIdleWindow)
+	time.Sleep(browser.RuntimeIdleWindow)
 	if hard := r.hardErrors(); len(hard) > 0 {
 		last := len(r.flow.Steps) - 1
 		st := r.flow.Steps[last]

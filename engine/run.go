@@ -69,23 +69,13 @@ func scanRun(row *sql.Row) (*Run, error) {
 // update run right after a completed build, or back-to-back runs in tests).
 var runSeq atomic.Uint64
 
-// BuildVersion and BuildBuiltAt identify the engine binary that creates runs.
-// main sets them at startup from its ldflags-injected Version / BuildTime, so each
-// run row records which binary produced it and a post-mortem reads it from the run
-// export instead of diffing binary mtimes against source. Empty in tests and dev
-// builds, which is fine - the columns default to ”.
-var (
-	BuildVersion string
-	BuildBuiltAt string
-)
-
 // newRunID mints a process-unique run id from the wall clock + a sequence.
 func newRunID() string {
 	return fmt.Sprintf("run_%d_%d", time.Now().UnixMilli(), runSeq.Add(1))
 }
 
 // createRun inserts a fresh run starting at the given stage.
-func createRun(pdb *db.ProjectDB, kind, stage, updateDescription string) (*Run, error) {
+func createRun(pdb *db.ProjectDB, kind, stage, updateDescription, buildVersion, buildBuiltAt string) (*Run, error) {
 	r := &Run{
 		ID:                newRunID(),
 		Kind:              kind,
@@ -96,7 +86,7 @@ func createRun(pdb *db.ProjectDB, kind, stage, updateDescription string) (*Run, 
 	_, err := sqliteretry.Exec(pdb.Writer(),
 		`INSERT INTO of_runs (id, kind, status, stage, update_description, engine_version, engine_built_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Kind, r.Status, r.Stage, nullIfEmptyStr(r.UpdateDescription), BuildVersion, BuildBuiltAt)
+		r.ID, r.Kind, r.Status, r.Stage, nullIfEmptyStr(r.UpdateDescription), buildVersion, buildBuiltAt)
 	if err != nil {
 		return nil, fmt.Errorf("creating run: %w", err)
 	}

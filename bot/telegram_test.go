@@ -199,6 +199,37 @@ func TestSendRetriesOn429(t *testing.T) {
 	}
 }
 
+// TestSendDocumentRetriesOn429 verifies multipart document uploads retry on
+// transient 429/5xx responses with a fresh body reader each attempt.
+func TestSendDocumentRetriesOn429(t *testing.T) {
+	var attempts int
+	var lastBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		lastBody = string(b)
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(429)
+			w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests"}`))
+			return
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true,"result":{"message_id":12}}`))
+	}))
+	defer srv.Close()
+
+	tp := &TelegramProvider{token: "T", baseURL: srv.URL, client: &http.Client{Timeout: 5 * time.Second}, logger: slog.Default()}
+	if err := tp.SendDocument("1", "call.json", []byte(`{"hello":"world"}`), "caption"); err != nil {
+		t.Fatalf("expected SendDocument retry to succeed, got %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want 2", attempts)
+	}
+	if !strings.Contains(lastBody, `{"hello":"world"}`) {
+		t.Errorf("retry did not resend multipart payload: %q", lastBody)
+	}
+}
+
 // TestDispatchAnswersCallbackWithNilMessage: a callback_query whose originating
 // message Telegram dropped (>~48h old, so Message is nil) must still be answered
 // so the button's spinner clears; the routing handler must not run.

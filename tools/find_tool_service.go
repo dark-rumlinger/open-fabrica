@@ -4,15 +4,17 @@ import (
 	"context"
 	"strings"
 
+	"openfabrica/internal/stringutil"
 	"openfabrica/providers/llm"
 )
 
 // FindToolArgs is one parsed find_tool call. Names loads schemas; Query searches
 // the catalogue; neither browses it.
 type FindToolArgs struct {
-	Names []string
-	Query string
-	Limit int
+	Names       []string
+	Query       string
+	Limit       int
+	OmitActions map[string]map[string]bool
 }
 
 // ServiceFindTool answers one find_tool call against reg for the given stage and
@@ -28,7 +30,7 @@ type FindToolArgs struct {
 func ServiceFindTool(ctx context.Context, reg *Registry, caps llm.Capabilities, stage string, args FindToolArgs, loaded func(string) bool, embed llm.EmbedFn) (FindToolResult, []llm.ToolDef) {
 	if len(args.Names) > 0 {
 		args.Names = normalizeToolNames(args.Names)
-		schemas := reg.LookupFull(args.Names, caps, stage)
+		schemas := reg.LookupFullFiltered(args.Names, caps, stage, args.OmitActions)
 		found := make(map[string]bool, len(schemas))
 		for _, sc := range schemas {
 			found[sc.Name] = true
@@ -64,7 +66,7 @@ func ServiceFindTool(ctx context.Context, reg *Registry, caps llm.Capabilities, 
 		}
 		var docs []ToolDoc
 		if len(newlyLoaded) > 0 {
-			docs = reg.LookupDocs(newlyLoaded, caps, stage)
+			docs = reg.LookupDocsFiltered(newlyLoaded, caps, stage, args.OmitActions)
 		}
 		out := FindToolResult{Success: true, Loaded: newlyLoaded, AlreadyLoaded: alreadyLoaded, Docs: docs, NotFound: notFound, Unavailable: unavailable}
 		out.Note = reg.didYouMeanNote(notFound)
@@ -134,7 +136,7 @@ func (r *Registry) didYouMeanNote(notFound []string) string {
 	for _, n := range notFound {
 		best, bestDist := "", 4
 		for _, cand := range names {
-			if d := editDistance(n, cand); d < bestDist {
+			if d := stringutil.Levenshtein(n, cand); d < bestDist {
 				best, bestDist = cand, d
 			}
 		}

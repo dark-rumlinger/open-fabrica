@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,8 +28,13 @@ func RejectCrossSite(next http.Handler) http.Handler {
 		}
 		if origin := r.Header.Get("Origin"); origin != "" && origin != "null" {
 			u, err := url.Parse(origin)
-			// A proxy that rewrites Host reports the public name in X-Forwarded-Host.
-			if err != nil || !(strings.EqualFold(u.Host, r.Host) || strings.EqualFold(u.Host, r.Header.Get("X-Forwarded-Host"))) {
+			// A trusted proxy that rewrites Host reports the public name in
+			// X-Forwarded-Host; ignore that header from untrusted peers.
+			forwardedHost := ""
+			if isTrustedProxyIP(net.ParseIP(hostOf(r.RemoteAddr))) {
+				forwardedHost = r.Header.Get("X-Forwarded-Host")
+			}
+			if err != nil || !(strings.EqualFold(u.Host, r.Host) || (forwardedHost != "" && strings.EqualFold(u.Host, forwardedHost))) {
 				http.Error(w, "cross-origin request refused", http.StatusForbidden)
 				return
 			}

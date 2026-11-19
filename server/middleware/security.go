@@ -1,6 +1,9 @@
 package middleware
 
-import "net/http"
+import (
+	"net"
+	"net/http"
+)
 
 // ServerName is the value sent in the `Server:` response header. Mirrors
 // the "Server: nginx" / "Server: Microsoft-IIS/10.0" convention so clients
@@ -24,7 +27,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		// No includeSubDomains: the host here is a customer's own domain, and pinning
 		// every subdomain of it to HTTPS for two years can break their unrelated
 		// plain-HTTP subdomains with no way for them to undo it.
-		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		if r.TLS != nil || (isTrustedProxyIP(net.ParseIP(hostOf(r.RemoteAddr))) && r.Header.Get("X-Forwarded-Proto") == "https") {
 			w.Header().Set("Strict-Transport-Security", "max-age=63072000")
 		}
 		next.ServeHTTP(w, r)

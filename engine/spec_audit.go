@@ -53,7 +53,7 @@ For each checklist item decide whether the code actually delivers it:
 - partial: some named behaviour is missing, stubbed, faked with canned data, or wired to nothing a user can reach.
 - missing: the item's core behaviour is absent.
 
-Behaviour the platform serves from configuration (the sources marked "platform configuration": page head tags, robots.txt, the live sitemap, the schema's constraints and indexes, endpoint routes) is delivered when it is listed there; never ask for it to be hand-written. A page calls an endpoint at the route listed under "endpoint routes", never at the bare endpoint path.
+Behaviour the platform serves from configuration (the sources marked "platform configuration": page head tags, robots.txt, the live sitemap, the schema's constraints and indexes, endpoint routes) is delivered when it is listed there; never ask for it to be hand-written. A page calls an endpoint at the route listed under "endpoint routes", never at the bare endpoint path. Seed rows are inserted into the live database (surfaced in project state row counts), so never ask for a migration or seed file.
 
 Judge only from the code you are shown, and look before you judge: a behaviour is implemented when you can point at the code that does it and the control or route that reaches it. Report a gap only when you can name the specific missing behaviour and the file or page it belongs in. Never report styling preferences, refactors, missing tests, or anything the brief and the item never asked for.
 
@@ -242,7 +242,7 @@ func (w *Worker) runSpecAudit(ctx context.Context, prior []Issue) (issues []Issu
 			return nil, true
 		}
 	}
-	w.specAudits++
+	w.bs().specAudits++
 	all, err := LoadTasks(w.pdb.Reader())
 	if err != nil {
 		return nil, false
@@ -280,36 +280,24 @@ func (w *Worker) runSpecAudit(ctx context.Context, prior []Issue) (issues []Issu
 	}
 	user := specAuditRequest(w.buildBrief(), w.changeRequest(), renderFeaturesForBuild(w.loadPlanOrEmpty(w.run)), review, named, responses, snapText, specAuditSource(w.pdb.Reader(), w.customRobots(), specAuditCodeBudget))
 
-	spec := SessionSpec{
+	verdicts, res, err := runStructuredCall(ctx, w, structuredCallOpts{
 		Stage:         StageReview,
 		System:        specAuditSystem,
-		Seed:          []llm.Message{{Role: llm.RoleUser, Content: user}},
-		MaxIterations: 1,
+		Messages:      []llm.Message{{Role: llm.RoleUser, Content: user}},
+		Schema:        specAuditSchema(),
 		MaxTokens:     16384,
 		Timeout:       5 * time.Minute,
-		// The review stage's default (off); a model's config may turn it on.
 		Thinking:      &reviewThinkingDefault,
 		ThinkingStage: StageReview,
-		Policy:        policyPlan,
 		// A re-audit exists to judge the code again after a repair; a replayed
 		// verdict would only repeat the one the repair was meant to answer.
 		NoReplayCache: true,
-	}
-	sess := w.newStageSession(StageReview)
-	if rp, rerr := sess.resolver.resolve(); rerr == nil && supportsStructuredOutput(rp) {
-		spec.ResponseSchema = specAuditSchema()
-	}
-	res, err := w.runSpec(ctx, sess, spec)
+	}, parseSpecAudit)
 	if err != nil {
-		w.logger.Warn("spec audit call failed, skipping it", "error", err)
+		w.logger.Warn("spec audit failed, skipping it", "error", err)
 		return nil, false
 	}
-	verdicts, err := parseSpecAudit(res.Content)
-	if err != nil {
-		w.logger.Warn("spec audit reply unreadable, skipping it", "error", err)
-		return nil, false
-	}
-	issues = specGapIssues(verdicts, byID, w.specAudits)
+	issues = specGapIssues(verdicts, byID, w.bs().specAudits)
 	w.logger.Info("spec audit", "reviewed", len(review), "gaps", len(issues))
 	if w.run != nil {
 		w.runlog.entry(w.run.ID, RunLogIssue, "spec_audit", map[string]any{"verdicts": verdicts}, res.InputTokens, res.OutputTokens, 0)
@@ -678,13 +666,19 @@ func endpointRoutes(d *sql.DB) string {
 func routeDetail(d *sql.DB, kind, path, sub string) string {
 	switch {
 	case kind == "crud":
-		var table, role, owner, scope string
+		var table, role, owner, scope, lookup string
 		var auth, publicRead, publicWrite bool
-		if d.QueryRow(`SELECT table_name, COALESCE(requires_auth,0), COALESCE(public_read,0), COALESCE(public_write,0), COALESCE(required_role,''), COALESCE(owner_column,''), COALESCE(owner_scope,'')
-			FROM of_api_endpoints WHERE path = ?`, path).Scan(&table, &auth, &publicRead, &publicWrite, &role, &owner, &scope) != nil {
+		if d.QueryRow(`SELECT table_name, COALESCE(requires_auth,0), COALESCE(public_read,0), COALESCE(public_write,0), COALESCE(required_role,''), COALESCE(owner_column,''), COALESCE(owner_scope,''), COALESCE(lookup_column,'')
+			FROM of_api_endpoints WHERE path = ?`, path).Scan(&table, &auth, &publicRead, &publicWrite, &role, &owner, &scope, &lookup) != nil {
 			return ""
 		}
-		return fmt.Sprintf(": table %s, access %s; one row at /api/%s/<id>", table, crudAccess(auth, publicRead, publicWrite, role, owner, scope), strings.Trim(path, "/"))
+		p := strings.Trim(path, "/")
+		resolve := "list at /api/" + p + "; also resolves slug/uuid"
+		if lookup != "" {
+			resolve = fmt.Sprintf("list at /api/%s; also resolves slug/uuid or %s", p, lookup)
+		}
+		return fmt.Sprintf(": table %s, access %s; one row at /api/%s/<id> (%s)",
+			table, crudAccess(auth, publicRead, publicWrite, role, owner, scope), p, resolve)
 	case kind == "upload":
 		var table, types string
 		var maxMB int

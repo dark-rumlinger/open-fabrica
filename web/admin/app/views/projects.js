@@ -21,12 +21,10 @@ export const renderProjects = defineView((ctx, container) => {
 
   const header = pageHeader({
     title: t('nav.projects'),
-    actions: state.isAdmin()
-      ? [
-          { label: t('projects.import'), iconName: 'upload', kind: 'secondary', onClick: () => showImportModal() },
-          { label: t('nav.newProject'), iconName: 'plus', onClick: () => navigate('/new') },
-        ]
-      : [],
+    actions: [
+      { label: t('projects.import'), iconName: 'upload', kind: 'secondary', onClick: () => showImportModal() },
+      { label: t('nav.newProject'), iconName: 'plus', onClick: () => navigate('/new') },
+    ],
   });
   const listContainer = pageBody();
 
@@ -88,7 +86,7 @@ export const renderProjects = defineView((ctx, container) => {
         iconName: 'globe',
         title: t('projects.empty.title'),
         description: t('projects.empty.description'),
-        action: state.isAdmin() ? { label: t('nav.newProject'), onClick: () => navigate('/new') } : null,
+        action: { label: t('nav.newProject'), onClick: () => navigate('/new') },
       }));
       return;
     }
@@ -132,22 +130,20 @@ export const renderProjects = defineView((ctx, container) => {
         ]),
         h('td', {}, [
           h('div', { className: 'table__actions' }, [
-            ...(state.isAdmin() ? [
-              h('button', {
-                className: 'btn btn--ghost btn--sm',
-                title: t('projects.copy'),
-                'aria-label': t('projects.copyNamed', { name: project.name }),
-                onClick: (e) => { e.stopPropagation(); showCopyModal(project); },
-                innerHTML: icon('copy'),
-              }),
-              h('button', {
-                className: 'btn btn--ghost btn--sm',
-                title: t('projects.delete'),
-                'aria-label': t('projects.deleteNamed', { name: project.name }),
-                onClick: (e) => { e.stopPropagation(); confirmDelete(project); },
-                innerHTML: icon('trash'),
-              }),
-            ] : []),
+            h('button', {
+              className: 'btn btn--ghost btn--sm',
+              title: t('projects.copy'),
+              'aria-label': t('projects.copyNamed', { name: project.name }),
+              onClick: (e) => { e.stopPropagation(); showCopyModal(project); },
+              innerHTML: icon('copy'),
+            }),
+            h('button', {
+              className: 'btn btn--ghost btn--sm',
+              title: t('projects.delete'),
+              'aria-label': t('projects.deleteNamed', { name: project.name }),
+              onClick: (e) => { e.stopPropagation(); confirmDelete(project); },
+              innerHTML: icon('trash'),
+            }),
           ]),
         ]),
       ]);
@@ -162,7 +158,7 @@ export const renderProjects = defineView((ctx, container) => {
             h('th', {}, t('projects.col.domain')),
             h('th', {}, t('projects.col.phase')),
             h('th', {}, t('projects.col.site')),
-            h('th', {}, state.isAdmin() ? t('projects.col.actions') : ''),
+            h('th', {}, t('projects.col.actions')),
           ]),
         ]),
         h('tbody', {}, rows),

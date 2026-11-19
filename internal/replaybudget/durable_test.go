@@ -17,6 +17,7 @@ const flowBudgetDDL = `CREATE TABLE IF NOT EXISTS of_flow_budget (
     partial_depth INTEGER NOT NULL DEFAULT 0,
     stall_count   INTEGER NOT NULL DEFAULT 0,
     red           INTEGER NOT NULL DEFAULT 0,
+    clean_green   INTEGER NOT NULL DEFAULT 0,
     updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 )`
 
@@ -102,5 +103,41 @@ func TestDurableStallsAndGreenKeepsReplays(t *testing.T) {
 	}
 	if got := Left(run); got != Max-2 {
 		t.Fatalf("the replays stay spent after a green: left = %d, want %d", got, Max-2)
+	}
+}
+
+func TestCleanGreenDurableAndInMemory(t *testing.T) {
+	db := openBudgetDB(t, filepath.Join(t.TempDir(), "p.db"))
+	defer db.Close()
+	scopes := []Scope{
+		{DB: db, ProjectID: 1, RunID: "run_cg"},
+		{ProjectID: 99123},
+	}
+	for _, s := range scopes {
+		if CleanGreen(s) {
+			t.Fatalf("CleanGreen(%+v) = true initially, want false", s)
+		}
+		Observe(s, 0, 0, false) // partial green must not mark full suite clean
+		if CleanGreen(s) {
+			t.Fatalf("CleanGreen(%+v) = true after partial green, want false", s)
+		}
+		Observe(s, 0, 0, true) // full green sets clean-green
+		if !CleanGreen(s) {
+			t.Fatalf("CleanGreen(%+v) = false after full green, want true", s)
+		}
+		MarkDirty(s)
+		if CleanGreen(s) {
+			t.Fatalf("CleanGreen(%+v) = true after MarkDirty, want false", s)
+		}
+		Observe(s, 0, 0, true)
+		Observe(s, 1, 1, true) // red clears clean-green
+		if CleanGreen(s) {
+			t.Fatalf("CleanGreen(%+v) = true after red replay, want false", s)
+		}
+		Observe(s, 0, 0, true)
+		ResetStalls(s)
+		if CleanGreen(s) {
+			t.Fatalf("CleanGreen(%+v) = true after ResetStalls, want false", s)
+		}
 	}
 }

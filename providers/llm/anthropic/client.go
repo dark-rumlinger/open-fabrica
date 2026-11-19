@@ -304,27 +304,9 @@ func (c *Client) buildRequestBody(req llm.CompletionRequest, stream bool) map[st
 	// everything up to here from cache. The Cacheable user messages share what's left,
 	// stamped on only the LAST few (a later breakpoint's prefix already covers earlier
 	// ones). Exceeding 4 is a hard API error, so this is a correctness guard.
-	const maxCacheBreakpoints = 4
-	baseBreakpoints := 0
-	if req.CacheSystem && req.System != "" {
-		baseBreakpoints++ // system block
-	}
-	if req.CacheSystem && req.ResponseSchema == nil && len(req.Tools) > 0 {
-		baseBreakpoints++ // last-tool block
-	}
-	stampFinalMessage := req.CacheSystem && len(req.Messages) > 0
-	if stampFinalMessage {
-		baseBreakpoints++ // final-message block (stamped after the message loop)
-	}
-	userCacheBudget := maxCacheBreakpoints - baseBreakpoints
-	// Indices (into req.Messages) of the Cacheable user messages we will stamp: the
-	// last userCacheBudget of them. The final message is excluded (via the prefix
-	// slice); the reserved tail breakpoint covers it, so counting it here would
-	// waste a slot.
-	candidates := req.Messages
-	if stampFinalMessage {
-		candidates = req.Messages[:len(req.Messages)-1]
-	}
+	// Anthropic reserves a breakpoint for the last-tool block (reserveTool=true); the
+	// Cacheable user messages share whatever the system/tool/final reservations leave.
+	candidates, userCacheBudget, stampFinalMessage := llm.CacheBreakpointBudget(req, true)
 	cacheableUserIdx := llm.CacheBreakpointIndices(candidates, userCacheBudget)
 
 	// Convert messages (skip system role since we handle it above)
@@ -540,7 +522,6 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 
 	err := llm.ScanSSEData(body, c.name, func(data string) error {
 		if data == "[DONE]" {
-			callback(llm.StreamChunk{Done: true, StopReason: stopReason, Usage: usage})
 			return io.EOF
 		}
 
@@ -621,7 +602,6 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 			}
 
 		case "message_stop":
-			callback(llm.StreamChunk{Done: true, StopReason: stopReason, Usage: usage})
 			return io.EOF
 
 		case "error":
@@ -639,7 +619,8 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 		return err
 	}
 
-	// If we got here without a message_stop, send done anyway
+	// The one terminal chunk: sent here whether the stream ended on message_stop,
+	// [DONE] or a plain EOF.
 	callback(llm.StreamChunk{Done: true, StopReason: stopReason, Usage: usage})
 	return nil
 }

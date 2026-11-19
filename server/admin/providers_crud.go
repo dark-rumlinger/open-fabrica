@@ -76,13 +76,13 @@ func (h *ProvidersHandler) Create(w http.ResponseWriter, r *http.Request) {
 		provider.Kind = kind
 	}
 	if req.ModelsURL != "" {
-		if _, err := h.deps.DB.ExecWrite("UPDATE providers SET models_url = ? WHERE id = ?", req.ModelsURL, provider.ID); err != nil {
+		if err := models.SetProviderModelsURL(h.deps.DB.DB, provider.ID, req.ModelsURL); err != nil {
 			h.deps.Logger.Error("failed to set models_url", "error", err)
 		}
 		provider.ModelsURL = req.ModelsURL
 	}
 	if configJSON != "" {
-		if _, err := h.deps.DB.ExecWrite("UPDATE providers SET config = ? WHERE id = ?", configJSON, provider.ID); err != nil {
+		if err := models.SetProviderConfig(h.deps.DB.DB, provider.ID, configJSON); err != nil {
 			h.deps.Logger.Error("failed to set provider config", "error", err)
 		}
 		provider.Config = configJSON
@@ -163,7 +163,7 @@ func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, cErr.Error())
 			return
 		}
-		if _, cErr := h.deps.DB.ExecWrite("UPDATE providers SET config = ? WHERE id = ?", configJSON, providerID); cErr != nil {
+		if cErr := models.SetProviderConfig(h.deps.DB.DB, providerID, configJSON); cErr != nil {
 			h.deps.serverError(w, "failed to update provider config", cErr)
 			return
 		}

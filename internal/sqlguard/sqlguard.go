@@ -5,8 +5,34 @@ package sqlguard
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+var systemTableRef = regexp.MustCompile(`(?i)\bof_\w*`)
+
+// CheckReadOnlySelect enforces "single SELECT/VALUES (or WITH ... SELECT), no
+// of_* system tables" on read-only SQL surfaces (public query endpoint, JS
+// handler ctx.query). Returns the trimmed query (trailing ';' stripped) and a
+// non-empty rejection message when invalid.
+func CheckReadOnlySelect(query string) (string, string) {
+	trimmed := strings.TrimRight(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(query), ";")), " \t\r\n")
+	if trimmed == "" {
+		return trimmed, "sql is required"
+	}
+	switch EffectiveVerb(trimmed) {
+	case "SELECT", "VALUES":
+	default:
+		return trimmed, "only read-only statements are supported: SELECT, VALUES, or a WITH ... SELECT"
+	}
+	if HasStackedStatements(trimmed) {
+		return trimmed, "multiple SQL statements are not allowed"
+	}
+	if m := systemTableRef.FindString(trimmed); m != "" {
+		return trimmed, fmt.Sprintf("cannot reference system table: %s", strings.ToLower(m))
+	}
+	return trimmed, ""
+}
 
 // CheckAction validates one stored SQL action (a trigger's run_sql, a job's run_sql, a
 // schedule's sql action) the same way for every caller: present, free of {{...}}

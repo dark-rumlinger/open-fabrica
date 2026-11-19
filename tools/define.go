@@ -62,6 +62,9 @@ type Tool struct {
 	RequestsPause      func(action string, args map[string]any) bool
 	MaxResult          int
 	FullResultInEvents bool
+	// PreservesFlows marks bookkeeping/self-managing tools whose writes do not
+	// alter the app or of_test.js, so they do not dirty a cached flow result.
+	PreservesFlows     bool
 	RequiresCapability string
 
 	// MaxDuration overrides the caller-supplied tool-execution timeout. Zero
@@ -248,6 +251,7 @@ func defineInto(reg *Registry, t Tool, source string, report func(error)) {
 		Summarize:          t.Summarize,
 		MaxResult:          t.MaxResult,
 		FullResultInEvents: t.FullResultInEvents,
+		PreservesFlows:     t.PreservesFlows,
 		RequestsPause:      t.RequestsPause,
 		RequiresCapability: t.RequiresCapability,
 		MaxDuration:        t.MaxDuration,
@@ -345,6 +349,7 @@ func mergeParam(existing, incoming Param) Param {
 		out.Max = incoming.Max
 		out.HasMax = true
 	}
+	out.Sensitive = out.Sensitive || incoming.Sensitive
 	if len(incoming.Enum) > 0 {
 		seen := make(map[string]bool, len(out.Enum))
 		for _, e := range out.Enum {
@@ -531,4 +536,65 @@ func clarifyActionEnum(r *Result) *Result {
 		r.Error += " for THIS action - the tool-level schema advertises the union of every action's values; this action accepts only the values listed here."
 	}
 	return r
+}
+
+// WithoutActions returns a shallow copy of d with any named actions (and params
+// exclusive to those actions) removed from the schema and dispatch map. Returns d
+// unchanged when omit is empty or removes nothing.
+func (d *ToolDef) WithoutActions(omit map[string]bool) *ToolDef {
+	if d == nil || len(omit) == 0 || len(d.ActionMeta) == 0 {
+		return d
+	}
+	var keptNames []string
+	for _, name := range d.actionNames() {
+		if !omit[name] {
+			keptNames = append(keptNames, name)
+		}
+	}
+	if len(keptNames) == len(d.ActionMeta) {
+		return d
+	}
+	keptMeta := make(map[string]ActionMeta, len(keptNames))
+	keptActions := make(map[string]ActionHandler, len(keptNames))
+	keptReadOnly := make(map[string]bool)
+	mergedParamSet := map[string]Param{}
+	var mergedOrder []string
+	for _, name := range keptNames {
+		meta := d.ActionMeta[name]
+		keptMeta[name] = meta
+		if h, ok := d.Actions[name]; ok {
+			keptActions[name] = h
+		}
+		if d.ReadOnlyActions[name] || meta.ReadOnly {
+			keptReadOnly[name] = true
+		}
+		for _, p := range meta.Params {
+			if existing, seen := mergedParamSet[p.Name]; seen {
+				mergedParamSet[p.Name] = mergeParam(existing, p)
+			} else {
+				mergedParamSet[p.Name] = p
+				mergedOrder = append(mergedOrder, p.Name)
+			}
+		}
+	}
+	for name, p := range mergedParamSet {
+		mergedParamSet[name] = reconcileUnionParam(p, keptNames, keptMeta)
+	}
+	finalParams := make([]Param, 0, 1+len(mergedOrder))
+	finalParams = append(finalParams, Param{
+		Name:        "action",
+		Type:        "string",
+		Required:    true,
+		Description: actionEnumDescription(d.Name, keptMeta, keptNames),
+		Enum:        keptNames,
+	})
+	for _, name := range mergedOrder {
+		finalParams = append(finalParams, mergedParamSet[name])
+	}
+	cp := *d
+	cp.Params = finalParams
+	cp.ActionMeta = keptMeta
+	cp.Actions = keptActions
+	cp.ReadOnlyActions = keptReadOnly
+	return &cp
 }

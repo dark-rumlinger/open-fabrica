@@ -20,8 +20,9 @@ const (
 
 func init() {
 	tools.Define(tools.Tool{
-		Name:     "manage_memory",
-		Category: "project",
+		Name:           "manage_memory",
+		Category:       "project",
+		PreservesFlows: true,
 		// list actions return full rows; the 3000-byte default would cut them mid-JSON.
 		MaxResult: 8000,
 		OneLiner:  "Manage persistent key-value memory the engine reads across owner-chat sessions.",

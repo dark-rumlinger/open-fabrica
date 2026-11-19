@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"openfabrica/db/models"
+	"openfabrica/providers/llm"
 )
 
 func (w *Worker) handleCommand(ctx context.Context, cmd Command) {
@@ -39,7 +40,7 @@ func (w *Worker) handleCommand(ctx context.Context, cmd Command) {
 		// (model-guided from the snapshot, not a mechanical plan diff).
 		desc, _ := cmd.Payload["description"].(string)
 		w.chatThread = nil
-		run, err := createRun(w.pdb, RunKindUpdate, StagePlan, desc)
+		run, err := createRun(w.pdb, RunKindUpdate, StagePlan, desc, w.deps.BuildVersion, w.deps.BuildBuiltAt)
 		if err != nil {
 			w.logger.Error("create update run failed", "error", err)
 			return
@@ -55,17 +56,17 @@ func (w *Worker) handleCommand(ctx context.Context, cmd Command) {
 
 	case CommandChat:
 		msg, _ := cmd.Payload["message"].(string)
-		if strings.TrimSpace(msg) == "" {
+		imgs, _ := cmd.Payload["images"].([]llm.MessageImage)
+		if strings.TrimSpace(msg) == "" && len(imgs) == 0 {
 			return
 		}
 		// The engine is the one agent the owner talks to. Mid-build messages normally
 		// reach the inbox (Send); one that raced the state flip lands here and joins it.
 		// Every other state - live, paused, idle, error - answers with a LIVE wake.
-		if w.State() == StateBuilding {
-			w.pushOwnerInbox(msg)
+		if w.State() == StateBuilding && w.offerOwnerInbox(msg) {
 			return
 		}
-		w.handleChatWake(ctx, msg)
+		w.handleChatWakeWithImages(ctx, msg, imgs)
 
 	case CommandScheduledTask:
 		w.handleScheduledTask(ctx, cmd)

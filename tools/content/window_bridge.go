@@ -177,12 +177,15 @@ func deadWindowCandidates(body string) []string {
 // storedWindowProducers unions `window.<name> =` across every stored inline artifact
 // outside bodies: pages, layouts and components too, not just JS modules. Scanned as
 // wide as possible because a missed producer reads as "assigned nowhere".
-func storedWindowProducers(ctx *tools.ToolContext, bodies map[string]string) map[string]bool {
+func storedWindowProducers(ctx *tools.ToolContext, bodies map[string]string) (map[string]bool, error) {
 	out := map[string]bool{}
 	if ctx == nil || ctx.DB == nil {
-		return out
+		return out, nil
 	}
-	arts, _ := store.ArtifactList(ctx.DB, store.ArtifactListOpts{IncludeBody: true})
+	arts, err := store.ArtifactList(ctx.DB, store.ArtifactListOpts{IncludeBody: true})
+	if err != nil {
+		return nil, fmt.Errorf("list project artifacts: %w", err)
+	}
 	for _, a := range arts {
 		if a.Storage != store.StorageInline {
 			continue
@@ -196,7 +199,7 @@ func storedWindowProducers(ctx *tools.ToolContext, bodies map[string]string) map
 			out[name] = true
 		}
 	}
-	return out
+	return out, nil
 }
 
 // windowProducers adds every in-flight body's own assignments to the stored set.
@@ -226,7 +229,10 @@ func windowDeadGlobalRejection(ctx *tools.ToolContext, path, oldBody string, bod
 	if len(cands) == 0 {
 		return nil
 	}
-	stored := storedWindowProducers(ctx, bodies)
+	stored, err := storedWindowProducers(ctx, bodies)
+	if err != nil {
+		return projectUnreadable(err)
+	}
 	produced := windowProducers(bodies, stored)
 
 	var dead []string

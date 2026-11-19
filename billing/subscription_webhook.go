@@ -30,66 +30,64 @@ func subscriptionEventFor(status string) events.EventType {
 	return ""
 }
 
-// applySubscriptionChange writes a subscription change and raises its event.
-// It reports false when no local row matches the provider id.
+// applySubscriptionChange writes a subscription change inside tx and reports
+// whether a local row matched and whether a lifecycle event should be raised
+// after commit.
 //
 // An event is raised on a status transition, or on a renewal invoice, so the
 // first payment (checkout completion plus its invoice) raises it once.
-func applySubscriptionChange(env WebhookEnv, ch subscriptionChange, periodEnd func() (time.Time, bool)) (bool, error) {
+func applySubscriptionChange(tx *sql.Tx, ch subscriptionChange, periodEnd func() (time.Time, bool)) (matched, shouldPublish bool, err error) {
 	if ch.sessionID != "" {
-		if _, err := env.DB.Exec(
+		if _, err := tx.Exec(
 			"UPDATE of_subscriptions SET external_id = ?, updated_at = CURRENT_TIMESTAMP WHERE external_id = ? AND status != 'canceled'",
 			ch.externalID, ch.sessionID,
 		); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 
 	var current string
-	err := env.DB.QueryRow("SELECT status FROM of_subscriptions WHERE external_id = ?", ch.externalID).Scan(&current)
+	err = tx.QueryRow("SELECT status FROM of_subscriptions WHERE external_id = ?", ch.externalID).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	// Canceled is terminal: a replayed or out-of-order event must not revive it.
 	if current == "canceled" {
-		return true, nil
+		return true, false, nil
 	}
 
 	changed := current != ch.status
 	if changed {
-		if _, err := env.DB.Exec(
+		if _, err := tx.Exec(
 			"UPDATE of_subscriptions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE external_id = ?",
 			ch.status, ch.externalID,
 		); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 	if ch.status == "canceled" {
-		if _, err := env.DB.Exec(
+		if _, err := tx.Exec(
 			"UPDATE of_subscriptions SET canceled_at = CURRENT_TIMESTAMP WHERE external_id = ? AND canceled_at IS NULL",
 			ch.externalID,
 		); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 	if ch.renewal {
 		if end, ok := periodEnd(); ok {
-			if _, err := env.DB.Exec(
+			if _, err := tx.Exec(
 				"UPDATE of_subscriptions SET current_period_start = CURRENT_TIMESTAMP, current_period_end = ? WHERE external_id = ?",
 				end, ch.externalID,
 			); err != nil {
-				return false, err
+				return false, false, err
 			}
 		}
 	}
 
-	if changed || ch.renewal {
-		publishSubscriptionEvent(env, ch.externalID, ch.status)
-	}
-	return true, nil
+	return true, changed || ch.renewal, nil
 }
 
 // publishSubscriptionEvent raises payment.completed / payment.failed for a

@@ -29,7 +29,10 @@ func tryNormalizeSpecifiers(ctx *tools.ToolContext, kind, path, prevBody, body s
 	if kind != "file" || !isJSModulePath(path) {
 		return "", nil, false
 	}
-	bodies := projectJSBodies(ctx, path, body)
+	bodies, err := projectJSBodies(ctx, path, body)
+	if err != nil {
+		return "", nil, false
+	}
 	rewritten, rws := analysis.RewriteRelativeSpecifiers(path, body, analysis.ModuleSpecifierIndex(bodies))
 	if len(rws) == 0 || rewritten == body {
 		return "", nil, false

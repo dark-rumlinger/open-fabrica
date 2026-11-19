@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"openfabrica/security"
 	"openfabrica/store"
 	"openfabrica/tools"
 )
@@ -68,7 +69,7 @@ func runUpdate(ctx *tools.ToolContext, exec sqlExec, physicalName string, data m
 		}
 		if secureCols != nil {
 			if kind, isSecure := secureCols[col]; isSecure {
-				processed, perr := store.ProcessSecureValue(kind, val, ctx.Encryptor)
+				processed, perr := security.ProcessSecureValue(kind, val, ctx.Encryptor)
 				if perr != nil {
 					return 0, fmt.Errorf("processing secure column %s: %w", col, perr)
 				}

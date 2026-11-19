@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"openfabrica/db"
 	"openfabrica/events"
+	"openfabrica/internal/actionexec"
 	"openfabrica/internal/cron"
 	"openfabrica/internal/funcexec"
 	"openfabrica/internal/sqlguard"
@@ -51,6 +53,79 @@ func (w *Worker) handleScheduledTask(ctx context.Context, cmd Command) {
 var nativeSQLVerbs = []string{"SELECT", "INSERT", "UPDATE", "DELETE"}
 
 func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int) {
+	actionType, result, duration, actionErr := runNativeActionSync(w.deps, w.completeDeps(), w.pdb, w.projectID, w.logger, actionJSON, taskID)
+	if actionErr != nil {
+		w.logger.Error("native action failed", "type", actionType, "error", actionErr, "duration", duration)
+		w.finalizeTaskRun(runID, taskID, false, actionErr.Error())
+		return
+	}
+
+	w.logger.Info("native action completed", "type", actionType, "result", result, "duration", duration)
+	if w.run != nil {
+		w.runlog.entry(w.run.ID, RunLogMessage, "scheduled_task_native",
+			map[string]string{"text": result, "action": actionType}, 0, 0, duration.Milliseconds())
+	}
+	w.finalizeTaskRun(runID, taskID, true, "")
+}
+
+// runScheduleNow executes an enabled scheduled task synchronously when it has a
+// native_action, or queues it for the next tick when it is prompt-backed.
+func runScheduleNow(deps *Deps, cdeps actionexec.CompleteDeps, pdb *db.ProjectDB, projectID int, logger *slog.Logger, taskID int64) (map[string]any, error) {
+	var enabled int
+	var nativeAction, prompt string
+	err := pdb.Reader().QueryRow(
+		"SELECT is_enabled, COALESCE(native_action,''), COALESCE(prompt,'') FROM of_scheduled_tasks WHERE id = ?",
+		taskID,
+	).Scan(&enabled, &nativeAction, &prompt)
+	if err == sql.ErrNoRows || enabled == 0 {
+		return nil, fmt.Errorf("task not found or not enabled")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("loading task %d: %w", taskID, err)
+	}
+	if nativeAction == "" {
+		if _, err := pdb.ExecWrite(
+			"UPDATE of_scheduled_tasks SET next_run = CURRENT_TIMESTAMP WHERE id = ? AND is_enabled = 1",
+			taskID,
+		); err != nil {
+			return nil, fmt.Errorf("triggering task: %w", err)
+		}
+		return map[string]any{
+			"id":      taskID,
+			"status":  "scheduled",
+			"message": "LLM-backed task scheduled to run on next tick (~30 seconds)",
+		}, nil
+	}
+
+	var runID int64
+	if res, err := pdb.ExecWrite("INSERT INTO of_task_runs (task_id, status) VALUES (?, 'running')", taskID); err == nil {
+		runID, _ = res.LastInsertId()
+	}
+	actionType, result, duration, actionErr := runNativeActionSync(deps, cdeps, pdb, projectID, logger, nativeAction, int(taskID))
+	_, _ = pdb.ExecWrite("UPDATE of_scheduled_tasks SET last_run = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", taskID)
+	if actionErr != nil {
+		if runID > 0 {
+			_, _ = pdb.ExecWrite(
+				"UPDATE of_task_runs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+				actionErr.Error(), runID)
+		}
+		_, _ = pdb.ExecWrite("UPDATE of_scheduled_tasks SET error_count = error_count + 1 WHERE id = ?", taskID)
+		return nil, fmt.Errorf("scheduled action %s failed: %w", actionType, actionErr)
+	}
+	if runID > 0 {
+		_, _ = pdb.ExecWrite("UPDATE of_task_runs SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?", runID)
+	}
+	_, _ = pdb.ExecWrite("UPDATE of_scheduled_tasks SET run_count = run_count + 1 WHERE id = ?", taskID)
+	return map[string]any{
+		"id":          taskID,
+		"status":      "completed",
+		"action":      actionType,
+		"result":      result,
+		"duration_ms": duration.Milliseconds(),
+	}, nil
+}
+
+func runNativeActionSync(deps *Deps, cdeps actionexec.CompleteDeps, pdb *db.ProjectDB, projectID int, logger *slog.Logger, actionJSON string, taskID int) (string, string, time.Duration, error) {
 	start := time.Now()
 
 	var action struct {
@@ -63,9 +138,7 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 		EndpointPath string `json:"endpoint_path"`
 	}
 	if err := json.Unmarshal([]byte(actionJSON), &action); err != nil {
-		w.logger.Error("native action: invalid JSON", "error", err)
-		w.finalizeTaskRun(runID, taskID, false, fmt.Sprintf("invalid native_action JSON: %v", err))
-		return
+		return "", "", time.Since(start), fmt.Errorf("invalid native_action JSON: %w", err)
 	}
 
 	var result string
@@ -86,7 +159,7 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 			break
 		}
 		query := fmt.Sprintf("DELETE FROM %s WHERE %s < datetime('now', ?)", security.QuoteIdent(action.Table), security.QuoteIdent(col))
-		res, err := w.pdb.ExecWrite(query, "-"+action.Age)
+		res, err := pdb.ExecWrite(query, "-"+action.Age)
 		if err != nil {
 			actionErr = fmt.Errorf("delete_stale: %w", err)
 			break
@@ -100,7 +173,7 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 			break
 		}
 		var count int
-		err := w.pdb.Reader().QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", security.QuoteIdent(action.Table))).Scan(&count)
+		err := pdb.Reader().QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", security.QuoteIdent(action.Table))).Scan(&count)
 		if err != nil {
 			actionErr = fmt.Errorf("count_rows: %w", err)
 			break
@@ -112,7 +185,7 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 			actionErr = fmt.Errorf("truncate requires a valid table")
 			break
 		}
-		res, err := w.pdb.ExecWrite(fmt.Sprintf("DELETE FROM %s", security.QuoteIdent(action.Table)))
+		res, err := pdb.ExecWrite(fmt.Sprintf("DELETE FROM %s", security.QuoteIdent(action.Table)))
 		if err != nil {
 			actionErr = fmt.Errorf("truncate: %w", err)
 			break
@@ -130,7 +203,7 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 		}
 		switch verb {
 		case "SELECT":
-			rows, err := w.pdb.Reader().Query(q, action.Params...)
+			rows, err := pdb.Reader().Query(q, action.Params...)
 			if err != nil {
 				actionErr = fmt.Errorf("sql query: %w", err)
 				break
@@ -147,7 +220,7 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 			}
 			result = fmt.Sprintf("query returned %d rows (%d columns)", count, len(cols))
 		case "DELETE", "UPDATE", "INSERT":
-			res, err := w.pdb.ExecWrite(q, action.Params...)
+			res, err := pdb.ExecWrite(q, action.Params...)
 			if err != nil {
 				actionErr = fmt.Errorf("sql exec: %w", err)
 				break
@@ -177,16 +250,24 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 		}
 		triggerCfg.Payload["source"] = "scheduler"
 		triggerCfg.Payload["task_id"] = taskID
-		w.publishEvent(events.EventType(triggerCfg.EventType), triggerCfg.Payload)
+		if deps != nil && deps.Bus != nil {
+			deps.Bus.Publish(events.Event{
+				Type:      events.EventType(triggerCfg.EventType),
+				ProjectID: projectID,
+				Payload:   triggerCfg.Payload,
+			})
+		}
 		result = fmt.Sprintf("published event '%s'", triggerCfg.EventType)
 		// The event type is a free string, so a typo publishes an event nobody
 		// matches and the task "succeeds" doing nothing. Make that visible: if
 		// no enabled trigger listens on this name, say so in the task result
 		// and the log.
-		if warn := noListenerWarning(w.pdb, triggerCfg.EventType); warn != "" {
+		if warn := noListenerWarning(pdb, triggerCfg.EventType); warn != "" {
 			result += " - " + warn
-			w.logger.Warn("scheduled trigger_event fired with no listeners",
-				"event_type", triggerCfg.EventType, "task_id", taskID)
+			if logger != nil {
+				logger.Warn("scheduled trigger_event fired with no listeners",
+					"event_type", triggerCfg.EventType, "task_id", taskID)
+			}
 		}
 
 	case "run_function":
@@ -194,25 +275,13 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 			actionErr = fmt.Errorf("run_function requires endpoint_path")
 			break
 		}
-		result, actionErr = w.runScheduledFunction(action.EndpointPath, taskID)
+		result, actionErr = runScheduledFunction(cdeps, pdb, projectID, action.EndpointPath, taskID)
 
 	default:
 		actionErr = fmt.Errorf("unknown native action type: %s", action.Type)
 	}
 
-	duration := time.Since(start)
-	if actionErr != nil {
-		w.logger.Error("native action failed", "type", action.Type, "error", actionErr, "duration", duration)
-		w.finalizeTaskRun(runID, taskID, false, actionErr.Error())
-		return
-	}
-
-	w.logger.Info("native action completed", "type", action.Type, "result", result, "duration", duration)
-	if w.run != nil {
-		w.runlog.entry(w.run.ID, RunLogMessage, "scheduled_task_native",
-			map[string]string{"text": result, "action": action.Type}, 0, 0, duration.Milliseconds())
-	}
-	w.finalizeTaskRun(runID, taskID, true, "")
+	return action.Type, result, time.Since(start), actionErr
 }
 
 // runScheduledFunction invokes a manage_function handler as a scheduled native action.
@@ -221,10 +290,10 @@ func (w *Worker) executeNativeAction(actionJSON string, runID int64, taskID int)
 // policy the HTTP endpoint and run_function trigger use - so cron-driven function logic
 // can't drift from the other two call paths. Scheduler-flavoured: req.body carries the
 // source + task id, no HTTP caller.
-func (w *Worker) runScheduledFunction(endpointPath string, taskID int) (string, error) {
+func runScheduledFunction(cdeps actionexec.CompleteDeps, pdb *db.ProjectDB, projectID int, endpointPath string, taskID int) (string, error) {
 	var code, secrets string
 	var timeoutMS int
-	err := w.pdb.Reader().QueryRow(
+	err := pdb.Reader().QueryRow(
 		"SELECT code, COALESCE(secrets,''), COALESCE(timeout_ms,0) FROM of_function_endpoints WHERE path = ?",
 		endpointPath,
 	).Scan(&code, &secrets, &timeoutMS)
@@ -247,7 +316,7 @@ func (w *Worker) runScheduledFunction(endpointPath string, taskID int) (string, 
 		"body":    map[string]any{"source": "scheduler", "task_id": taskID},
 		"user":    nil,
 	}
-	rt := funcexec.NewRuntime(w.projectID, w.pdb.Reader(), w.pdb.Writer(), w.completeDeps())
+	rt := funcexec.NewRuntime(projectID, pdb.Reader(), pdb.Writer(), cdeps)
 	resp, err := funcexec.Execute(rt, spec, req)
 	if err != nil {
 		return "", err
@@ -323,9 +392,15 @@ func (w *Worker) executeScheduledTask(ctx context.Context, prompt string, runID 
 // LIVE prompt and tool set, with no carried chat thread.
 func (w *Worker) scheduledTaskSpec(prompt string) SessionSpec {
 	spec := DefaultSpec(StageLive)
+	// Unattended cron jobs keep a tighter turn cap than interactive owner chat.
+	spec.MaxIterations = 28
 	spec.Guard = &RepeatGuard{}
 	// Must match liveSystemPrompt's preloaded set, which it advertises as loaded.
 	spec.PreloadTools = livePreloadTools()
+	if !w.userFlowsEnabled() {
+		spec.OmitToolActions = testingOmitFlows
+		spec.ExtraHiddenGuides = map[string]bool{"user_flows": true}
+	}
 	spec.System = w.liveSystemPrompt()
 	spec.Seed = seed{
 		owner: w.ownerContext() + w.ownerMemoryBlock(),
@@ -540,6 +615,15 @@ func (e *Engine) initializeNextRunForProject(pdb *db.ProjectDB) {
 	}
 }
 
+// advanceSchedule writes a task's post-fire schedule state. A failed write
+// leaves next_run in the past, so the task would fire again on every tick:
+// that is reported as an error, never dropped.
+func (e *Engine) advanceSchedule(pdb *db.ProjectDB, projectID, taskID int, query string, args ...any) {
+	if _, err := pdb.ExecWrite(query, args...); err != nil {
+		e.logger.Error("scheduler: could not advance the task schedule, it will fire again next tick", "project_id", projectID, "task_id", taskID, "error", err)
+	}
+}
+
 func (e *Engine) checkDueTasks() {
 	now := time.Now()
 	e.forEachRunningProject(func(pdb *db.ProjectDB, projectID int) {
@@ -626,14 +710,14 @@ func (e *Engine) checkDueTasksForProject(pdb *db.ProjectDB, projectID int, now t
 			// Can't compute the next fire: disable rather than re-fire with
 			// a garbage time (or spin every tick).
 			e.logger.Error("scheduler: invalid cron expression, disabling task", "project_id", projectID, "task_id", t.id, "cron", t.cronExpr.String, "error", err)
-			_, _ = pdb.ExecWrite("UPDATE of_scheduled_tasks SET is_enabled = 0, last_run = ? WHERE id = ?", now, t.id)
+			e.advanceSchedule(pdb, projectID, t.id, "UPDATE of_scheduled_tasks SET is_enabled = 0, last_run = ? WHERE id = ?", now, t.id)
 			continue
 		}
 		if !ok {
 			// One-shot task (no schedule left): disable after firing once.
-			_, _ = pdb.ExecWrite("UPDATE of_scheduled_tasks SET is_enabled = 0, last_run = ? WHERE id = ?", now, t.id)
+			e.advanceSchedule(pdb, projectID, t.id, "UPDATE of_scheduled_tasks SET is_enabled = 0, last_run = ? WHERE id = ?", now, t.id)
 			continue
 		}
-		_, _ = pdb.ExecWrite("UPDATE of_scheduled_tasks SET last_run = ?, next_run = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", now, nextRun, t.id)
+		e.advanceSchedule(pdb, projectID, t.id, "UPDATE of_scheduled_tasks SET last_run = ?, next_run = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", now, nextRun, t.id)
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"openfabrica/internal/dbh"
@@ -26,13 +25,15 @@ type Hooks struct {
 	db        dbh.Handle // the project's database (writes go to its write pool)
 	jwt       *security.JWTManager
 	enc       *security.Encryptor // opens webhook signing secrets
+	schedule  ScheduleRunner      // optional: runs scheduled tasks during flow replays
 }
 
 // New returns the hooks for a project. db must accept writes (seeded users); jwt
 // may be nil, in which case seeded users cannot start signed in; enc may be nil,
-// in which case a webhook step cannot sign (it reports why).
-func New(projectID int, db dbh.Handle, jwt *security.JWTManager, enc *security.Encryptor) *Hooks {
-	return &Hooks{projectID: projectID, db: db, jwt: jwt, enc: enc}
+// in which case a webhook step cannot sign (it reports why); schedule may be nil,
+// in which case runSchedule steps report that no engine is available.
+func New(projectID int, db dbh.Handle, jwt *security.JWTManager, enc *security.Encryptor, schedule ScheduleRunner) *Hooks {
+	return &Hooks{projectID: projectID, db: db, jwt: jwt, enc: enc, schedule: schedule}
 }
 
 var _ probe.FlowHooks = (*Hooks)(nil)
@@ -194,28 +195,13 @@ func (h *Hooks) WebhookSignature(name string, body []byte) (string, error) {
 }
 
 // ScheduleRunner runs a project's scheduled task by name and waits for it to
-// finish. The engine registers it (it owns the workers that execute tasks).
+// finish. The engine provides it (it owns the workers that execute tasks).
 type ScheduleRunner func(ctx context.Context, projectID int, name string) error
-
-var (
-	runnerMu sync.RWMutex
-	runner   ScheduleRunner
-)
-
-// SetScheduleRunner registers how runSchedule steps execute a task.
-func SetScheduleRunner(fn ScheduleRunner) {
-	runnerMu.Lock()
-	runner = fn
-	runnerMu.Unlock()
-}
 
 // RunSchedule runs the named scheduled task now.
 func (h *Hooks) RunSchedule(ctx context.Context, name string) error {
-	runnerMu.RLock()
-	fn := runner
-	runnerMu.RUnlock()
-	if fn == nil {
+	if h.schedule == nil {
 		return errors.New("scheduled tasks cannot be run from this replay (no engine here)")
 	}
-	return fn(ctx, h.projectID, name)
+	return h.schedule(ctx, h.projectID, name)
 }

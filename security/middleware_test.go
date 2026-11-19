@@ -18,7 +18,7 @@ func okHandler(reached *bool) http.Handler {
 
 func TestAuthenticator_ValidBearerTokenPasses(t *testing.T) {
 	jm := NewJWTManager("mw-secret", time.Hour)
-	token, err := jm.Generate(TokenRequest{UserID: 42, Username: "alice", Role: "user"})
+	token, err := jm.GenerateAdmin(AdminTokenRequest{UserID: 42, Username: "alice", Role: "user"})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -156,70 +156,5 @@ func TestAuthenticatorAllowingQueryToken_MissingIs401(t *testing.T) {
 	}
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rr.Code)
-	}
-}
-
-func TestRequireRole_AllowsMatchingRole(t *testing.T) {
-	jm := NewJWTManager("mw-secret", time.Hour)
-	token, err := jm.Generate(TokenRequest{UserID: 7, Username: "root", Role: "admin"})
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-
-	var reached bool
-	// Authenticator populates claims in context; RequireRole then guards it.
-	h := jm.Authenticator(RequireRole("admin")(okHandler(&reached)))
-
-	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if !reached {
-		t.Error("next handler was not reached for a token with the required role")
-	}
-	if rr.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rr.Code)
-	}
-}
-
-func TestRequireRole_DeniesMissingRole(t *testing.T) {
-	jm := NewJWTManager("mw-secret", time.Hour)
-	// Token carries role "user" but the guard requires "admin".
-	token, err := jm.Generate(TokenRequest{UserID: 42, Username: "alice", Role: "user"})
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-
-	var reached bool
-	h := jm.Authenticator(RequireRole("admin")(okHandler(&reached)))
-
-	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if reached {
-		t.Error("next handler should not be reached when the role is insufficient")
-	}
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rr.Code)
-	}
-}
-
-func TestRequireRole_NoClaimsInContextIs403(t *testing.T) {
-	// RequireRole used without Authenticator: no claims in context -> 403.
-	var reached bool
-	h := RequireRole("admin")(okHandler(&reached))
-
-	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if reached {
-		t.Error("next handler should not be reached without claims")
-	}
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rr.Code)
 	}
 }

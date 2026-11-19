@@ -33,9 +33,18 @@ import (
 // Deterministic: same names in, same bytes out, so a caller can place it on a
 // cache-stable prompt prefix.
 func (r *Registry) RoutingProse(names []string, caps llm.Capabilities, stage string) string {
+	return r.RoutingProseFiltered(names, caps, stage, nil)
+}
+
+// RoutingProseFiltered is RoutingProse with per-tool omitted actions excluded from
+// schema notes.
+func (r *Registry) RoutingProseFiltered(names []string, caps llm.Capabilities, stage string, omitActions map[string]map[string]bool) string {
 	defs := r.resolveAvailable(names, caps, stage)
 	var b strings.Builder
 	for _, t := range defs {
+		if omit := omitActions[t.Name]; len(omit) > 0 {
+			t = t.WithoutActions(omit)
+		}
 		when := strings.TrimSpace(t.WhenToUse)
 		notes := t.SchemaNotes()
 		if when == "" && notes == "" {
@@ -101,33 +110,30 @@ func (d *ToolDef) enumNarrowingDoc() string {
 	return "\n" + b.String()
 }
 
-// requiredByActionDoc lists, per action, the args that action REQUIRES.
+// requiredByActionDoc lists every action of the tool and the args each action REQUIRES.
 //
 // Parameters() cannot express this: one tool exposes many actions through a single union
 // schema, so Define deliberately marks every merged param optional and leaves `action` as
 // the only required key (see define.go). Requiredness is still enforced, per action, in the
-// handler - but the model does not read the handler. Without this note the only way it can
-// learn that `manage_files.restore` needs `kind`, or that `manage_data.delete` needs `id`
-// while `update` does not, is to spend a turn getting a missing_arg back.
-//
-// Empty when no action requires anything beyond `action`.
+// handler - but the model does not read the handler. Listing every action (with `()` when it
+// requires nothing beyond `action`) also surfaces the tool's complete action enum in
+// RoutingProse, since preloaded tools are omitted from DeferredIndex.
 func (d *ToolDef) requiredByActionDoc() string {
-	var parts []string
-	for _, name := range d.actionNames() {
+	names := d.actionNames()
+	if len(names) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
 		var req []string
 		for _, p := range d.ActionMeta[name].Params {
 			if p.Required {
 				req = append(req, p.Name)
 			}
 		}
-		if len(req) > 0 {
-			parts = append(parts, fmt.Sprintf("%s(%s)", name, strings.Join(req, ", ")))
-		}
+		parts = append(parts, fmt.Sprintf("%s(%s)", name, strings.Join(req, ", ")))
 	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return "\nRequired per action (the schema marks only `action`): " + strings.Join(parts, "; ") + "\n"
+	return "\nActions & required args (the schema marks only `action`): " + strings.Join(parts, "; ") + "\n"
 }
 
 // boundNarrowingDoc lists, per action, the numeric args whose real cap or default differs

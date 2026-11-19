@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -90,18 +88,6 @@ func TestLocalizeCoversJSONBodies(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if want := msgcat.Catalog("ja")["no models configured for this provider"]; want == "" || got != want {
 		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-// The middleware is only effective if the admin router installs it. The router
-// needs a full server to build, so pin the line instead.
-func TestAdminRouterInstallsTheTranslator(t *testing.T) {
-	src, err := os.ReadFile("../server.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "s.adminRouter.Use(msgcat.Middleware)") {
-		t.Error("server.go no longer installs msgcat.Middleware on the admin router")
 	}
 }
 

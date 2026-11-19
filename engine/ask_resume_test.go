@@ -51,7 +51,7 @@ func TestDriveWaitingOnAnswersKeepsProjectMode(t *testing.T) {
 		t.Run(reason, func(t *testing.T) {
 			w, pdb := scheduledTestWorker(t, nil)
 			setProjectMode(t, w, "building")
-			run, err := createRun(pdb, RunKindBuild, StageBuild, "")
+			run, err := createRun(pdb, RunKindBuild, StageBuild, "", "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +77,7 @@ func TestAutoRecoverResumesWhenAnswered(t *testing.T) {
 	for _, reason := range []string{PauseReasonOwnerAnswers, PauseReasonApproval} {
 		t.Run(reason, func(t *testing.T) {
 			w, pdb := scheduledTestWorker(t, nil)
-			run, _ := createRun(pdb, RunKindBuild, StageBuild, "")
+			run, _ := createRun(pdb, RunKindBuild, StageBuild, "", "", "")
 			if err := run.pause(pdb, reason); err != nil {
 				t.Fatal(err)
 			}
@@ -101,7 +101,7 @@ func TestAutoRecoverResumesWhenAnswered(t *testing.T) {
 // A failure pause still flips the mode: it needs an explicit owner action.
 func TestAutoRecoverErrorCountStillPausesMode(t *testing.T) {
 	w, pdb := scheduledTestWorker(t, nil)
-	run, _ := createRun(pdb, RunKindBuild, StageBuild, "")
+	run, _ := createRun(pdb, RunKindBuild, StageBuild, "", "", "")
 	run.ErrorCount = maxStageErrors
 	proceed, waiting := w.autoRecover(run)
 	if proceed || waiting {
@@ -112,7 +112,7 @@ func TestAutoRecoverErrorCountStillPausesMode(t *testing.T) {
 // A LIVE question must not reopen the finished build run.
 func TestParkRunLeavesCompletedRunAlone(t *testing.T) {
 	w, pdb := scheduledTestWorker(t, nil)
-	run, _ := createRun(pdb, RunKindBuild, StageLive, "")
+	run, _ := createRun(pdb, RunKindBuild, StageLive, "", "", "")
 	if err := run.complete(pdb); err != nil {
 		t.Fatal(err)
 	}

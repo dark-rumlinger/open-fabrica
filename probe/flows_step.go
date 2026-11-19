@@ -36,7 +36,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		if err := chromedp.Run(navCtx, chromedp.Navigate(r.origin+target)); err != nil {
 			return &flowFailure{"navigation", fmt.Sprintf("could not load %s: %v", arg, err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "leave":
 		// Close the tab; a later goto as the same name opens a new browser.
@@ -51,7 +51,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		if err := chromedp.Run(navCtx, chromedp.Reload()); err != nil {
 			return &flowFailure{"navigation", fmt.Sprintf("could not reload the page: %v", err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "click", "dblclick", "hover":
 		aim, _ := json.Marshal(map[string]any{"verb": verb, "at": st.At})
@@ -84,7 +84,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		if err := runWithin(ctx, timeout, act); err != nil {
 			return &flowFailure{"not_found", fmt.Sprintf("found %q but could not %s it: %v", arg, verb, err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "drag":
 		src, f := pollDOM(ctx, timeout, "mark", arg, "", "")
@@ -108,7 +108,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 				if _, f := pollDOM(ctx, timeout, "dnd", "", "", ""); f != nil {
 					return f
 				}
-				return settle(ctx)
+				return settle(ctx, s.errs)
 			}
 			both, f := pollDOM(ctx, timeout, "rects", "", "", "")
 			if f != nil {
@@ -125,19 +125,19 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		if err := drag(ctx, pts); err != nil {
 			return &flowFailure{"not_found", fmt.Sprintf("could not drag %q: %v", arg, err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "scroll":
 		if _, f := pollDOM(ctx, timeout, verb, arg, value, ""); f != nil {
 			return f
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "select", "check", "uncheck":
 		if _, f := pollDOM(ctx, timeout, verb, arg, value, scope); f != nil {
 			return f
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "fill":
 		m, f := pollDOM(ctx, timeout, "fill", arg, value, scope)
@@ -154,7 +154,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 				return &flowFailure{"not_found", fmt.Sprintf("could not type into %q: %v", arg, err)}
 			}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "type":
 		m, f := pollDOM(ctx, timeout, "markfield", arg, value, scope)
@@ -167,13 +167,13 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		if err := typeKeys(ctx, m.Value != "", value); err != nil {
 			return &flowFailure{"not_found", fmt.Sprintf("could not type into %q: %v", arg, err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "press":
 		if err := pressKey(ctx, arg, time.Duration(st.Hold)*time.Millisecond); err != nil {
 			return &flowFailure{"not_found", fmt.Sprintf("could not press %s: %v", arg, err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "upload":
 		target, f := pollDOM(ctx, timeout, "markupload", arg, "", "")
@@ -188,12 +188,12 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 			if f := dropFile(ctx, timeout, path, value); f != nil {
 				return f
 			}
-			return settle(ctx)
+			return settle(ctx, s.errs)
 		}
 		if err := runWithin(ctx, timeout, chromedp.SetUploadFiles(flowMarker, []string{path}, chromedp.ByQuery, chromedp.NodeReady)); err != nil {
 			return &flowFailure{"not_found", fmt.Sprintf("could not upload to %q: %v", arg, err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "download":
 		before := r.downloads.count()
@@ -221,7 +221,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 				if value != "" && !strings.Contains(strings.ToLower(name), strings.ToLower(value)) {
 					return &flowFailure{"assert", fmt.Sprintf("%q downloaded %q, not a file whose name contains %q", arg, name, value)}
 				}
-				return settle(ctx)
+				return settle(ctx, s.errs)
 			case "canceled":
 				return &flowFailure{"assert", fmt.Sprintf("the download %q started failed or was cancelled (%s)", arg, name)}
 			}
@@ -241,7 +241,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		}
 		r.setWorkersOffline(s, off)
 		s.offline = off
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "dialog":
 		s.dialog.arm(arg == "accept", value)
@@ -290,7 +290,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		if f := checkStatus(resp, st.Status); f != nil {
 			return f
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "expectResponse":
 		want := r.expandAny(st.ExpectResponse, s.name)
@@ -318,7 +318,7 @@ func (r *flowRun) step(s *flowSession, st FlowStep) *flowFailure {
 		if err := r.hooks.RunSchedule(c, arg); err != nil {
 			return &flowFailure{"assert", fmt.Sprintf("scheduled task %q: %v", arg, err)}
 		}
-		return settle(ctx)
+		return settle(ctx, s.errs)
 
 	case "remember":
 		if v, special, f := r.rememberSpecial(s, st.From); special {

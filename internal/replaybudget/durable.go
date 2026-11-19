@@ -115,14 +115,20 @@ func observeDurable(db dbh.Handle, runID string, failed, depth int, full bool) i
 	if r.red {
 		redInt = 1
 	}
+	cleanGreenInt := 0
+	if failed == 0 && full {
+		cleanGreenInt = 1
+	}
 	if _, err := tx.Exec(
-		`INSERT INTO of_flow_budget(run_id, best, best_depth, partial_depth, stall_count, red)
-		 VALUES(?, ?, ?, ?, ?, ?)
+		`INSERT INTO of_flow_budget(run_id, best, best_depth, partial_depth, stall_count, red, clean_green)
+		 VALUES(?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(run_id) DO UPDATE SET
 		    best = excluded.best, best_depth = excluded.best_depth,
 		    partial_depth = excluded.partial_depth, stall_count = excluded.stall_count,
-		    red = excluded.red, updated_at = CURRENT_TIMESTAMP`,
-		runID, r.best, r.bestDepth, r.partialDepth, r.stallCount, redInt); err != nil {
+		    red = excluded.red,
+		    clean_green = CASE WHEN excluded.clean_green = 1 THEN 1 WHEN excluded.red = 1 THEN 0 ELSE of_flow_budget.clean_green END,
+		    updated_at = CURRENT_TIMESTAMP`,
+		runID, r.best, r.bestDepth, r.partialDepth, r.stallCount, redInt, cleanGreenInt); err != nil {
 		return 0
 	}
 	if err := tx.Commit(); err != nil {
@@ -131,12 +137,28 @@ func observeDurable(db dbh.Handle, runID string, failed, depth int, full bool) i
 	return r.stallCount
 }
 
-// resetStallsDurable clears the run's stall state but keeps the replays it has
-// already taken.
+// resetStallsDurable clears the run's stall state and clean-green flag but keeps
+// the replays it has already taken.
 func resetStallsDurable(db dbh.Handle, runID string) {
 	_, _ = db.Exec(
 		`UPDATE of_flow_budget SET best = -1, best_depth = 0, partial_depth = 0,
-		    stall_count = 0, red = 0, updated_at = CURRENT_TIMESTAMP WHERE run_id = ?`,
+		    stall_count = 0, red = 0, clean_green = 0, updated_at = CURRENT_TIMESTAMP WHERE run_id = ?`,
+		runID)
+}
+
+// cleanGreenDurable reports whether the run's latest full replay passed with no
+// subsequent project or flow-script mutations. Fails open (false) on any DB error.
+func cleanGreenDurable(db dbh.Handle, runID string) bool {
+	var clean int
+	if err := db.QueryRow(`SELECT clean_green FROM of_flow_budget WHERE run_id = ?`, runID).Scan(&clean); err != nil {
+		return false
+	}
+	return clean != 0
+}
+
+func markDirtyDurable(db dbh.Handle, runID string) {
+	_, _ = db.Exec(
+		`UPDATE of_flow_budget SET clean_green = 0, updated_at = CURRENT_TIMESTAMP WHERE run_id = ?`,
 		runID)
 }
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"openfabrica/bot"
+	"openfabrica/db/models"
 	"openfabrica/events"
 )
 
@@ -23,25 +24,7 @@ type SettingsHandler struct {
 
 // Get returns all settings as a key-value map.
 func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.deps.DB.Query("SELECT key, value FROM settings ORDER BY key")
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{})
-		return
-	}
-	defer rows.Close()
-
-	settings := make(map[string]string)
-	for rows.Next() {
-		var key, value string
-		if err := rows.Scan(&key, &value); err != nil {
-			continue
-		}
-		settings[key] = value
-	}
-	if err := rows.Err(); err != nil {
-		writeJSON(w, http.StatusOK, map[string]string{})
-		return
-	}
+	settings := models.ListSettings(h.deps.DB.DB)
 
 	// The bot token never leaves the server; clients get a mask plus a flag.
 	if strings.TrimSpace(settings[bot.TokenSettingKey]) != "" {

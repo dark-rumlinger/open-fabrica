@@ -935,36 +935,22 @@ func (w *Worker) selectPlanGuideSlugs(ctx context.Context, brief string, existin
 		return unroutedGuideFallback(existing, ps), false // nothing to route from
 	}
 	caps := pack.Capabilities(ps)
-	spec := SessionSpec{
-		Stage:          StagePlan,
-		System:         guideSelectionSystem(caps),
-		Seed:           []llm.Message{{Role: llm.RoleUser, Content: "Project brief:\n\n" + strings.TrimSpace(brief) + "\n\nReturn the slugs of the guides this project needs."}},
-		ResponseSchema: guideSelectionSchema(),
-		MaxIterations:  1,
-		MaxTokens:      512,
-		Temperature:    f64(0),
-		Timeout:        60 * time.Second,
-		Thinking:       &thinkingOff,
-		Policy:         policyPlan,
-	}
-	sess := w.newStageSession(StagePlan)
-	rp, err := sess.resolver.resolve()
+	valid := validCapabilitySlugs(ps)
+	slugs, _, err := runStructuredCall(ctx, w, structuredCallOpts{
+		Stage:             StagePlan,
+		System:            guideSelectionSystem(caps),
+		Messages:          []llm.Message{{Role: llm.RoleUser, Content: "Project brief:\n\n" + strings.TrimSpace(brief) + "\n\nReturn the slugs of the guides this project needs."}},
+		Schema:            guideSelectionSchema(),
+		MaxTokens:         512,
+		Timeout:           60 * time.Second,
+		Temperature:       f64(0),
+		Thinking:          &thinkingOff,
+		RequireStructured: true,
+	}, func(content string) ([]string, error) {
+		return parseGuideSelection(content, valid)
+	})
 	if err != nil {
-		return unroutedGuideFallback(existing, ps), false
-	}
-	if !supportsStructuredOutput(rp) {
-		// The picker can NEVER run on this provider (a permanent property), and these
-		// are exactly the small local models whose context every guide body would drown.
-		return unroutedGuideFallback(existing, ps), false
-	}
-	res, err := w.runSpec(ctx, sess, spec)
-	if err != nil {
-		w.logger.Warn("plan guide selection call failed, falling back to the full guide catalogue", "error", err)
-		return unroutedGuideFallback(existing, ps), false
-	}
-	slugs, perr := parseGuideSelection(res.Content, validCapabilitySlugs(ps))
-	if perr != nil {
-		w.logger.Warn("plan guide selection reply unparseable, falling back to the full guide catalogue", "error", perr)
+		w.logger.Warn("plan guide selection failed, falling back to the full guide catalogue", "error", err)
 		return unroutedGuideFallback(existing, ps), false
 	}
 	want := map[string]guideSignal{}

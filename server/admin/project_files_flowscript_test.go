@@ -67,7 +67,7 @@ func TestProjectFilesListsAndGuardsFlowScript(t *testing.T) {
 
 	// Listed, marked as the test script; pages are not.
 	w := call("GET", 0, h.List, "")
-	var files []projectFile
+	var files []store.ProjectFileEntry
 	if err := json.Unmarshal(w.Body.Bytes(), &files); err != nil {
 		t.Fatalf("list: %v (%s)", err, w.Body.String())
 	}
@@ -109,7 +109,7 @@ func TestProjectFilesListsAndGuardsFlowScript(t *testing.T) {
 	if copies != 0 {
 		t.Fatal("editing must not create a public kind='file' copy")
 	}
-	var versions []artifactVersion
+	var versions []store.ArtifactVersionEntry
 	_ = json.Unmarshal(call("GET", scriptID, h.ListVersions, "").Body.Bytes(), &versions)
 	if len(versions) < 2 {
 		t.Fatalf("versions = %+v", versions)

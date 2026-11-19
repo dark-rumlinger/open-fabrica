@@ -14,12 +14,9 @@ func queryGuardFixture(t *testing.T) *Handler {
 	return &Handler{deps: &Deps{}}
 }
 
-const queryGuardSchema = `CREATE TABLE of_query_endpoints (id INTEGER PRIMARY KEY, path TEXT UNIQUE, max_rows INTEGER, requires_auth INTEGER, rate_limit INTEGER)`
-
 func runQuery(t *testing.T, h *Handler, ddl []string, body string) (int, map[string]any) {
 	t.Helper()
-	db := setupRowIDColumnDB(t, append([]string{
-		queryGuardSchema,
+	db := migratedTestDB(t, append([]string{
 		`INSERT INTO of_query_endpoints (path, max_rows, requires_auth, rate_limit) VALUES ('_query', 3, 0, 60)`,
 	}, ddl...)...)
 	req := httptest.NewRequest("POST", "/api/_query", strings.NewReader(body))
@@ -58,10 +55,8 @@ func TestApiQueryRowCapSurvivesLimitInText(t *testing.T) {
 func TestApiQueryBlocksProtectedTables(t *testing.T) {
 	h := queryGuardFixture(t)
 	ddl := []string{
-		`CREATE TABLE of_auth_endpoints (id INTEGER PRIMARY KEY, table_name TEXT)`,
-		`INSERT INTO of_auth_endpoints (table_name) VALUES ('members')`,
+		`INSERT INTO of_auth_endpoints (table_name, path) VALUES ('members', 'auth')`,
 		`CREATE TABLE members (id INTEGER PRIMARY KEY, email TEXT)`,
-		`CREATE TABLE of_payments (id INTEGER PRIMARY KEY, amount INTEGER)`,
 	}
 	for name, sql := range map[string]string{
 		"auth table":      `SELECT email FROM members`,
@@ -84,7 +79,6 @@ func TestApiQueryBlocksProtectedTables(t *testing.T) {
 func TestApiQueryDropsHashColumns(t *testing.T) {
 	h := queryGuardFixture(t)
 	ddl := []string{
-		`CREATE TABLE of_dynamic_tables (id INTEGER PRIMARY KEY, table_name TEXT, schema_def TEXT, secure_columns TEXT)`,
 		`INSERT INTO of_dynamic_tables (table_name, schema_def, secure_columns) VALUES ('staff','{}','{"pin":"hash"}')`,
 		`CREATE TABLE staff (id INTEGER PRIMARY KEY, name TEXT, pin TEXT)`,
 		`INSERT INTO staff (name, pin) VALUES ('Ada', '$2a$12$abc')`,

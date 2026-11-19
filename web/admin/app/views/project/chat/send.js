@@ -34,17 +34,20 @@ export function createSender({ scope, projectId, feed, chatInput, toolCardMap, o
   }
   scope.add(abort);
 
-  function send(text) {
+  function send(text, images = [], previews = []) {
     onActivity();
-    feed.append(createUserMessage(text));
+    feed.append(createUserMessage(text, null, previews));
     chatInput.setWorking('chat', true);
 
     streamingMsg = createStreamingMessage();
     feed.append(streamingMsg.element);
 
+    const payload = { message: text, session_id: 'admin' };
+    if (Array.isArray(images) && images.length > 0) payload.images = images;
+
     currentStream = startStream(
       `/admin/api/chat/${projectId}/stream`,
-      JSON.stringify({ message: text, session_id: 'admin' }),
+      JSON.stringify(payload),
       {
         onResult(result) {
           for (const tool of result.tools || []) {

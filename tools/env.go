@@ -16,16 +16,22 @@ import (
 // ToolContext is shaped, so a field added here reaches every call path at once
 // instead of being set on some hand-built literals and forgotten on others.
 type Env struct {
-	GlobalDB   *sql.DB // global database (users, providers, projects)
-	Bus        *events.Bus
-	Encryptor  *security.Encryptor
-	JWTManager *security.JWTManager
-	PublicPort int    // public server port for self-testing (0 = config.DefaultPublicPort)
-	DataDir    string // instance data directory ("" = config.DefaultDataDir)
+	GlobalDB                *sql.DB // global database (users, providers, projects)
+	Bus                     *events.Bus
+	Encryptor               *security.Encryptor
+	JWTManager              *security.JWTManager
+	PublicPort              int      // public server port for self-testing (0 = config.DefaultPublicPort)
+	DataDir                 string   // instance data directory ("" = use config.DefaultDataDir)
+	ExtraDownloadExtensions []string // additive safe extensions for manage_web_fetch action=download
+	WebFetchMaxAssetMB      int      // max MiB for manage_web_fetch action=download (0 = 25 MiB)
 
 	// EmbedFunc runs the configured embeddings provider; the semantic-search
 	// actions and find_tool's semantic ranking read it. Nil disables them.
 	EmbedFunc func(ctx context.Context, texts []string) ([][]float32, error)
+
+	// RunScheduleByNameFunc runs a project's scheduled task by name for user-flow
+	// replays (test_flows). Nil outside the engine composition root.
+	RunScheduleByNameFunc func(ctx context.Context, projectID int, name string) error
 }
 
 // Headless returns a copy of e with no event bus, for tool calls that event-driven
@@ -57,16 +63,19 @@ func (e *Env) ForProject(ctx context.Context, pdb ProjectStore, projectID int, l
 		logger = slog.Default()
 	}
 	return &ToolContext{
-		Ctx:        ctx,
-		DB:         pdb.ToolHandle(ctx),
-		GlobalDB:   e.GlobalDB,
-		ProjectID:  projectID,
-		Logger:     logger,
-		Bus:        e.Bus,
-		Encryptor:  e.Encryptor,
-		JWTManager: e.JWTManager,
-		PublicPort: e.PublicPort,
-		DataDir:    e.DataDir,
-		EmbedFunc:  e.EmbedFunc,
+		Ctx:                     ctx,
+		DB:                      pdb.ToolHandle(ctx),
+		GlobalDB:                e.GlobalDB,
+		ProjectID:               projectID,
+		Logger:                  logger,
+		Bus:                     e.Bus,
+		Encryptor:               e.Encryptor,
+		JWTManager:              e.JWTManager,
+		PublicPort:              e.PublicPort,
+		DataDir:                 e.DataDir,
+		ExtraDownloadExtensions: e.ExtraDownloadExtensions,
+		WebFetchMaxAssetMB:      e.WebFetchMaxAssetMB,
+		EmbedFunc:               e.EmbedFunc,
+		RunScheduleByNameFunc:   e.RunScheduleByNameFunc,
 	}
 }

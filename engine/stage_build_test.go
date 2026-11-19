@@ -203,7 +203,7 @@ func TestSingleLoopBuildNoAutoComplete(t *testing.T) {
 // outright instead of running to the iteration cap.
 func TestBuildTurnEndStopsOnEmptyChecklist(t *testing.T) {
 	w, _ := buildE2EWorker(t, &enginetest.Provider{})
-	msg, stop := w.buildTurnEnd()(0, nil, 0)
+	msg, stop := w.buildTurnEnd(false)(0, nil, 0)
 	if stop == nil || msg == "" {
 		t.Fatalf("an empty checklist must stop the session, got stop=%v msg=%q", stop, msg)
 	}
@@ -227,7 +227,7 @@ func TestBuildTurnEndTrackNudge(t *testing.T) {
 	save := llm.ToolCall{Name: "manage_files", Arguments: `{"action":"save","file_path":"/files/a.js"}`}
 	twoSaves := []llm.ToolCall{save, save}
 
-	hook := w.buildTurnEnd()
+	hook := w.buildTurnEnd(false)
 	for turn := 1; turn <= 2; turn++ {
 		if inject, _ := hook(turn, twoSaves, 0); inject != "" {
 			t.Fatalf("turn %d: no reminder before %d writes, got %q", turn, trackNudgeAfterSaves, inject)
@@ -242,7 +242,7 @@ func TestBuildTurnEndTrackNudge(t *testing.T) {
 	}
 
 	// A build that completes as it goes never sees it.
-	hook = w.buildTurnEnd()
+	hook = w.buildTurnEnd(false)
 	complete := llm.ToolCall{Name: "manage_tasks", Arguments: `{"action":"complete","task_id":"t0"}`}
 	for turn := 1; turn <= 5; turn++ {
 		if inject, _ := hook(turn, []llm.ToolCall{save, save, complete}, 0); inject == trackNudge {
@@ -270,7 +270,7 @@ func TestBuildTurnEndBatchCompleteNudge(t *testing.T) {
 		completes[i] = llm.ToolCall{Name: "manage_tasks", Arguments: `{"action":"complete","task_id":"x"}`}
 	}
 
-	hook := w.buildTurnEnd()
+	hook := w.buildTurnEnd(false)
 	inject, stop := hook(3, completes, 0)
 	if stop != nil || !strings.Contains(strings.ToLower(inject), "re-check") {
 		t.Fatalf("a batch of %d completes with items remaining must earn the nudge, got stop=%v inject=%q",
@@ -302,7 +302,7 @@ func TestBuildTurnEndNudgesOnTotalBatchClose(t *testing.T) {
 		completes[i] = llm.ToolCall{Name: "manage_tasks", Arguments: `{"action":"complete","task_id":"x"}`}
 	}
 
-	hook := w.buildTurnEnd()
+	hook := w.buildTurnEnd(false)
 	inject, stop := hook(11, completes, 0)
 	if stop != nil {
 		t.Fatalf("a turn closing every item must nudge before stopping, got stop=%v", stop)
@@ -329,7 +329,7 @@ func TestBuildTurnEndStopsWithoutABatch(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 	one := []llm.ToolCall{{Name: "manage_tasks", Arguments: `{"action":"complete","task_id":"t0"}`}}
-	if inject, stop := w.buildTurnEnd()(5, one, 0); stop == nil || inject != checklistCompleteStop {
+	if inject, stop := w.buildTurnEnd(false)(5, one, 0); stop == nil || inject != checklistCompleteStop {
 		t.Fatalf("a single close on a resolved checklist must stop, got stop=%v inject=%q", stop, inject)
 	}
 }
@@ -349,7 +349,7 @@ func TestBuildTurnEndRefusesToStopOnRejectedWrites(t *testing.T) {
 	}
 	patch := []llm.ToolCall{{Name: "manage_files", Arguments: `{"action":"patch","file_path":"a.js"}`}}
 
-	hook := w.buildTurnEnd()
+	hook := w.buildTurnEnd(false)
 	inject, stop := hook(29, patch, 2)
 	if stop != nil {
 		t.Fatalf("a turn with rejected edits must not end the build, got stop=%v", stop)
@@ -375,7 +375,7 @@ func TestBuildTurnEndRepairAskIsBounded(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 	patch := []llm.ToolCall{{Name: "manage_files", Arguments: `{"action":"patch","file_path":"a.js"}`}}
-	hook := w.buildTurnEnd()
+	hook := w.buildTurnEnd(false)
 	for i := 0; i < maxRejectRepairTurns; i++ {
 		if _, stop := hook(i, patch, 1); stop != nil {
 			t.Fatalf("repair turn %d must not stop", i)
@@ -742,5 +742,66 @@ func TestLiveFlowCoverageAsksOnceForANewPage(t *testing.T) {
 	}
 	if again := hook(); again != "" {
 		t.Fatalf("the nudge fires at most once, got %q", again)
+	}
+}
+
+func TestCallsPageProbeAcceptsExploreAndRepairSkipsFinalProbeNudge(t *testing.T) {
+	explore := []llm.ToolCall{{Name: "manage_testing", Arguments: `{"action":"explore","page_path":"/"}`}}
+	if !callsPageProbe(explore) {
+		t.Fatal("callsPageProbe must accept manage_testing action=explore")
+	}
+
+	w, mgr := buildE2EWorker(t, &enginetest.Provider{})
+	pdb, err := mgr.Open(1)
+	if err != nil {
+		t.Fatalf("open pdb: %v", err)
+	}
+	if _, err := pdb.ExecWrite(`INSERT INTO of_tasks (id, title, intent, paths, status, position) VALUES ('t0','Home','','["/"]','done',0)`); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	// Repair mode must stop directly when all items are resolved without demanding finalProbeNudge.
+	inject, stop := w.buildTurnEnd(true)(1, nil, 0)
+	if stop == nil || stop.outcome != EndDone || inject != checklistCompleteStop {
+		t.Fatalf("repair buildTurnEnd must stop on resolved checklist without finalProbeNudge, got stop=%v inject=%q", stop, inject)
+	}
+}
+
+func TestPlanTasksResolved(t *testing.T) {
+	_, mgr := buildE2EWorker(t, &enginetest.Provider{})
+	pdb, err := mgr.Open(1)
+	if err != nil {
+		t.Fatalf("open pdb: %v", err)
+	}
+	if planTasksResolved(pdb.Reader()) {
+		t.Fatal("empty checklist must not be treated as resolved")
+	}
+	if _, err := pdb.ExecWrite(`INSERT INTO of_tasks (id, title, intent, status, origin, position) VALUES ('p1','Plan','','pending','plan',0)`); err != nil {
+		t.Fatalf("seed plan task: %v", err)
+	}
+	if planTasksResolved(pdb.Reader()) {
+		t.Fatal("pending plan task must not be treated as resolved")
+	}
+	if _, err := pdb.ExecWrite(`UPDATE of_tasks SET status = 'done' WHERE id = 'p1'`); err != nil {
+		t.Fatalf("complete plan task: %v", err)
+	}
+	if _, err := pdb.ExecWrite(`INSERT INTO of_tasks (id, title, intent, status, origin, position) VALUES ('fix-1','Fix','','pending','repair',1)`); err != nil {
+		t.Fatalf("seed repair task: %v", err)
+	}
+	if !planTasksResolved(pdb.Reader()) {
+		t.Fatal("all plan tasks done must be treated as resolved even with open repair tasks")
+	}
+}
+
+func TestRepairAndFlowGateInstructionsCarryOwnerAnswer(t *testing.T) {
+	w, mgr := buildE2EWorker(t, &enginetest.Provider{})
+	pdb, err := mgr.Open(1)
+	if err != nil {
+		t.Fatalf("open pdb: %v", err)
+	}
+	if got := repairInstruction(pdb.Reader(), "use stripe"); !strings.Contains(got, "use stripe") {
+		t.Fatalf("repairInstruction must include ownerAnswer, got %q", got)
+	}
+	if got := w.flowGateInstruction("skip oauth"); !strings.Contains(got, "skip oauth") {
+		t.Fatalf("flowGateInstruction must include ownerAnswer, got %q", got)
 	}
 }

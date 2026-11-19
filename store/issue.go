@@ -59,3 +59,14 @@ func (i Issue) Fingerprint() string {
 	}
 	return fp
 }
+
+// RepairKey is the page-INDEPENDENT identity the repair loop keys on: category +
+// Signature only. Distinct from Fingerprint by design - a signed finding's page can
+// move between sweeps (a replay lands on a freshly minted /f/<slug>), while its
+// Signature stays stable (a flow's name, step and failure kind) - so matching a
+// repair item to the findings of the next sweep, and a dispute to a later finding,
+// keys on category + Signature. Only meaningful when Signature is set; callers fall
+// back to Fingerprint for an unsigned finding.
+func (i Issue) RepairKey() string {
+	return i.Category + "\x00" + i.Signature
+}

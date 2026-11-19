@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"openfabrica/internal/browser"
 	"openfabrica/store"
 )
 
@@ -75,7 +76,7 @@ func exploreFixture(t *testing.T, html string) pageReport {
 		_, _ = w.Write([]byte(html))
 	}))
 	t.Cleanup(srv.Close)
-	alloc, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{})
+	alloc, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{})
 	if err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	}
@@ -216,6 +217,22 @@ func TestExploreBrowser_MobileOverflowAndBlank(t *testing.T) {
 	for _, o := range clipped.Overflow {
 		t.Errorf("overflow clipped by an overflow-x:hidden wrapper is not a sideways scroll: %+v", o)
 	}
+
+	textOverflow := exploreFixture(t, `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+	  <body style="margin:0"><div style="padding:0 20px"><h1 class="heading-xl" style="font-size:56px;margin:0">internationalization</h1></div></body></html>`)
+	var sawHeading bool
+	for _, o := range textOverflow.Overflow {
+		if o.Viewport == "mobile" {
+			for _, off := range o.Offenders {
+				if strings.Contains(off, "h1") {
+					sawHeading = true
+				}
+			}
+		}
+	}
+	if !sawHeading {
+		t.Fatalf("oversized heading text overflowing its box must name h1 in Offenders: %+v", textOverflow.Overflow)
+	}
 }
 
 // On a canvas page a labelled control that changed nothing in the DOM is only a
@@ -288,7 +305,7 @@ func TestExploreBrowser_RedirectedPageIsExploredAnonymously(t *testing.T) {
 		</body></html>`))
 	}))
 	t.Cleanup(srv.Close)
-	alloc, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{})
+	alloc, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{})
 	if err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	}

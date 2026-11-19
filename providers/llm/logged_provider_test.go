@@ -95,3 +95,23 @@ func TestLoggedProviderStreamNilCursors(t *testing.T) {
 		t.Errorf("stream entry not captured: content=%q out=%d", e.ResponseContent, e.OutputTokens)
 	}
 }
+
+type windowStubProvider struct {
+	*stubProvider
+	window int
+}
+
+func (w *windowStubProvider) ContextWindow() int { return w.window }
+
+func TestLoggedProviderAsUnwrapsOptionalCapabilities(t *testing.T) {
+	inner := &windowStubProvider{stubProvider: &stubProvider{}, window: 32768}
+	lp := NewLoggedProvider(inner, &captureLogger{}, "engine", "sess", nil, nil)
+
+	cw, ok := As[ContextWindowProvider](lp)
+	if !ok || cw.ContextWindow() != 32768 {
+		t.Fatalf("As[ContextWindowProvider] = (%v, %v), want window=32768", cw, ok)
+	}
+	if _, ok := As[ModelLister](lp); ok {
+		t.Fatalf("As[ModelLister] should be false when inner does not implement ModelLister")
+	}
+}

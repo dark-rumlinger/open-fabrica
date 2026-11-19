@@ -11,6 +11,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,27 @@ import (
 )
 
 type buildStage struct{}
+
+// buildState is the bookkeeping that belongs to ONE build. It hangs off the Worker
+// (see Worker.build) but is replaced wholesale at the top of buildStage.Run, so every
+// field is fresh each build and none can carry over from an earlier run.
+type buildState struct {
+	repairSigs   map[string][]string // repair item id -> the RepairKeys of the findings it answers
+	disputed     map[string]bool     // RepairKeys of explore findings the builder completed as wrong ("disputed: ...")
+	specAudits   int                 // spec audits run this build, so a gap a re-check calls new gets a key no earlier audit used
+	visualAudits int                 // visual audits run this build, bounded by maxVisualAudits
+	previewPNG   []byte              // latest desktop '/' PNG captured during visual audit
+}
+
+// bs returns the current build's bookkeeping, creating it on first use so the
+// build-stage helpers and their tests are nil-safe. buildStage.Run replaces it with
+// a fresh value at the start of every build.
+func (w *Worker) bs() *buildState {
+	if w.build == nil {
+		w.build = &buildState{}
+	}
+	return w.build
+}
 
 func (buildStage) Name() string { return StageBuild }
 
@@ -49,7 +71,8 @@ const validatorConcurrency = 4
 func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 	// Repair bookkeeping belongs to one build: a dispute from an earlier run must not
 	// hide a finding of this one, nor a stale signature attach to a reused item id.
-	w.repairSigs, w.disputed, w.specAudits = nil, nil, 0
+	// Replacing the whole value resets every field, so a new one cannot leak by omission.
+	w.build = &buildState{}
 	plan := w.loadPlanOrEmpty(r)
 	ownerAnswer := w.peekWakeAnswer()
 	if ownerAnswer != "" {
@@ -59,13 +82,29 @@ func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 			w.logger.Info("build: owner answered, reopened blocked checklist items", "count", n)
 		}
 	}
+	// Drop any uncompleted user-flows task left over from an interrupted flow gate so
+	// runWholeBuild and repairRound never see it; runFlowGate re-creates it at the end.
+	if _, err := w.pdb.ExecWrite(`DELETE FROM of_tasks WHERE id = ? AND status <> ?`, userFlowsTaskID, TaskDone); err != nil {
+		w.logger.Warn("build: failed to clear leftover user-flows task", "error", err)
+	}
 	w.publishTaskQueue()
 
 	// Build the whole project in ONE continuous, prompt-cached session. On a
-	// resume the checklist + project_state already reflect completed work, so
-	// the agent continues from there and the done-checklist hook stops it fast.
-	if _, err := w.runWholeBuild(ctx, plan, ownerAnswer); err != nil {
-		return Outcome{}, err // errStagePaused propagates to drive() unchanged
+	// resume where every plan item is already resolved (e.g. a pause inside
+	// repairRound or runFlowGate), skip runWholeBuild and hand any owner answer
+	// to the resuming phase instead.
+	pendingAnswer := ownerAnswer
+	if !planTasksResolved(w.pdb.Reader()) {
+		buildRes, err := w.runWholeBuild(ctx, plan, ownerAnswer)
+		if err != nil {
+			return Outcome{}, err // errStagePaused propagates to drive() unchanged
+		}
+		if buildRes.Ending == EndFailed && !projectHasDeliverables(w.pdb.Reader()) {
+			return Outcome{}, fmt.Errorf("build failed (%s) with no deliverables", buildRes.EndDetail)
+		}
+		pendingAnswer = ""
+	} else {
+		w.logger.Info("build: all plan items already resolved, skipping build session")
 	}
 
 	// Test what was built: the validator sweep, which ends with the explore probe
@@ -76,14 +115,24 @@ func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 	if ctx.Err() != nil {
 		return Outcome{}, ctx.Err()
 	}
-	latest := w.runValidators(ctx)
-	// The spec audit asks the other question: is what was built what was asked for.
-	// Its gaps join the findings; after a repair round only the items it flagged are
-	// audited again.
-	gaps, _ := w.runSpecAudit(ctx, nil)
+	// Run validators (HTTP/browser) and spec audit (read-only DB/source LLM call)
+	// concurrently so the initial sweep saves a full LLM round-trip.
+	var latest, gaps []Issue
+	var sweepWG sync.WaitGroup
+	sweepWG.Add(2)
+	go func() {
+		defer sweepWG.Done()
+		latest = w.runValidators(ctx)
+	}()
+	go func() {
+		defer sweepWG.Done()
+		gaps, _ = w.runSpecAudit(ctx, nil)
+	}()
+	sweepWG.Wait()
+	visualIssues, _ := w.runVisualAudit(ctx)
 	for round := 1; round <= maxRepairRounds; round++ {
-		before := append(append([]Issue(nil), latest...), gaps...)
-		ran, err := w.repairRound(ctx, plan, repairFindings(before), round)
+		before := append(append(append([]Issue(nil), latest...), gaps...), visualIssues...)
+		ro, err := w.repairRound(ctx, plan, repairFindings(before), round, pendingAnswer)
 		if errors.Is(err, errStagePaused) {
 			return Outcome{}, err
 		}
@@ -100,27 +149,55 @@ func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 			w.logger.Warn("build: repair round failed, shipping what was built", "round", round, "error", err)
 			break
 		}
-		if !ran {
+		if !ro.ran {
 			break
 		}
-		latest = w.dropDisputed(w.runValidators(ctx))
+		pendingAnswer = ""
+		if ro.stalled {
+			w.logger.Warn("build: repair round stalled, stopping repair loop", "round", round)
+			break
+		}
+		var recheckWG sync.WaitGroup
+		recheckWG.Add(1)
+		go func() {
+			defer recheckWG.Done()
+			latest = w.dropDisputed(w.runValidators(ctx))
+		}()
 		if len(gaps) > 0 {
-			// A re-audit that could not run keeps the known gaps: an unreadable reply
-			// is not evidence that the repair closed them.
-			if again, ok := w.runSpecAudit(ctx, gaps); ok {
-				gaps = again
+			recheckWG.Add(1)
+			go func() {
+				defer recheckWG.Done()
+				// A re-audit that could not run keeps the known gaps: an unreadable reply
+				// is not evidence that the repair closed them.
+				if again, ok := w.runSpecAudit(ctx, gaps); ok {
+					gaps = again
+				}
+			}()
+		}
+		recheckWG.Wait()
+		if len(visualIssues) > 0 && w.bs().visualAudits < maxVisualAudits {
+			if again, ok := w.runVisualAudit(ctx); ok {
+				visualIssues = again
 			}
 		}
-		// A round that left as many findings as it found is not worth another.
-		if !repairProgress(before, append(append([]Issue(nil), latest...), gaps...)) && openPlanTasks(w.pdb.Reader()) == 0 {
-			break
+		// A round that left as many findings as it found is not worth another, unless
+		// it actually closed open plan tasks (in which case remaining tasks still need work).
+		after := append(append(append([]Issue(nil), latest...), gaps...), visualIssues...)
+		if !repairProgress(before, after) {
+			if ro.openAfter == 0 || ro.openAfter >= ro.openBefore {
+				break
+			}
 		}
 	}
+	// Drop any repair items left open by an iteration-capped repair round BEFORE the
+	// flow gate runs, so flow_gate does not spend turns closing stale fix- tasks.
+	w.dropOpenRepairTasks()
 	// User-flow gate: now that the app is built and every fix testing found is done,
 	// author and replay of_test.js against the FINISHED app (user-flow tests on, and the
 	// project has pages or an API). It runs last, so the single "it's live" summary lands
 	// after it, not before the QA that would otherwise contradict it.
-	if flowIssues, ferr := w.runFlowGate(ctx, plan); ferr != nil {
+	var flowIssues []Issue
+	if fi, ferr := w.runFlowGate(ctx, plan, pendingAnswer); ferr != nil {
 		if errors.Is(ferr, errStagePaused) {
 			return Outcome{}, ferr
 		}
@@ -132,20 +209,19 @@ func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 		}
 		w.logger.Warn("build: flow gate failed, shipping without flow verification", "error", ferr)
 	} else {
-		latest = append(latest, flowIssues...)
+		flowIssues = fi
 	}
-	w.dropOpenRepairTasks()
-	// Gaps still open ship with the sweep's findings: as known issues for the owner,
-	// in the run log for triage, and in the live agent's first wake.
-	latest = append(latest, gaps...)
-	// Drifting page styles are worth a repair attempt but are not a defect the owner can
-	// hit, so what the repair rounds left of them ships as a warning, never as a failure.
-	latest = styleDriftAsWarning(latest)
+	// Freeze what ships into ONE value: the last validator sweep, then the user-flow
+	// findings (none when the gate did not run), then the open spec-audit gaps, with
+	// drifting-style findings downgraded to warnings. The go-live gate and the completion
+	// report both read this; nothing mutates it after here. Gaps still open also ride the
+	// run log for triage and the live agent's first wake.
+	v := makeBuildVerdict(latest, flowIssues, append(gaps, visualIssues...))
 	knownIssues := false
 	// issueReasons say, in owner-facing words, why the build ships flagged; the go-live
 	// card lists them so "known issues" is never a bare warning.
 	var issueReasons []string
-	if fixable := FixableErrors(latest); len(fixable) > 0 && !onlyFlowIssues(fixable) {
+	if fixable := v.fixable(); len(fixable) > 0 && !onlyFlowIssues(fixable) {
 		w.logger.Info("build: shipping with validator findings", "issues", len(fixable))
 		knownIssues = true
 		issueReasons = append(issueReasons, fmt.Sprintf("%d automatic check%s still failing after the build", len(fixable), pluralS(len(fixable))))
@@ -153,13 +229,13 @@ func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 
 	// Record the validator sweep as the authoritative shipped verdict, before the
 	// go-live gate so it lands whether the build ships or is blocked.
-	w.runlog.finalValidation(w.run.ID, latest)
-	if crashed := countCategory(latest, validatorCrashCategory); crashed > 0 {
+	w.runlog.finalValidation(w.run.ID, v.issues)
+	if crashed := v.crashed(); crashed > 0 {
 		knownIssues = true
 		issueReasons = append(issueReasons, fmt.Sprintf("%d automatic check%s could not run, so part of the app is untested", crashed, pluralS(crashed)))
 	}
-	flowUnverified := unverifiedFlows(latest)
-	flows := w.flowCheckFor(latest)
+	flowUnverified := v.flowUnverified()
+	flows := w.flowCheckFor(v.issues)
 
 	// Unbuilt work is a known issue even when every validator is clean: validators only
 	// inspect what was built, so a checklist item that never ran leaves nothing to find.
@@ -179,7 +255,7 @@ func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 	// The go-live gate. Everything above may ship imperfect work (knownIssues); this
 	// decides the one thing it must never cover: an app broken the moment someone opens
 	// it. Reads the sweep above.
-	if blocking := blockingErrors(latest); len(blocking) > 0 {
+	if blocking := v.blocking(); len(blocking) > 0 {
 		switch policy := w.deployPolicy(); policy {
 		case policyStrict:
 			w.refuseGoLive(blocking)
@@ -200,6 +276,40 @@ func (buildStage) Run(ctx context.Context, w *Worker, r *Run) (Outcome, error) {
 	return Outcome{Done: true}, nil
 }
 
+// buildVerdict is the finished build's shipped findings, assembled once (makeBuildVerdict)
+// after the repair loop and the flow gate and then read-only. The go-live gate and the
+// completion report both read this one value, so "what ships" lives in one place instead
+// of a slice mutated in several. Checklist items that never ran are a sibling value
+// (unfinishedTasks): they come from the checklist, not the validators, and are computed
+// after this.
+type buildVerdict struct {
+	issues []Issue // validators ++ flows ++ gaps, drifting-style findings downgraded to warnings
+}
+
+// makeBuildVerdict freezes the shipped finding set in order: the last validator sweep,
+// then the user-flow findings (empty when the flow gate did not run), then the open
+// spec-audit gaps, with drifting-style findings downgraded to non-failing warnings.
+func makeBuildVerdict(validators, flows, gaps []Issue) buildVerdict {
+	all := make([]Issue, 0, len(validators)+len(flows)+len(gaps))
+	all = append(all, validators...)
+	all = append(all, flows...)
+	all = append(all, gaps...)
+	return buildVerdict{issues: styleDriftAsWarning(all)}
+}
+
+// fixable is the shipped errors a fix-pass could act on (warnings excluded).
+func (v buildVerdict) fixable() []Issue { return FixableErrors(v.issues) }
+
+// crashed counts findings from a validator that could not run, so part of the app is untested.
+func (v buildVerdict) crashed() int { return countCategory(v.issues, validatorCrashCategory) }
+
+// flowUnverified names the user flows that shipped unverified (replayed but never passed).
+func (v buildVerdict) flowUnverified() []string { return unverifiedFlows(v.issues) }
+
+// blocking is the subset the go-live gate must never ship silently: an app broken the
+// moment someone opens it.
+func (v buildVerdict) blocking() []Issue { return blockingErrors(v.issues) }
+
 // runWholeBuild runs one continuous build session over the whole plan. A pending owner
 // question pauses.
 func (w *Worker) runWholeBuild(ctx context.Context, plan *Plan, ownerAnswer string) (SessionResult, error) {
@@ -209,16 +319,7 @@ func (w *Worker) runWholeBuild(ctx context.Context, plan *Plan, ownerAnswer stri
 	if w.run != nil {
 		w.runlog.editStats(w.run.ID, 0, res)
 	}
-	if err == nil && res.Paused {
-		// An owner stop is parked by drive(), the single authority for stop
-		// handling, so only a genuine owner question parks here. Parking a stop as
-		// a question would label the run awaiting an answer that never comes, and
-		// that label is what a resume reads to decide whether it may proceed. When
-		// a stop raced a question, this still parks the question and drive's stop
-		// branch preserves that reason over owner_stop.
-		if res.EndDetail != endOwnerStop.detail {
-			w.pauseAwaitingAnswers()
-		}
+	if w.settlePausedSession(res, err) {
 		return res, errStagePaused
 	}
 	// Ending says how the session stopped, never whether the work got done: the
@@ -237,9 +338,12 @@ func (w *Worker) runWholeBuild(ctx context.Context, plan *Plan, ownerAnswer stri
 func (w *Worker) buildWholeSpec(plan *Plan, ownerAnswer string) SessionSpec {
 	spec := DefaultSpec(StageBuild)
 	spec.Guard = &RepeatGuard{}
+	spec.BlockFlowActions = true
+	spec.OmitToolActions = testingOmitFlows
+	spec.ExtraHiddenGuides = map[string]bool{"user_flows": true}
 	spec.PreloadTools = buildAllTools(plan)
 	spec.System = w.buildSystemPrompt(plan)
-	spec.OnTurnEnd = w.withOwnerInbox(w.buildTurnEnd())
+	spec.OnTurnEnd = w.withOwnerInbox(w.buildTurnEnd(false))
 	spec.OnModelDone = w.buildModelDone()
 	spec.SeedGuides, _ = w.buildSeedGuides(plan)
 
@@ -306,9 +410,23 @@ const trackNudgeAfterSaves = 6
 
 // trackNudge is injected once when a build keeps writing files but has completed no
 // checklist item: the owner's progress view sits at "not done" all build, then flips at
-// once - the defect the build frame's Track rule names. Seen in a real run: a split game
-// saved 23 modules across 17 turns and never called complete.
+// once - the defect the build frame's Track rule names. Prevents multi-module builds
+// from saving many files across turns without calling complete.
 const trackNudge = "You have saved several files but completed no checklist item yet, so the owner's progress view still shows nothing done. Complete every item whose deliverables now exist and are wired (manage_tasks action=complete, one per task_id, with a one-line result), then keep to the Track step of your build frame."
+
+// projectHasDeliverables reports whether the project already has any saved
+// files or dynamic tables (used to distinguish an empty stalled build from a
+// partial or resumed one).
+func projectHasDeliverables(d *sql.DB) bool {
+	if d == nil {
+		return false
+	}
+	var n int
+	if d.QueryRow(`SELECT (SELECT COUNT(*) FROM of_files) + (SELECT COUNT(*) FROM of_dynamic_tables)`).Scan(&n) == nil {
+		return n > 0
+	}
+	return false
+}
 
 // countFileWrites counts the manage_files save/patch actions in one turn's calls.
 func countFileWrites(calls []llm.ToolCall) int {
@@ -344,7 +462,23 @@ func countTaskCompletes(calls []llm.ToolCall) int {
 	return n
 }
 
-// callsPageProbe reports whether the turn ran manage_testing's page or module probe.
+// planTasksResolved reports whether the checklist has at least one plan item and
+// every plan item is already done or blocked (used to skip runWholeBuild on a resume
+// after a pause in repairRound or runFlowGate).
+func planTasksResolved(d *sql.DB) bool {
+	if d == nil {
+		return false
+	}
+	var total, open int
+	err := d.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END), 0)
+		 FROM of_tasks WHERE COALESCE(origin, '') <> ?`,
+		TaskPending, TaskActive, TaskOriginRepair,
+	).Scan(&total, &open)
+	return err == nil && total > 0 && open == 0
+}
+
+// callsPageProbe reports whether the turn ran manage_testing's page, explore, or module probe.
 func callsPageProbe(calls []llm.ToolCall) bool {
 	for _, c := range calls {
 		if c.Name != "manage_testing" {
@@ -353,7 +487,7 @@ func callsPageProbe(calls []llm.ToolCall) bool {
 		var a struct {
 			Action string `json:"action"`
 		}
-		if json.Unmarshal([]byte(c.Arguments), &a) == nil && (a.Action == "test_page" || a.Action == "test_module") {
+		if json.Unmarshal([]byte(c.Arguments), &a) == nil && (a.Action == "test_page" || a.Action == "test_module" || a.Action == "explore") {
 			return true
 		}
 	}
@@ -381,7 +515,9 @@ const finalProbeNudge = "Every checklist item is resolved, but no page probe ran
 // the decision. A mid-build turn that batch-completes many items earns a one-time
 // re-check nudge, and once every item is resolved (done or blocked) the session stops
 // with checklist_complete. Publishes the queue each turn for the UI.
-func (w *Worker) buildTurnEnd() func(int, []llm.ToolCall, int) (string, *ending) {
+// When isRepair is true, finalProbeNudge is skipped because repairInstruction directs
+// targeted explore/test_page checks and runValidators runs immediately after the round.
+func (w *Worker) buildTurnEnd(isRepair bool) func(int, []llm.ToolCall, int) (string, *ending) {
 	// Seed the per-task completion tracker with items already done at session start, so a
 	// resume never re-attributes a pre-existing completion. Only a transition to done
 	// DURING this session emits a RunLogTask event, which buildTokenSummary windows build
@@ -438,9 +574,10 @@ func (w *Worker) buildTurnEnd() func(int, []llm.ToolCall, int) (string, *ending)
 			probed = true
 		}
 		completes := countTaskCompletes(calls)
-		sessionWrites += countFileWrites(calls)
+		fileWrites := countFileWrites(calls)
+		sessionWrites += fileWrites
 		sessionCompletes += completes
-		if writeRejects > 0 && repairTurns < maxRejectRepairTurns {
+		if writeRejects > 0 && fileWrites > 0 && repairTurns < maxRejectRepairTurns {
 			repairTurns++
 			w.logger.Info("build: turn had rejected edits, asking for the repair before stopping",
 				"rejects", writeRejects, "iteration", iter, "repair_turn", repairTurns)
@@ -461,7 +598,7 @@ func (w *Worker) buildTurnEnd() func(int, []llm.ToolCall, int) (string, *ending)
 		if !allResolved {
 			return "", nil
 		}
-		if !probed && !probeNudged && tasksHavePage(all) {
+		if !isRepair && !probed && !probeNudged && tasksHavePage(all) {
 			probeNudged = true
 			w.logger.Info("build: no page probe ran, asking for one before stopping", "iteration", iter)
 			return finalProbeNudge, nil
@@ -540,7 +677,7 @@ func (w *Worker) validationContext(ctx context.Context) context.Context {
 	ctx = flowsnap.WithOpener(ctx, w.deps.DB.DB, w.pdb, w.deps.ProjectDBManager.ProjectDir(w.projectID), w.projectID)
 	// Flows also reach past the page: the app's outgoing mail (kept, not sent),
 	// seeded accounts, scheduled tasks and webhooks.
-	return probe.WithFlowHooks(ctx, flowhooks.New(w.projectID, w.pdb.ToolHandle(ctx), w.deps.JWTManager, w.deps.Encryptor))
+	return probe.WithFlowHooks(ctx, flowhooks.New(w.projectID, w.pdb.ToolHandle(ctx), w.deps.JWTManager, w.deps.Encryptor, w.deps.ScheduleRunner))
 }
 
 // validatorCrashCategory marks the warning a crashed validator leaves in its place, so a
@@ -566,11 +703,33 @@ func validatorCrashIssue(name string) Issue {
 	}
 }
 
-// runValidators executes every registered validator and pools their
-// error-severity issues.
+// settlePausedSession parks a session that paused for owner input (excluding
+// owner-initiated stops, which drive() settles) and reports whether the caller
+// should propagate errStagePaused.
+func (w *Worker) settlePausedSession(res SessionResult, err error) bool {
+	if err != nil || !res.Paused {
+		return false
+	}
+	if res.EndDetail != endOwnerStop.detail {
+		w.pauseAwaitingAnswers()
+	}
+	return true
+}
+
+// runValidators executes every registered validator (except flow_tests) and pools their
+// issues.
 func (w *Worker) runValidators(ctx context.Context) []Issue {
+	// The flow validator runs only in the post-build flow gate (runFlowGate), never in
+	// the in-loop sweep: during the build and its repair rounds of_test.js does not exist
+	// yet, and the gate's own flow_tests run is the authoritative verdict.
+	return w.runValidatorList(ctx, withoutFlowValidator(validators()))
+}
+
+// runValidatorList executes the given validators (parallel first, then SequentialValidators)
+// with panic recovery, runlog recording, and speculative normalization.
+func (w *Worker) runValidatorList(ctx context.Context, all []Validator) []Issue {
 	baseURL, hostHeader := w.probeTarget()
-	if baseURL == "" {
+	if baseURL == "" || len(all) == 0 {
 		return nil
 	}
 	ctx = w.validationContext(ctx)
@@ -579,11 +738,6 @@ func (w *Worker) runValidators(ctx context.Context) []Issue {
 	// are collected by index so the issue order stays deterministic: the fix loop
 	// presents findings in this order, and a run that reordered them under scheduling
 	// noise would be unreproducible.
-	all := validators()
-	// The flow validator runs only in the post-build flow gate (runFlowGate), never in
-	// the in-loop sweep: during the build and its repair rounds of_test.js does not exist
-	// yet, and the gate's own flow_tests run is the authoritative verdict.
-	all = withoutFlowValidator(all)
 	found := make([][]Issue, len(all))
 	sem := make(chan struct{}, validatorConcurrency)
 	var wg sync.WaitGroup

@@ -400,33 +400,6 @@ func looseString(el json.RawMessage) string {
 // questions" rule in the plan prompt).
 const MaxPlanQuestions = 2
 
-// largePlanTaskThreshold is the soft task/file count above which a single continuous build
-// session accumulates enough resident context to be worth flagging. Advisory only: the
-// planner legitimately scales tasks with project size, so this never blocks a build;
-// PlanScopeAdvisory surfaces it in the run log.
-const largePlanTaskThreshold = 24
-
-// PlanScopeAdvisory returns a human-readable advisory when a plan is large enough that its
-// single-session build accumulates substantial context, or "" otherwise. It counts both
-// tasks and the distinct files they declare, since context grows with files, not task count.
-func PlanScopeAdvisory(p *Plan) string {
-	if p == nil {
-		return ""
-	}
-	paths := make(map[string]bool)
-	for _, t := range p.Tasks {
-		for _, pth := range t.Paths {
-			if pth = strings.TrimSpace(pth); pth != "" {
-				paths[pth] = true
-			}
-		}
-	}
-	if len(p.Tasks) <= largePlanTaskThreshold && len(paths) <= largePlanTaskThreshold {
-		return ""
-	}
-	return fmt.Sprintf("large plan: %d tasks declaring %d distinct files build in one continuous session; project context accumulates across the whole build (token-efficiency factor)", len(p.Tasks), len(paths))
-}
-
 // allowedColumnTypes mirrors the column-type contract in the plan prompt.
 // Surfaced via the {{ALLOWED_COLUMN_TYPES}} sentinel.
 var allowedColumnTypes = []string{
@@ -449,6 +422,12 @@ func canonicalizePlan(p *Plan) {
 	normalizeDecisionOps(p)
 	normalizeRealtimeChoices(p)
 	normalizeDesignSystem(p)
+	// Home a spine task's exports in a store module when it declares exports but named no
+	// store (the deterministic half of entryExportsProblem). Runs here so every parsed plan
+	// - the initial one and every re-plan output, which also re-parse - is normalized once,
+	// not re-applied by each finalization step. Idempotent: a plan that already homes its
+	// exports is left untouched.
+	normalizeEntryExports(p)
 }
 
 // normalizeDesignSystem cleans the plan's token block. A provider that does not
@@ -537,10 +516,22 @@ func normalizeDecisionOps(p *Plan) {
 	}
 }
 
-// realtimeChoices is the closed set of realtime-model decision choices, one per model
-// tool (webrtc = manage_signaling). Readers compare the choice exactly, so it is
-// canonicalized once at parse time rather than each reader matching its own way.
-var realtimeChoices = []string{"authoritative", "matchmaking", "webrtc", "relay", "tick"}
+// The closed set of realtime-model decision choices, one per model tool
+// (webrtc = manage_signaling). These are the shared vocabulary of the
+// tools.Tool.RealtimeModel trait (realtimeChoiceTool matches on it), so the
+// values must not be renamed independently of the tools that declare them.
+const (
+	realtimeAuthoritative = "authoritative"
+	realtimeMatchmaking   = "matchmaking"
+	realtimeWebRTC        = "webrtc"
+	realtimeRelay         = "relay"
+	realtimeTick          = "tick"
+)
+
+// realtimeChoices is the closed set in match order. The choice is canonicalized once
+// at parse time (normalizeRealtimeChoices) and read back through (*Plan).RealtimeChoice,
+// so no reader matches its own way.
+var realtimeChoices = []string{realtimeAuthoritative, realtimeMatchmaking, realtimeWebRTC, realtimeRelay, realtimeTick}
 
 // realtimeNone is the realtime-model choice of a project with no live shared state (a
 // single-user or offline app). The plan stage asks for the decision on every project,
@@ -596,6 +587,33 @@ func normalizeRealtimeChoices(p *Plan) {
 	}
 }
 
+// RealtimeChoice returns the plan's locked realtime-model choice, canonicalized to one
+// of realtimeChoices (or realtimeNone), or "" when the plan locks no realtime decision.
+// THE one authoritative reader: the build seed, realtime tool pruning, and the coherence
+// guard all route through it, so they cannot answer "which realtime model" differently.
+// normalizeRealtimeChoices already canonicalized the stored choice at parse; the defensive
+// re-normalize here keeps the answer right for a plan that reached a reader uncanonicalized.
+func (p *Plan) RealtimeChoice() string {
+	if p == nil {
+		return ""
+	}
+	for _, d := range p.Decisions {
+		if !isRealtimeModelTopic(d.Topic) {
+			continue
+		}
+		if canon := normalizeRealtimeChoice(d.Choice); canon != "" {
+			return canon
+		}
+		return strings.ToLower(strings.TrimSpace(d.Choice))
+	}
+	return ""
+}
+
+// LocksAuthoritativeRealtime reports whether the plan locked realtime model = authoritative.
+func (p *Plan) LocksAuthoritativeRealtime() bool {
+	return p.RealtimeChoice() == realtimeAuthoritative
+}
+
 // planCheckWarnings returns one line per decision check the conformance validator cannot
 // evaluate, so each disabled check is logged at plan time instead of silently enforcing
 // nothing. Two defects are surfaced: an OP outside the canonical set, and an ARTIFACT/FIELD
@@ -619,7 +637,7 @@ func planCheckWarnings(p *Plan) []string {
 				"decision %q carries unknown check op %q (valid: gt gte lt lte eq ne exists nexists) - the conformance validator will skip this check",
 				d.Topic, d.Check.Op))
 		}
-		if !decisionCheckResolvable(d.Check.Artifact, d.Check.Field) {
+		if !DecisionCheckResolvable(d.Check.Artifact, d.Check.Field) {
 			warnings = append(warnings, fmt.Sprintf(
 				"decision %q carries a check the conformance validator cannot resolve: artifact %q field %q is outside its vocabulary (checkable artifacts: websocket, trigger, endpoint) - the check will be skipped, enforcing nothing. Emit a check only when a guide's `## Decision:` block gives you one; otherwise omit it.",
 				d.Topic, d.Check.Artifact, d.Check.Field))
@@ -687,26 +705,6 @@ func clearStateLeafDeps(p *Plan) {
 			p.Tasks[i].Deps = nil
 		}
 	}
-}
-
-// isZeroImportStateLeaf reports whether a task is the split-out store task: it owns
-// a `*.state.js` client module, modifies no other task's file (no Edits), and owns
-// no page route. Its file merely existing is all its completion needs, so it depends
-// on nothing.
-func isZeroImportStateLeaf(t PlanTaskSpec) bool {
-	if len(t.Edits) > 0 || len(t.Paths) == 0 {
-		return false
-	}
-	hasStateLeaf := false
-	for _, p := range t.Paths {
-		if isPageRoutePath(p) {
-			return false // owns a route -> a spine/page task, not a store task
-		}
-		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(p)), ".state.js") {
-			hasStateLeaf = true
-		}
-	}
-	return hasStateLeaf
 }
 
 // isLibraryRegistrationTask reports whether a task's work is merely registering external

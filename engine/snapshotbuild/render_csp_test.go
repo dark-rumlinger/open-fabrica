@@ -103,15 +103,15 @@ func TestCSPSectionDoesNotRepeatOnEveryDelta(t *testing.T) {
 	}
 }
 
-// The owner's choice to turn user-flow tests off reaches the model through the rendered
-// snapshot, and the default (on) adds nothing.
-func TestUserFlowsOffSectionReachesTheRenderedSnapshot(t *testing.T) {
+// When user-flow tests are off, the snapshot must not mention user flows or of_test.js
+// at all (guides, tools, and prompts hide user flows completely when disabled).
+func TestUserFlowsOffSectionOmittedFromRenderedSnapshot(t *testing.T) {
 	snap := &ProjectSnapshot{Pages: []PageRef{{Path: "/", Title: "Home"}}, UserFlowsOff: true}
-	if out := snap.Render(); !strings.Contains(out, "### User-flow tests") || !strings.Contains(out, "OFF") {
-		t.Fatalf("the off state must be stated in the snapshot:\n%s", out)
+	if out := snap.Render(); strings.Contains(out, "User-flow") || strings.Contains(out, "of_test.js") {
+		t.Fatalf("user-flow tests off must not mention user flows in the snapshot:\n%s", out)
 	}
 	snap.UserFlowsOff = false
-	if strings.Contains(snap.Render(), "User-flow tests") {
-		t.Error("the default must add nothing to the snapshot the model reads every turn")
+	if out := snap.Render(); strings.Contains(out, "User-flow") || strings.Contains(out, "of_test.js") {
+		t.Fatalf("enabled user-flow tests must not add a user-flow section to the snapshot:\n%s", out)
 	}
 }

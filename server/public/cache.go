@@ -9,11 +9,17 @@ import (
 	"openfabrica/internal/safego"
 )
 
+// maxAPICacheEntries caps the in-memory GET cache so unique query strings cannot
+// grow the map without bound between eviction sweeps.
+const maxAPICacheEntries = 4096
+
 // apiCache is a simple in-memory cache for API GET responses.
 // Keyed by "projectID:path:queryString", entries expire after a configurable TTL.
 type apiCache struct {
-	mu      sync.RWMutex
-	entries map[string]*cacheEntry
+	mu       sync.RWMutex
+	entries  map[string]*cacheEntry
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 type cacheEntry struct {
@@ -23,16 +29,33 @@ type cacheEntry struct {
 }
 
 func newAPICache() *apiCache {
-	c := &apiCache{entries: make(map[string]*cacheEntry)}
+	c := &apiCache{
+		entries: make(map[string]*cacheEntry),
+		stopCh:  make(chan struct{}),
+	}
 	// Background cleanup every 60 seconds.
 	safego.Go("api-cache-evict", func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			c.evict()
+		for {
+			select {
+			case <-ticker.C:
+				c.evict()
+			case <-c.stopCh:
+				return
+			}
 		}
 	})
 	return c
+}
+
+// Close stops the background eviction goroutine.
+func (c *apiCache) Close() {
+	c.stopOnce.Do(func() {
+		if c.stopCh != nil {
+			close(c.stopCh)
+		}
+	})
 }
 
 // get returns a cached response if it exists and hasn't expired.
@@ -49,11 +72,32 @@ func (c *apiCache) get(key string) ([]byte, int, bool) {
 
 // set stores a response in the cache with the given TTL.
 func (c *apiCache) set(key string, body []byte, status int, ttl time.Duration) {
+	now := time.Now()
 	c.mu.Lock()
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= maxAPICacheEntries {
+		for k, entry := range c.entries {
+			if now.After(entry.expiresAt) {
+				delete(c.entries, k)
+			}
+		}
+		if len(c.entries) >= maxAPICacheEntries {
+			var oldestKey string
+			var oldestExp time.Time
+			first := true
+			for k, entry := range c.entries {
+				if first || entry.expiresAt.Before(oldestExp) {
+					oldestKey, oldestExp, first = k, entry.expiresAt, false
+				}
+			}
+			if oldestKey != "" {
+				delete(c.entries, oldestKey)
+			}
+		}
+	}
 	c.entries[key] = &cacheEntry{
 		body:      body,
 		status:    status,
-		expiresAt: time.Now().Add(ttl),
+		expiresAt: now.Add(ttl),
 	}
 	c.mu.Unlock()
 }

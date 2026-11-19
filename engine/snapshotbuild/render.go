@@ -274,7 +274,6 @@ func (s *ProjectSnapshot) renderWithHeader(header string, mode explainMode) stri
 	}
 
 	writeCSP(&b, mode, s.EffectiveCSP)
-	writeUserFlowsOff(&b, s.UserFlowsOff)
 
 	if len(s.Pages) == 0 && len(s.Layouts) == 0 && len(s.Components) == 0 && len(s.Tables) == 0 && len(s.Views) == 0 && len(s.Endpoints) == 0 && len(s.Files) == 0 {
 		b.WriteString("\n*(empty project, nothing built yet)*\n")
@@ -501,15 +500,6 @@ func (s *ProjectSnapshot) RenderDelta(baseline map[string]string, prev *ProjectS
 		fmt.Fprintf(&b, "\n### Removed\n%s\n", strings.Join(removed, ", "))
 	}
 	return b.String()
-}
-
-// writeUserFlowsOff tells the build the owner turned user-flow tests off. Silent when on.
-func writeUserFlowsOff(b *strings.Builder, off bool) {
-	if !off {
-		return
-	}
-	b.WriteString("\n### User-flow tests\n")
-	b.WriteString("- The owner turned user-flow tests OFF for this project: do not write or replay `of_test.js`, and ignore any guidance that asks for it. Page probes (`test_page`) still apply.\n")
 }
 
 // writeCSP reports the Content-Security-Policy the project's public pages are served

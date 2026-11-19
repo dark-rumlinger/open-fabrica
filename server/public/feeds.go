@@ -1,7 +1,6 @@
 package public
 
 import (
-	"database/sql"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -33,34 +32,20 @@ func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		table, format, title, desc, link string
-		titleCol, bodyCol, dateCol       string
-		whereJSON                        string
-		linkColNull                      sql.NullString
-		itemLimit                        int
-	)
-	err := projectDB.Reader().QueryRow(`
-		SELECT table_name, format, title, description, link,
-		       title_column, body_column, link_column, date_column,
-		       item_limit, where_json
-		FROM of_feed_endpoints WHERE path = ?`, path,
-	).Scan(&table, &format, &title, &desc, &link,
-		&titleCol, &bodyCol, &linkColNull, &dateCol, &itemLimit, &whereJSON)
+	ep, err := store.LoadFeedEndpoint(projectDB.Reader(), path)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "feed not found")
 		return
 	}
 
-	if security.ValidateTableName(table) != nil ||
-		security.ValidateColumnName(titleCol) != nil ||
-		security.ValidateColumnName(bodyCol) != nil ||
-		security.ValidateColumnName(dateCol) != nil {
+	if security.ValidateTableName(ep.TableName) != nil ||
+		security.ValidateColumnName(ep.TitleColumn) != nil ||
+		security.ValidateColumnName(ep.BodyColumn) != nil ||
+		security.ValidateColumnName(ep.DateColumn) != nil {
 		writeError(w, http.StatusBadRequest, "invalid feed column")
 		return
 	}
-	linkCol := linkColNull.String
-	if linkCol != "" && security.ValidateColumnName(linkCol) != nil {
+	if ep.LinkColumn != "" && security.ValidateColumnName(ep.LinkColumn) != nil {
 		writeError(w, http.StatusBadRequest, "invalid link column")
 		return
 	}
@@ -68,9 +53,9 @@ func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
 	// Build the parameterized WHERE clause from the stored structured filter.
 	var whereSQL string
 	var whereParams []any
-	if whereJSON != "" && whereJSON != "[]" {
+	if ep.WhereJSON != "" && ep.WhereJSON != "[]" {
 		var filters []any
-		if jsonErr := json.Unmarshal([]byte(whereJSON), &filters); jsonErr != nil {
+		if jsonErr := json.Unmarshal([]byte(ep.WhereJSON), &filters); jsonErr != nil {
 			writeError(w, http.StatusInternalServerError, "feed filter parse: "+jsonErr.Error())
 			return
 		}
@@ -83,44 +68,23 @@ func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
 		whereParams = params
 	}
 
-	cols := titleCol + ", " + bodyCol + ", " + dateCol
-	if linkCol != "" {
-		cols = titleCol + ", " + bodyCol + ", " + dateCol + ", " + linkCol
-	}
-	query := "SELECT " + cols + " FROM " + table + whereSQL +
-		" ORDER BY " + dateCol + " DESC LIMIT ?"
-	queryArgs := append(whereParams, itemLimit)
-	rows, err := projectDB.Reader().Query(query, queryArgs...)
+	rawItems, err := store.LoadFeedItems(projectDB.Reader(), ep, whereSQL, whereParams)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "feed query: "+err.Error())
 		return
 	}
-	defer rows.Close()
 
-	items := []feedItemAlias{}
-	for rows.Next() {
-		var it feedItemAlias
-		var dateStr string
-		var linkVal sql.NullString
-		var scanErr error
-		if linkCol != "" {
-			scanErr = rows.Scan(&it.Title, &it.Body, &dateStr, &linkVal)
-		} else {
-			scanErr = rows.Scan(&it.Title, &it.Body, &dateStr)
-		}
-		if scanErr != nil {
-			continue
-		}
-		it.Date = parseFeedDate(dateStr)
-		if linkVal.Valid {
-			it.Link = linkVal.String
-		}
-		items = append(items, it)
+	items := make([]feedItemAlias, 0, len(rawItems))
+	for _, r := range rawItems {
+		items = append(items, feedItemAlias{
+			Title: r.Title,
+			Body:  r.Body,
+			Date:  parseFeedDate(r.Date),
+			Link:  r.Link,
+		})
 	}
-	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "feed rows: "+err.Error())
-		return
-	}
+
+	format, title, desc, link := ep.Format, ep.Title, ep.Description, ep.Link
 
 	if format == "atom" {
 		renderAtom(w, title, desc, link, items)

@@ -93,9 +93,9 @@ func ListUsers(db *sql.DB) ([]User, error) {
 	return users, rows.Err()
 }
 
-func CountUsers(db *sql.DB) (int, error) {
+func CountUsers(exec Executor) (int, error) {
 	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	err := exec.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
 	return count, err
 }
 
@@ -116,17 +116,6 @@ func BumpUserTokenVersion(db *sql.DB, id int) error {
 	_, err := db.Exec(
 		"UPDATE users SET token_version = token_version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
 		id,
-	)
-	return err
-}
-
-// UpdateUserRole changes a role and bumps token_version in the same statement, so
-// a demoted admin's existing JWTs stop working at once instead of keeping admin
-// rights until they expire.
-func UpdateUserRole(db *sql.DB, id int, role string) error {
-	_, err := db.Exec(
-		"UPDATE users SET role = ?, token_version = token_version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-		role, id,
 	)
 	return err
 }
@@ -165,4 +154,11 @@ func SetUserAssistantLanguage(db *sql.DB, userID int, lang string) error {
 		userID, lang,
 	)
 	return err
+}
+
+// CountAdminUsers returns the number of users with role 'admin'.
+func CountAdminUsers(db *sql.DB) int {
+	var count int
+	_ = db.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&count)
+	return count
 }

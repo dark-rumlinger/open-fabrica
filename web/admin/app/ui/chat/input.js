@@ -9,6 +9,7 @@ import { h } from '../../core/dom.js';
 import { t } from '../../core/i18n.js';
 import { icon } from '../icon.js';
 import { isSubmitEnter } from '../a11y.js';
+import { createImageAttach } from '../image-attach.js';
 
 /**
  * Create a chat input component.
@@ -37,10 +38,16 @@ export function createChatInput(onSend, onStop, opts = {}) {
     disabled: true,
   });
 
+  const attach = createImageAttach({ onChange: syncButton, label: t('chat.attachImage'), inlinePreview: true });
+  attach.bindPaste(textarea);
+
   const wrapper = h('div', { className: 'chat-input__wrapper' }, [
     textarea,
     sendBtn,
+    attach.fileInput,
+    attach.slot,
   ]);
+  attach.bindDrop(wrapper);
 
   const element = h('div', { className: 'chat-input' }, [wrapper]);
 
@@ -91,7 +98,7 @@ export function createChatInput(onSend, onStop, opts = {}) {
     sendBtn.innerHTML = icon('send');
     sendBtn.title = t('chat.send');
     sendBtn.setAttribute('aria-label', t('chat.send'));
-    sendBtn.disabled = !textarea.value.trim();
+    sendBtn.disabled = !textarea.value.trim() && attach.count() === 0;
   }
 
   textarea.addEventListener('input', () => {
@@ -102,9 +109,12 @@ export function createChatInput(onSend, onStop, opts = {}) {
   // Handle send
   function doSend() {
     const text = textarea.value.trim();
-    if (!text) return;
-    onSend(text);
+    const images = attach.images();
+    const previews = attach.previews();
+    if (!text && images.length === 0) return;
+    onSend(text, images, previews);
     textarea.value = '';
+    attach.clear();
     writeDraft('');
     autoResize();
   }
@@ -160,10 +170,12 @@ export function createChatInput(onSend, onStop, opts = {}) {
     isStopping: () => stopping,
     disable() {
       textarea.disabled = true;
+      attach.setDisabled(true);
       sendBtn.disabled = true;
     },
     enable() {
       textarea.disabled = false;
+      attach.setDisabled(false);
       syncButton();
     },
     focus() {

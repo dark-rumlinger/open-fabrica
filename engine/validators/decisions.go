@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"openfabrica/engine"
+	"openfabrica/internal/endpoints"
 	"openfabrica/internal/wsendpoint"
 )
 
@@ -244,7 +245,7 @@ func endpointField(pdb *sql.DB, id, field string) (any, bool) {
 		FROM of_api_endpoints WHERE path = ?`, path).Scan(&requiresAuth, &publicRead, &role, &owner, &scope); err != nil {
 		return nil, false
 	}
-	return engine.EndpointAuthModel(requiresAuth, publicRead, role, owner, scope), true
+	return endpoints.AuthModel(requiresAuth, publicRead, role, owner, scope), true
 }
 
 // triggerField resolves a trigger-set property for a decision check. The `id` is

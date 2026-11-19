@@ -15,7 +15,6 @@ package engine
 // onto the same request as the assembled PLAN frame (stage_plan.go), so any judgment
 // written here is the frame's rule a second time, in different words, in one prompt - and
 // it is re-sent on every coherence retry. The frame owns the judgment; keep these terse.
-// TestPlanSchemaDescriptionBudget prices a regrowth.
 
 import (
 	"encoding/json"

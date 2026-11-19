@@ -13,14 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"openfabrica/db"
 	"openfabrica/db/models"
 	"openfabrica/engine"
 	"openfabrica/events"
 	"openfabrica/internal/diskpath"
 	"openfabrica/internal/httpx"
 	"openfabrica/internal/msgcat"
-	"openfabrica/security"
+	"openfabrica/store"
 )
 
 // ProjectTransferHandler implements project portability: exporting a live
@@ -47,7 +46,7 @@ const (
 	// entries so a zip bomb (tiny compressed, enormous decompressed) can't fill
 	// the disk on import. Generous relative to a real export; the import path is
 	// admin-only, so this is a backstop, not a tight quota.
-	maxImportUncompressed = 4 << 30 // 4 GB
+	maxImportUncompressed int64 = 4 << 30 // 4 GB
 
 	// transferTimeout bounds one export download or import upload, replacing the
 	// server's 30 s read / 120 s write defaults for those handlers only.
@@ -113,7 +112,7 @@ func (h *ProjectTransferHandler) Export(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to snapshot project database")
 		return
 	}
-	if err := sanitizeExportDB(snapPath); err != nil {
+	if err := store.SanitizeExportDB(snapPath); err != nil {
 		h.deps.Logger.Error("export sanitise failed", "project_id", projectID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to prepare project database")
 		return
@@ -133,11 +132,7 @@ func (h *ProjectTransferHandler) Export(w http.ResponseWriter, r *http.Request) 
 	// Resolve the model's portable identity (vendor + upstream model id). Best
 	// effort: a missing model just yields empty fields and import falls back to
 	// the system default.
-	_ = h.deps.DB.DB.QueryRow(
-		`SELECT p.vendor, m.model_id
-		   FROM llm_models m JOIN providers p ON p.id = m.provider_id
-		  WHERE m.id = ?`, project.LLMModelID,
-	).Scan(&manifest.ProviderVendor, &manifest.ModelID)
+	manifest.ProviderVendor, manifest.ModelID, _ = models.GetModelVendorAndID(h.deps.DB.DB, project.LLMModelID)
 
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -354,13 +349,7 @@ func (h *ProjectTransferHandler) Import(w http.ResponseWriter, r *http.Request) 
 // llm_models.id, falling back to the system default model.
 func (h *ProjectTransferHandler) resolveImportModel(m projectManifest) (int, error) {
 	if m.ProviderVendor != "" && m.ModelID != "" {
-		var id int
-		err := h.deps.DB.DB.QueryRow(
-			`SELECT m.id FROM llm_models m JOIN providers p ON p.id = m.provider_id
-			  WHERE p.vendor = ? AND m.model_id = ? LIMIT 1`,
-			m.ProviderVendor, m.ModelID,
-		).Scan(&id)
-		if err == nil && id > 0 {
+		if id, err := models.FindModelIDByVendorAndModelID(h.deps.DB.DB, m.ProviderVendor, m.ModelID); err == nil && id > 0 {
 			return id, nil
 		}
 	}
@@ -369,120 +358,6 @@ func (h *ProjectTransferHandler) resolveImportModel(m projectManifest) (int, err
 		return 0, errors.New(msgcat.Mark("configure a provider and model first"))
 	}
 	return def.ID, nil
-}
-
-// sanitizeExportDB strips per-instance state and secret values from a snapshot
-// DB before it is bundled into a shareable .of file. Foreign keys are disabled
-// so the deletes are order-independent.
-func sanitizeExportDB(path string) error {
-	dsn := fmt.Sprintf("%s?_pragma=foreign_keys(0)&_pragma=busy_timeout(30000)", path)
-	d, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return fmt.Errorf("opening snapshot: %w", err)
-	}
-	defer d.Close()
-	d.SetMaxOpenConns(1)
-
-	stmts := make([]string, 0, len(db.EphemeralResetStmts)+18)
-	stmts = append(stmts, db.EphemeralResetStmts...)
-	stmts = append(stmts,
-		// History and its body snapshots are stripped per the export policy
-		// (smaller, cleaner file). of_snapshot_blobs holds version snapshots and is
-		// distinct from of_blobs (the general blob store, which is preserved).
-		"DELETE FROM of_file_history",
-		"DELETE FROM of_snapshot_blobs",
-		// Secret values are encrypted with this instance's key and useless /
-		// unsafe elsewhere. Keep the names so the importer knows what to set.
-		"UPDATE of_secrets SET value_encrypted = ''",
-		// A shared project is a clean template: it carries the app and its
-		// authored content but none of its secrets or end-user data. Blank the
-		// plaintext webhook signing secret (keeping the webhook config so the
-		// importer just regenerates a secret; an incoming webhook is rejected
-		// until one is set), and drop per-user 2FA secrets, live login/room/invite
-		// tokens, and tenant records - all instance-scoped and meaningless or
-		// unsafe elsewhere. End-user account rows are cleared separately below.
-		"UPDATE of_webhooks SET secret_encrypted = ''",
-		"DELETE FROM of_user_totp",
-		"DELETE FROM of_magic_tokens",
-		"DELETE FROM of_ws_room_tokens",
-		"DELETE FROM of_tenant_invites",
-		"DELETE FROM of_tenant_members",
-		"DELETE FROM of_tenants",
-		// End-user records that are not account tables: orders and subscriptions
-		// (payer identity, amounts), push endpoints (browser keys), webhook
-		// delivery logs and replay ids (request bodies), agent run transcripts,
-		// live room state and per-day LLM spend. Config rows (of_payment_config,
-		// of_subscription_plans, of_webhooks) are authored content and stay.
-		"DELETE FROM of_payments",
-		"DELETE FROM of_subscriptions",
-		"DELETE FROM of_push_subscriptions",
-		"DELETE FROM of_webhook_logs",
-		"DELETE FROM of_processed_webhooks",
-		"DELETE FROM of_agent_runs",
-		"DELETE FROM of_ws_room_state",
-		"DELETE FROM of_llm_usage_daily",
-	)
-	for _, stmt := range stmts {
-		if _, err := d.Exec(stmt); err != nil {
-			// Tolerate tables that don't exist in this schema version.
-			if !strings.Contains(err.Error(), "no such table") {
-				return fmt.Errorf("sanitising (%s): %w", stmt, err)
-			}
-		}
-	}
-
-	// Empty every dynamic account table so the template ships with no users.
-	if err := clearAuthAccountTables(d); err != nil {
-		return err
-	}
-
-	// Reclaim space freed by the deletes.
-	if _, err := d.Exec("VACUUM"); err != nil {
-		return fmt.Errorf("vacuum: %w", err)
-	}
-	return nil
-}
-
-// clearAuthAccountTables empties every dynamic table an auth endpoint
-// authenticates against, so an exported template carries no end-user accounts
-// (emails, password hashes). The table names come from of_auth_endpoints.table_name
-// - the authoritative pointer to each account table, alongside its username/password
-// columns - and are quoted as identifiers before interpolation. Only auth-referenced
-// tables are cleared; other business tables are preserved as app content. A missing
-// of_auth_endpoints table (older schema) is tolerated as a no-op.
-func clearAuthAccountTables(d *sql.DB) error {
-	rows, err := d.Query("SELECT DISTINCT table_name FROM of_auth_endpoints WHERE table_name <> ''")
-	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
-			return nil
-		}
-		return fmt.Errorf("listing auth account tables: %w", err)
-	}
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return fmt.Errorf("scanning auth account table: %w", err)
-		}
-		tables = append(tables, name)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("listing auth account tables: %w", err)
-	}
-
-	for _, name := range tables {
-		stmt := fmt.Sprintf("DELETE FROM %s", security.QuoteIdent(name))
-		if _, err := d.Exec(stmt); err != nil {
-			// An auth endpoint may point at a table that no longer exists.
-			if strings.Contains(err.Error(), "no such table") {
-				continue
-			}
-			return fmt.Errorf("clearing account table %q: %w", name, err)
-		}
-	}
-	return nil
 }
 
 // diskPathDB is the subset of *db.ProjectDB the remap needs: a read query and a
@@ -497,11 +372,6 @@ type diskPathDB interface {
 // project to newDir (see diskpath.RemapProject).
 func remapProjectDiskPaths(pdb diskPathDB, oldID int, newDir string) error {
 	return diskpath.RemapProject(pdb, oldID, newDir)
-}
-
-// remapDiskPath re-anchors one stored path (see diskpath.Rebase).
-func remapDiskPath(p string, oldID int, newDir string) string {
-	return diskpath.Rebase(p, oldID, newDir)
 }
 
 // readManifest locates and validates manifest.json inside the archive.

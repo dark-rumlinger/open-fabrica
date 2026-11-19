@@ -10,6 +10,7 @@ import (
 	"openfabrica/internal/stringutil"
 	"openfabrica/providers/llm"
 	"openfabrica/store"
+	"openfabrica/tools"
 )
 
 // The repair loop. After the build, the validators and the explore probe test what
@@ -26,7 +27,7 @@ const (
 	// reduces the findings (see repairProgress).
 	maxRepairRounds = 4
 	// repairMaxIterations bounds one repair segment's turns, far below a build's.
-	repairMaxIterations = 40
+	repairMaxIterations = 24
 	// maxRepairItems caps the checklist items one round adds, so one noisy category
 	// cannot make a round as long as the build. Findings sharing a page and category
 	// are one item, so this is a cap on distinct problems.
@@ -38,9 +39,8 @@ const (
 )
 
 // repairFindings picks the findings worth a repair turn: deterministic errors only
-// (FixableErrors). A red user flow is included: it names the step that failed and the
-// reason, and shipping a known-red journey whose cause the message states is worse than
-// one more round. The repair instruction says how to tell an app bug from a script step.
+// (FixableErrors), ordered by how directly a user meets them. User flows are not
+// repaired here (they run in the post-build flow gate).
 func repairFindings(issues []Issue) []Issue {
 	out := FixableErrors(issues)
 	// What a user meets first takes the round's slots: a page that throws or shows
@@ -57,9 +57,8 @@ func repairFindings(issues []Issue) []Issue {
 var repairRanks = map[string]int{
 	"runtime": 0, "blank_page": 0, "inert_page": 0, "hidden_ui": 0, "js_syntax": 0, "module_imports": 0,
 	specGapCategory: 1,
-	"flow":          2,
 	"click_error":   2, "inert_click": 2, "dead_control": 2, "dead_toggle": 2, "covered_control": 2,
-	"layout_overflow": 3, "dead_link": 3, "style_drift": 3,
+	"layout_overflow": 3, "dead_link": 3, "style_drift": 3, "visual_defect": 3,
 }
 
 func repairRank(category string) int {
@@ -117,15 +116,16 @@ func repairTasks(findings []Issue, round int) []Task {
 // repairSignatures records, per repair item, the signatures of the findings it answers,
 // so a dispute of the item can be matched to the findings of the next sweep.
 func (w *Worker) repairSignatures(findings []Issue, round int) {
-	if w.repairSigs == nil {
-		w.repairSigs = map[string][]string{}
+	bs := w.bs()
+	if bs.repairSigs == nil {
+		bs.repairSigs = map[string][]string{}
 	}
 	for _, is := range findings {
 		if is.Signature == "" {
 			continue
 		}
 		id := repairTaskID(is, round)
-		w.repairSigs[id] = append(w.repairSigs[id], is.Category+"\x00"+is.Signature)
+		bs.repairSigs[id] = append(bs.repairSigs[id], is.RepairKey())
 	}
 }
 
@@ -139,8 +139,10 @@ const disputePrefix = "disputed:"
 // collectDisputes reads the repair items the builder completed as "disputed: <why>" and
 // remembers their findings so the next sweep does not report them again.
 func (w *Worker) collectDisputes() {
+	bs := w.bs()
 	rows, err := w.pdb.Reader().Query(`SELECT id, COALESCE(result,'') FROM of_tasks WHERE origin = ? AND status = ?`, TaskOriginRepair, TaskDone)
 	if err != nil {
+		w.logger.Warn("build: reading disputed repair items failed, none are honoured this round", "error", err)
 		return
 	}
 	defer rows.Close()
@@ -149,15 +151,16 @@ func (w *Worker) collectDisputes() {
 		if rows.Scan(&id, &result) != nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(result)), disputePrefix) {
 			continue
 		}
-		for _, cs := range w.repairSigs[id] {
-			cat, sig, _ := strings.Cut(cs, "\x00")
+		for _, cs := range bs.repairSigs[id] {
+			// cs is already a RepairKey (category\x00signature); split only to gate on category.
+			cat, _, _ := strings.Cut(cs, "\x00")
 			if !disputableCategories[cat] {
 				continue
 			}
-			if w.disputed == nil {
-				w.disputed = map[string]bool{}
+			if bs.disputed == nil {
+				bs.disputed = map[string]bool{}
 			}
-			w.disputed[cat+"\x00"+sig] = true
+			bs.disputed[cs] = true
 			w.logger.Info("build: finding disputed by the builder", "item", id, "category", cat, "why", strings.TrimSpace(result))
 		}
 	}
@@ -176,13 +179,14 @@ func (w *Worker) specGapResponses() map[string]string {
 		return nil
 	}
 	defer rows.Close()
+	bs := w.bs()
 	out := map[string]string{}
 	for rows.Next() {
 		var id, result string
 		if rows.Scan(&id, &result) != nil || strings.TrimSpace(result) == "" {
 			continue
 		}
-		for _, cs := range w.repairSigs[id] {
+		for _, cs := range bs.repairSigs[id] {
 			cat, sig, _ := strings.Cut(cs, "\x00")
 			if cat == specGapCategory {
 				out[specGapTaskID(sig)] = strings.TrimSpace(result)
@@ -197,12 +201,13 @@ func (w *Worker) specGapResponses() map[string]string {
 
 // dropDisputed removes the findings the builder disputed from a sweep.
 func (w *Worker) dropDisputed(issues []Issue) []Issue {
-	if len(w.disputed) == 0 {
+	bs := w.bs()
+	if len(bs.disputed) == 0 {
 		return issues
 	}
 	out := issues[:0:0]
 	for _, is := range issues {
-		if w.disputed[is.Category+"\x00"+is.Signature] {
+		if bs.disputed[is.RepairKey()] {
 			continue
 		}
 		out = append(out, is)
@@ -239,7 +244,7 @@ func repairKeys(issues []Issue) map[string]bool {
 	out := make(map[string]bool, len(issues))
 	for _, is := range issues {
 		if is.Signature != "" {
-			out[is.Category+"\x00"+is.Signature] = true
+			out[is.RepairKey()] = true
 		} else {
 			out[is.Fingerprint()] = true
 		}
@@ -276,14 +281,17 @@ func repairLabel(category string) string {
 // repairInstruction is the repair segment's task message: what happened, what to do,
 // and the checklist with the new items open. User flows are not repaired here - they are
 // a separate post-build gate (runFlowGate) - so this is non-flow findings only.
-func repairInstruction(d *sql.DB) string {
+func repairInstruction(d *sql.DB, ownerAnswer string) string {
 	var b strings.Builder
 	b.WriteString("[mode: repair]\n\n")
+	if ownerAnswer != "" {
+		b.WriteString("The owner answered your question(s):\n" + ownerAnswer + "\n\n")
+	}
 	b.WriteString("The build is finished, and the platform has tested it against the plan (where the project has pages: every page loaded in a real browser, each control clicked, the layout checked at desktop and phone sizes). ")
 	b.WriteString("What it found is on your checklist as open `fix-` items, each naming the problem and where it is; plan items left unchecked are open too.\n\n")
 	b.WriteString("For each open item: read the code involved first, fix the cause with the smallest change that does it, ")
 	b.WriteString("verify it with `manage_testing action=explore page_path=...` for a click finding or `test_page` for a page error, then complete it. ")
-	b.WriteString("Change nothing else: no rewrite of working code (a finding about inconsistent styling is the exception: fix it in the shared stylesheet). ")
+	b.WriteString("Change nothing else: no rewrite of working code (a finding about inconsistent styling is the exception: fix it in the shared stylesheet), and do NOT spend repair turns searching the web for new external assets (use existing project files or procedural SVG/canvas/WebAudio). ")
 	b.WriteString("Never add decorative animation or fake feedback to make a control look active, and never turn off pointer events on a modal or intro to make a covered control clickable. ")
 	b.WriteString("A click finding that is wrong (the control really works, but through audio, a canvas or 3D scene, or a native dialog the check cannot see) ")
 	b.WriteString("is completed with a result that starts with `disputed:` and says why in one line; any other finding that is wrong is completed with a one-line result saying why (the re-check reads it). ")
@@ -295,15 +303,17 @@ func repairInstruction(d *sql.DB) string {
 // repairSpec is the build spec with the repair instruction as its task and a short
 // turn budget. owner, shared and intent are the build's own, so the provider cache
 // the build warmed serves the repair's prefix.
-func (w *Worker) repairSpec(plan *Plan) SessionSpec {
+func (w *Worker) repairSpec(plan *Plan, ownerAnswer string) SessionSpec {
 	spec := w.buildWholeSpec(plan, "")
+	spec.PreloadTools = repairPreloadTools(w.pdb.Reader(), plan, w.deps.ToolRegistry)
 	spec.MaxIterations = repairMaxIterations
+	spec.OnTurnEnd = w.withOwnerInbox(w.buildTurnEnd(true))
 	seedFn := func() ([]llm.Message, error) {
 		return seed{
 			owner:  w.ownerContext() + w.ownerMemoryBlock(),
 			shared: w.buildSharedSeed(plan),
 			stable: w.buildIntentSeed(plan),
-			task:   repairInstruction(w.pdb.Reader()),
+			task:   repairInstruction(w.pdb.Reader(), ownerAnswer),
 		}.messages(), nil
 	}
 	spec.Seed, _ = seedFn()
@@ -311,12 +321,83 @@ func (w *Worker) repairSpec(plan *Plan) SessionSpec {
 	return spec
 }
 
+// repairPreloadTools extends buildAllTools(plan) with any tools required by the
+// open repair tasks (both keyword-inferred from title/intent and explicitly named in
+// intent), so repair sessions never burn a mid-session find_tool cache bust.
+func repairPreloadTools(d *sql.DB, plan *Plan, reg *tools.Registry) []string {
+	var names []string
+	// Omit manage_web_search from repair preloads unless an open repair task
+	// explicitly asks for it: repair fixes already-built code, not web research.
+	for _, n := range buildAllTools(plan) {
+		if n != "manage_web_search" {
+			names = append(names, n)
+		}
+	}
+	if d == nil {
+		return names
+	}
+	rows, err := d.Query(`SELECT COALESCE(title,''), COALESCE(intent,'') FROM of_tasks WHERE origin = ? AND status IN (?, ?)`,
+		TaskOriginRepair, TaskPending, TaskActive)
+	if err != nil {
+		return names
+	}
+	defer rows.Close()
+
+	withBackbone := planNeedsBackbone(plan)
+	var deferred []string
+	if reg != nil {
+		for _, def := range reg.List() {
+			if strings.HasPrefix(def.Name, "manage_") {
+				deferred = append(deferred, def.Name)
+			}
+		}
+	}
+	for rows.Next() {
+		var title, intent string
+		if rows.Scan(&title, &intent) != nil {
+			continue
+		}
+		names = append(names, buildPreloadTools(Task{Title: title, Intent: intent}, withBackbone)...)
+		for _, toolName := range deferred {
+			if strings.Contains(intent, toolName) {
+				names = append(names, toolName)
+			}
+		}
+	}
+	_ = rows.Err()
+	return dedupeStrings(names)
+}
+
+// repairOutcome summarizes what one repair round accomplished so the build
+// stage can short-circuit stalled or zero-progress rounds without re-running
+// validators, spec_audit, or further repair sessions.
+type repairOutcome struct {
+	ran        bool
+	stalled    bool
+	openBefore int
+	openAfter  int
+}
+
+// hasNonSpecFindings reports whether findings includes any validator/runtime finding
+// (as opposed to spec-audit gaps alone), so the repair announcement reflects what ran.
+func hasNonSpecFindings(findings []Issue) bool {
+	for _, is := range findings {
+		if is.Category != specGapCategory {
+			return true
+		}
+	}
+	return false
+}
+
 // repairRound adds the findings to the checklist and runs one repair segment.
-// Reports false when there was nothing to repair.
-func (w *Worker) repairRound(ctx context.Context, plan *Plan, findings []Issue, round int) (bool, error) {
-	open := openPlanTasks(w.pdb.Reader())
+// Reports ran=false when there was nothing to repair.
+func (w *Worker) repairRound(ctx context.Context, plan *Plan, findings []Issue, round int, ownerAnswer string) (repairOutcome, error) {
+	open, err := openPlanTasks(w.pdb.Reader())
+	if err != nil {
+		return repairOutcome{}, fmt.Errorf("read checklist: %w", err)
+	}
 	if len(findings) == 0 && open == 0 {
-		return false, nil
+		return repairOutcome{}, nil
 	}
 	runID := ""
 	if w.run != nil {
@@ -326,39 +407,50 @@ func (w *Worker) repairRound(ctx context.Context, plan *Plan, findings []Issue, 
 	// sweep's findings; keeping both would list the same problem twice.
 	w.dropOpenRepairTasks()
 	if _, err := AddTasks(w.pdb, runID, repairTasks(findings, round)); err != nil {
-		return false, fmt.Errorf("adding repair items: %w", err)
+		return repairOutcome{}, fmt.Errorf("adding repair items: %w", err)
 	}
 	w.repairSignatures(findings, round)
 	if round == 1 {
 		// Tells the owner why the build is not live yet.
-		w.publishMessage("I tested every page and found a few things to fix. Fixing them now.")
+		if hasNonSpecFindings(findings) {
+			w.publishMessage("I tested every page and found a few things to fix. Fixing them now.")
+		} else {
+			w.publishMessage("I checked the build against your plan and found a few details to finish. Fixing them now.")
+		}
 	}
 	w.publishTaskQueue()
 	w.logger.Info("build: repair round", "round", round, "findings", len(findings), "open_items", open)
 
 	sess := w.newStageSession(StageBuild)
-	res, err := w.runSpec(ctx, sess, w.repairSpec(plan))
+	res, err := w.runSpec(ctx, sess, w.repairSpec(plan, ownerAnswer))
 	if w.run != nil {
 		w.runlog.editStats(w.run.ID, round, res)
 	}
 	w.collectDisputes()
-	if err == nil && res.Paused {
-		if res.EndDetail != endOwnerStop.detail {
-			w.pauseAwaitingAnswers()
-		}
-		return true, errStagePaused
+	openAfter, openErr := openPlanTasks(w.pdb.Reader())
+	if openErr != nil {
+		openAfter = open
 	}
-	return true, err
+	out := repairOutcome{
+		ran:        true,
+		stalled:    res.Ending == EndFailed,
+		openBefore: open,
+		openAfter:  openAfter,
+	}
+	if w.settlePausedSession(res, err) {
+		return out, errStagePaused
+	}
+	return out, err
 }
 
 // openPlanTasks counts plan items still to build. Blocked items are left out (the
 // build treats them as resolved), and so are earlier repair items: whether those
 // still matter is the next sweep's call, not the checklist's.
-func openPlanTasks(d *sql.DB) int {
+func openPlanTasks(d *sql.DB) (int, error) {
 	var n int
-	_ = d.QueryRow(`SELECT COUNT(*) FROM of_tasks WHERE status IN (?, ?) AND COALESCE(origin, '') <> ?`,
+	err := d.QueryRow(`SELECT COUNT(*) FROM of_tasks WHERE status IN (?, ?) AND COALESCE(origin, '') <> ?`,
 		TaskPending, TaskActive, TaskOriginRepair).Scan(&n)
-	return n
+	return n, err
 }
 
 // dropOpenRepairTasks removes repair items still open after the last round. The

@@ -25,6 +25,7 @@ import (
 
 	"openfabrica/security"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 const (
@@ -93,11 +94,7 @@ func (h *Handler) passwordForgot(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 
-	var userID int
-	err := readDB.QueryRow(
-		fmt.Sprintf("SELECT id FROM %s WHERE %s = ?", security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn)),
-		username,
-	).Scan(&userID)
+	userID, err := store.FindAuthUserIDByUsername(readDB, physTable, ae.UsernameColumn, username)
 	if err != nil || !strings.Contains(username, "@") {
 		// No such account, or the login name is not an address we can mail.
 		writeResetReply(w)
@@ -109,9 +106,7 @@ func (h *Handler) passwordForgot(w http.ResponseWriter, r *http.Request, project
 		writeResetReply(w)
 		return
 	}
-	var configured int
-	_ = readDB.QueryRow("SELECT COUNT(*) FROM of_email_config").Scan(&configured)
-	if configured == 0 {
+	if store.EmailConfigCount(readDB) == 0 {
 		slog.Warn("password reset requested but no email provider is configured", "project_id", projectID)
 		writeResetReply(w)
 		return
@@ -124,11 +119,7 @@ func (h *Handler) passwordForgot(w http.ResponseWriter, r *http.Request, project
 	}
 	token := hex.EncodeToString(raw)
 	// Earlier unused reset links for this account stop working once a new one exists.
-	_, _ = writeDB.Exec("DELETE FROM of_magic_tokens WHERE purpose = 'reset' AND user_id = ? AND auth_endpoint_path = ?", userID, ae.Path)
-	if _, err := writeDB.Exec(
-		`INSERT INTO of_magic_tokens (token, auth_endpoint_path, email, user_id, expires_at, purpose) VALUES (?, ?, ?, ?, ?, 'reset')`,
-		magicTokenHash(token), ae.Path, username, userID, time.Now().Add(resetTokenTTL),
-	); err != nil {
+	if err := store.ReplaceUserMagicToken(writeDB, magicTokenHash(token), ae.Path, username, userID, time.Now().Add(resetTokenTTL), "reset", ""); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create a reset link")
 		return
 	}
@@ -136,8 +127,7 @@ func (h *Handler) passwordForgot(w http.ResponseWriter, r *http.Request, project
 	resetURL := base + "/reset?token=" + url.QueryEscape(token)
 	subject := "Reset your password"
 	htmlBody := fmt.Sprintf(`<p>Someone asked to reset the password for this account. To choose a new one, open <a href="%s">%s</a>.</p><p>The link works once and expires in 1 hour. If this was not you, ignore this email.</p>`, resetURL, resetURL)
-	var s, hb string
-	_ = readDB.QueryRow("SELECT subject, body_html FROM of_email_templates WHERE name = 'password_reset'").Scan(&s, &hb) // no template means the default email
+	s, hb := store.LoadEmailTemplate(readDB, "password_reset")
 	if s != "" {
 		subject = s
 	}
@@ -145,7 +135,7 @@ func (h *Handler) passwordForgot(w http.ResponseWriter, r *http.Request, project
 		htmlBody = strings.ReplaceAll(hb, "{{reset_url}}", resetURL)
 	}
 	payload, _ := json.Marshal(map[string]string{"to": username, "subject": subject, "body_html": htmlBody})
-	if _, err := writeDB.Exec(`INSERT INTO of_jobs (type, payload, status, max_attempts) VALUES ('send_email', ?, 'pending', 3)`, string(payload)); err != nil {
+	if err := store.EnqueueSendEmailJob(writeDB, string(payload)); err != nil {
 		slog.Warn("could not queue password reset email", "error", err)
 	}
 	writeResetReply(w)
@@ -171,21 +161,17 @@ func (h *Handler) passwordReset(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	hash := magicTokenHash(body.Token)
-	var email string
-	var userIDN sql.NullInt64
-	var expires time.Time
-	var used bool
-	if err := readDB.QueryRow(
-		`SELECT email, user_id, expires_at, used FROM of_magic_tokens WHERE token = ? AND auth_endpoint_path = ? AND purpose = 'reset'`,
-		hash, ae.Path,
-	).Scan(&email, &userIDN, &expires, &used); err != nil || !userIDN.Valid {
+	mt, err := store.LookupMagicToken(readDB, hash, ae.Path, "reset")
+	if err != nil || !mt.UserID.Valid {
 		writeError(w, http.StatusUnauthorized, "this reset link is not valid")
 		return
 	}
-	if used || time.Now().After(expires) {
+	if mt.Used || time.Now().After(mt.ExpiresAt) {
 		writeError(w, http.StatusUnauthorized, "this reset link has expired or was already used")
 		return
 	}
+	email := mt.Email
+	userIDN := mt.UserID
 
 	newHash, err := security.HashPassword(body.Password)
 	if err != nil {
@@ -193,22 +179,19 @@ func (h *Handler) passwordReset(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 	// The claim is atomic: only one of two simultaneous submissions proceeds.
-	res, err := writeDB.Exec("UPDATE of_magic_tokens SET used = 1 WHERE token = ? AND used = 0", hash)
+	ok, err := store.ConsumeMagicToken(writeDB, hash)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not set the password")
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "this reset link has expired or was already used")
 		return
 	}
-	if _, err := writeDB.Exec(
-		fmt.Sprintf("UPDATE %s SET %s = ? WHERE id = ?", security.QuoteIdent(physTable), security.QuoteIdent(ae.PasswordColumn)),
-		newHash, userIDN.Int64,
-	); err != nil {
+	if err := store.UpdateAuthUserPassword(writeDB, physTable, ae.PasswordColumn, userIDN.Int64, newHash); err != nil {
 		slog.Error("password reset could not update the account", "error", err)
 		// Give the link back so the user can retry instead of being locked out.
-		_, _ = writeDB.Exec("UPDATE of_magic_tokens SET used = 0 WHERE token = ?", hash)
+		store.UnconsumeMagicToken(writeDB, hash)
 		writeError(w, http.StatusInternalServerError, "could not set the password")
 		return
 	}

@@ -99,25 +99,23 @@ export function createHostingChip(projectId, { scope, detail = false } = {}) {
     if (view.kind === 'danger') {
       parts.push(h('p', { className: 'form-hint', style: 'margin:0.25rem 0 0' }, linkifyUrls(view.title)));
     }
-    if (state.isAdmin()) {
-      const btn = h('button', {
-        className: 'btn btn--primary btn--sm',
-        type: 'button',
-        style: 'margin-top:0.35rem',
-        onClick: async () => {
-          btn.disabled = true;
-          btn.textContent = t('hs.checking');
-          try {
-            await load(true);
-          } catch (err) {
-            toast.error(t('hs.checkFailed', { error: humanizeError(err.message) }));
-          }
-          btn.disabled = false;
-          btn.textContent = t('hs.checkAgain');
-        },
-      }, t('hs.checkAgain'));
-      parts.push(h('div', {}, [btn]));
-    }
+    const btn = h('button', {
+      className: 'btn btn--primary btn--sm',
+      type: 'button',
+      style: 'margin-top:0.35rem',
+      onClick: async () => {
+        btn.disabled = true;
+        btn.textContent = t('hs.checking');
+        try {
+          await load(true);
+        } catch (err) {
+          toast.error(t('hs.checkFailed', { error: humanizeError(err.message) }));
+        }
+        btn.disabled = false;
+        btn.textContent = t('hs.checkAgain');
+      },
+    }, t('hs.checkAgain'));
+    parts.push(h('div', {}, [btn]));
     for (const p of parts) extra.appendChild(p);
   }
 

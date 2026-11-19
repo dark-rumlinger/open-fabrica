@@ -85,8 +85,13 @@ func TestEmbeddedLoads(t *testing.T) {
 	// reference (~4KB) rode every turn inside the preloaded manage_testing schema
 	// while it is needed once per build; as a guide's extended section it is recalled
 	// on demand, and the always-on core is a few lines.
-	if cap > 26 {
-		t.Errorf("got %d capability guides; the lean guide core should stay small (<=26 load-bearing contracts/flows)", cap)
+	// physics_2d earns a slot alongside physics_3d: standalone 2D rigid-body builds
+	// (PixiJS or vanilla canvas + matter-js) otherwise have no pinned UMD entry,
+	// fixed-step accumulator, or body/sprite sync contract.
+	// mqtt earns a slot for the built-in MQTT 3.1.1 broker (/mqtt WS + TCP),
+	// device ACLs, SQLite/function ingest rules, and ctx.mqtt.publish contract.
+	if cap > 28 {
+		t.Errorf("got %d capability guides; the lean guide core should stay small (<=28 load-bearing contracts/flows)", cap)
 	}
 	t.Logf("packs: %d stage, %d capability, %d fragment", stage, cap, frag)
 }

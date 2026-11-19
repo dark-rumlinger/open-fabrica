@@ -39,16 +39,23 @@ func callUnderLivePolicy(ctx context.Context, limiter *llmLimiter, logger *slog.
 // completeDeps is what a scheduled server function's ctx.llm needs
 // (actionexec.Complete), under the same policy as Engine.CallLLM.
 func (w *Worker) completeDeps() actionexec.CompleteDeps {
+	return completeDepsFor(w.deps, w.limiter, w.logger)
+}
+
+func completeDepsFor(deps *Deps, limiter *llmLimiter, logger *slog.Logger) actionexec.CompleteDeps {
+	if deps == nil {
+		return actionexec.CompleteDeps{}
+	}
 	d := actionexec.CompleteDeps{
-		Encryptor:  w.deps.Encryptor,
-		HTTPClient: w.deps.LLMHTTPClient,
-		BudgetFn:   w.deps.DailyTokenBudgetFn,
+		Encryptor:  deps.Encryptor,
+		HTTPClient: deps.LLMHTTPClient,
+		BudgetFn:   deps.DailyTokenBudgetFn,
 		Call: func(ctx context.Context, providerID int, p llm.Provider, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
-			return callUnderLivePolicy(ctx, w.limiter, w.logger, providerID, p, req)
+			return callUnderLivePolicy(ctx, limiter, logger, providerID, p, req)
 		},
 	}
-	if w.deps.DB != nil {
-		d.GlobalDB = w.deps.DB.DB
+	if deps.DB != nil {
+		d.GlobalDB = deps.DB.DB
 	}
 	return d
 }

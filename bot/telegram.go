@@ -19,6 +19,7 @@ import (
 	"openfabrica/internal/replylang"
 	"openfabrica/internal/safego"
 	"openfabrica/internal/stringutil"
+	"openfabrica/providers/llm"
 )
 
 // Telegram limits: 4096 chars per message, 64 bytes per callback_data.
@@ -45,7 +46,8 @@ type TelegramProvider struct {
 	onCallback OnCallbackFunc
 	offsets    OffsetStore
 
-	lifeMu  sync.Mutex // guards cancel/done: written in Start's goroutine, read in Stop
+	lifeMu  sync.Mutex // guards lifeCtx/cancel/done: written in Start's goroutine, read in Stop/apiCall
+	lifeCtx context.Context
 	cancel  context.CancelFunc
 	done    chan struct{} // closed when the poll loop has fully exited
 	stopped atomic.Bool   // set by Stop; guards the pre-setup start race
@@ -65,8 +67,11 @@ type TelegramProvider struct {
 	onLanguage func(userID, language string)
 
 	// onUnsupported is told when someone sends something that is not text (a
-	// photo, voice note, file), so they get an answer instead of silence.
+	// voice note, file), so they get an answer instead of silence.
 	onUnsupported func(chatID, userID string)
+
+	// onPhoto is called when someone sends an image (with optional caption).
+	onPhoto func(provider, chatID, userID string, messageID int, caption string, images []llm.MessageImage)
 
 	logger *slog.Logger
 }
@@ -99,6 +104,11 @@ func (t *TelegramProvider) SetLanguageSeen(fn func(userID, language string)) { t
 // SetUnsupported registers a callback for messages that carry no text.
 func (t *TelegramProvider) SetUnsupported(fn func(chatID, userID string)) { t.onUnsupported = fn }
 
+// SetPhotoHandler registers a callback for incoming photo messages.
+func (t *TelegramProvider) SetPhotoHandler(fn func(provider, chatID, userID string, messageID int, caption string, images []llm.MessageImage)) {
+	t.onPhoto = fn
+}
+
 // BotInfo returns the bot's identity (username and display name). Both are empty
 // until the startup token check succeeds.
 func (t *TelegramProvider) BotInfo() (username, name string) {
@@ -121,7 +131,7 @@ func (t *TelegramProvider) Start(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	t.cancel, t.done = cancel, done
+	t.lifeCtx, t.cancel, t.done = ctx, cancel, done
 	t.lifeMu.Unlock()
 	defer close(done)
 
@@ -251,7 +261,36 @@ func (t *TelegramProvider) dispatch(update tgUpdate) {
 		t.onMessage("telegram", chatID, userID, update.Message.MessageID, update.Message.Text)
 	}
 
-	if m := update.Message; m != nil && m.Text == "" && m.From != nil && t.onUnsupported != nil {
+	if m := update.Message; m != nil && len(m.Photo) > 0 && t.onPhoto != nil {
+		if !t.ensurePrivate(m.Chat, tgLang(m.From)) {
+			return
+		}
+		chatID := fmt.Sprintf("%d", m.Chat.ID)
+		userID := ""
+		if m.From != nil {
+			userID = fmt.Sprintf("%d", m.From.ID)
+		}
+		incMessagesIn()
+		if t.onSeen != nil && userID != "" {
+			t.onSeen(userID, m.From.displayName())
+		}
+		if t.onLanguage != nil && userID != "" {
+			t.onLanguage(userID, m.From.LanguageCode)
+		}
+		largest := m.Photo[len(m.Photo)-1]
+		data, mime, err := t.downloadFile(largest.FileID)
+		if err != nil {
+			t.logger.Warn("telegram photo download failed", "error", err)
+			if t.onUnsupported != nil && m.From != nil {
+				t.onUnsupported(chatID, userID)
+			}
+			return
+		}
+		t.onPhoto("telegram", chatID, userID, m.MessageID, m.Caption, []llm.MessageImage{{MIMEType: mime, Data: data}})
+		return
+	}
+
+	if m := update.Message; m != nil && m.Text == "" && len(m.Photo) == 0 && m.From != nil && t.onUnsupported != nil {
 		if t.ensurePrivate(m.Chat, tgLang(m.From)) {
 			t.onUnsupported(fmt.Sprintf("%d", m.Chat.ID), fmt.Sprintf("%d", m.From.ID))
 		}
@@ -516,13 +555,22 @@ func (t *TelegramProvider) SendCard(chatID, text string, replyMarkup map[string]
 
 // SendDocument uploads data as a file attachment.
 func (t *TelegramProvider) SendDocument(chatID, filename string, data []byte, caption string) error {
+	return t.sendMultipartFile("sendDocument", "document", chatID, filename, data, caption)
+}
+
+// SendPhoto uploads an image inline to the chat.
+func (t *TelegramProvider) SendPhoto(chatID, filename string, data []byte, caption string) error {
+	return t.sendMultipartFile("sendPhoto", "photo", chatID, filename, data, caption)
+}
+
+func (t *TelegramProvider) sendMultipartFile(method, fieldName, chatID, filename string, data []byte, caption string) error {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	_ = mw.WriteField("chat_id", chatID)
 	if caption != "" {
 		_ = mw.WriteField("caption", caption)
 	}
-	part, err := mw.CreateFormFile("document", filename)
+	part, err := mw.CreateFormFile(fieldName, filename)
 	if err != nil {
 		return err
 	}
@@ -533,23 +581,9 @@ func (t *TelegramProvider) SendDocument(chatID, filename string, data []byte, ca
 		return err
 	}
 
-	req, err := http.NewRequest("POST", t.baseURL+"/sendDocument", &buf)
-	if err != nil {
-		return fmt.Errorf("telegram sendDocument: failed to build request: %s", redactToken(err.Error(), t.token))
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	resp, err := t.client.Do(req)
-	if err != nil {
+	if _, err := t.apiCallRawRetry(context.Background(), method, mw.FormDataContentType(), buf.Bytes()); err != nil {
 		incSendFailures()
-		return fmt.Errorf("telegram sendDocument request failed: %s", redactToken(err.Error(), t.token))
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var env tgErrorEnvelope
-	_ = json.Unmarshal(body, &env)
-	if resp.StatusCode != 200 || !env.OK {
-		incSendFailures()
-		return fmt.Errorf("telegram sendDocument returned %d: %s", resp.StatusCode, redactToken(env.Description, t.token))
+		return err
 	}
 	incMessagesOut()
 	return nil
@@ -630,11 +664,70 @@ func (u *tgUser) displayName() string {
 	return name
 }
 
+type tgPhotoSize struct {
+	FileID   string `json:"file_id"`
+	FileSize int    `json:"file_size"`
+}
+
 type tgMessage struct {
-	MessageID int     `json:"message_id"`
-	Text      string  `json:"text"`
-	Chat      tgChat  `json:"chat"`
-	From      *tgUser `json:"from"`
+	MessageID int           `json:"message_id"`
+	Text      string        `json:"text"`
+	Caption   string        `json:"caption"`
+	Photo     []tgPhotoSize `json:"photo"`
+	Chat      tgChat        `json:"chat"`
+	From      *tgUser       `json:"from"`
+}
+
+const maxTelegramPhotoBytes = 4 << 20 // 4 MB
+
+func (t *TelegramProvider) downloadFile(fileID string) ([]byte, string, error) {
+	raw, err := t.apiCall("getFile", map[string]any{"file_id": fileID})
+	if err != nil {
+		return nil, "", err
+	}
+	var resp struct {
+		Result struct {
+			FilePath string `json:"file_path"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, "", err
+	}
+	fp := strings.TrimSpace(resp.Result.FilePath)
+	if fp == "" {
+		return nil, "", errors.New("telegram getFile returned empty file_path")
+	}
+	fileBase := strings.Replace(t.baseURL, "/bot"+t.token, "/file/bot"+t.token, 1)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, fileBase+"/"+strings.TrimLeft(fp, "/"), nil)
+	if err != nil {
+		return nil, "", err
+	}
+	httpResp, err := t.client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("telegram file download HTTP %d", httpResp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(httpResp.Body, maxTelegramPhotoBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) == 0 || len(data) > maxTelegramPhotoBytes {
+		return nil, "", errors.New("telegram photo empty or exceeds 4MB limit")
+	}
+	mime := "image/jpeg"
+	low := strings.ToLower(fp)
+	switch {
+	case strings.HasSuffix(low, ".png"):
+		mime = "image/png"
+	case strings.HasSuffix(low, ".webp"):
+		mime = "image/webp"
+	case strings.HasSuffix(low, ".gif"):
+		mime = "image/gif"
+	}
+	return data, mime, nil
 }
 
 type tgChat struct {
@@ -821,7 +914,13 @@ func (t *TelegramProvider) setProfile() {
 }
 
 func (t *TelegramProvider) apiCall(method string, body map[string]any) ([]byte, error) {
-	return t.apiCallRetry(context.Background(), method, body)
+	t.lifeMu.Lock()
+	ctx := t.lifeCtx
+	t.lifeMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return t.apiCallRetry(ctx, method, body)
 }
 
 // apiCallRetry wraps apiCallCtx with bounded retries for transient failures:
@@ -833,9 +932,17 @@ func (t *TelegramProvider) apiCall(method string, body map[string]any) ([]byte, 
 // 5xx retry carries a small duplicate risk on the rare "delivered but 500 on the
 // response", which is an acceptable trade for a low-volume control bot.
 func (t *TelegramProvider) apiCallRetry(ctx context.Context, method string, body map[string]any) ([]byte, error) {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return t.apiCallRawRetry(ctx, method, "application/json", jsonBody)
+}
+
+func (t *TelegramProvider) apiCallRawRetry(ctx context.Context, method, contentType string, payload []byte) ([]byte, error) {
 	const maxAttempts = 3
 	for attempt := 1; ; attempt++ {
-		data, err := t.apiCallCtx(ctx, method, body)
+		data, err := t.apiCallRawCtx(ctx, method, contentType, payload)
 		if err == nil || attempt >= maxAttempts {
 			return data, err
 		}
@@ -867,14 +974,17 @@ func (t *TelegramProvider) apiCallCtx(ctx context.Context, method string, body m
 	if err != nil {
 		return nil, err
 	}
+	return t.apiCallRawCtx(ctx, method, "application/json", jsonBody)
+}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", t.baseURL+"/"+method, bytes.NewReader(jsonBody))
+func (t *TelegramProvider) apiCallRawCtx(ctx context.Context, method, contentType string, payload []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", t.baseURL+"/"+method, bytes.NewReader(payload))
 	if err != nil {
 		// The error embeds the request URL (which contains the bot token); never
 		// surface it raw.
 		return nil, fmt.Errorf("telegram %s: failed to build request: %s", method, redactToken(err.Error(), t.token))
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := t.client.Do(req)
 	if err != nil {

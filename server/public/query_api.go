@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,44 +30,11 @@ import (
 
 const maxQuerySQLBytes = 16 * 1024 // 16 KB of SQL text is plenty for a SELECT.
 
-// queryEndpointSystemTableRef matches a reference to a reserved of_ table at an
-// identifier boundary, so an ordinary column like number_of_items is not
-// falsely rejected. Mirrors data.systemTableRef.
-var queryEndpointSystemTableRef = regexp.MustCompile(`(?i)\bof_\w*`)
-
 // validateReadOnlySelect enforces "single SELECT only, no system tables" on the
 // SQL a client posts to the query endpoint. Returns the trimmed query (trailing
 // ';' stripped) and a non-empty error message when rejected.
 func validateReadOnlySelect(sqlQuery string) (string, string) {
-	trimmed := strings.TrimSpace(sqlQuery)
-	trimmed = strings.TrimRight(strings.TrimSpace(strings.TrimSuffix(trimmed, ";")), " \t\r\n")
-
-	if trimmed == "" {
-		return trimmed, "sql is required"
-	}
-	// Verb + stacked-statement checks come from the shared sqlguard package (the
-	// same guard the build-time manage_sql path uses), so this surface can't drift
-	// into a weaker - or stricter - individually-maintained variant. sqlguard
-	// correctly ignores a ';' inside a string literal or comment, so a legitimate
-	// ';' in a value no longer false-rejects the query.
-	//
-	// EffectiveVerb, not LeadingVerb: a leading `WITH` resolves to the verb of the
-	// statement AFTER its CTE definitions, so a read-only `WITH ... SELECT` is
-	// accepted here exactly as manage_sql accepts it at build time, while a
-	// WITH-wrapped write is still refused. A first-token check rejected a query the
-	// model had already verified against the same data.
-	switch sqlguard.EffectiveVerb(trimmed) {
-	case "SELECT", "VALUES":
-	default:
-		return trimmed, "only read-only queries are supported: SELECT, VALUES, or a WITH ... SELECT"
-	}
-	if sqlguard.HasStackedStatements(trimmed) {
-		return trimmed, "multiple SQL statements are not allowed (remove the ';')"
-	}
-	if m := queryEndpointSystemTableRef.FindString(trimmed); m != "" {
-		return trimmed, fmt.Sprintf("cannot reference system table: %s", strings.ToLower(m))
-	}
-	return trimmed, ""
+	return sqlguard.CheckReadOnlySelect(sqlQuery)
 }
 
 // queryIdentRef matches identifier-shaped tokens, used to spot a reference to a
@@ -81,28 +49,20 @@ var queryIdentRef = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 func guardQueryTargets(projectDB *sql.DB, query string) (string, map[string]bool) {
 	const unavailable = "query guard unavailable, try again"
 	blocked := map[string]bool{"of_payments": true, "of_payment_config": true}
-	if rows, err := projectDB.Query("SELECT table_name FROM of_auth_endpoints"); err == nil {
-		for rows.Next() {
-			var t string
-			if rows.Scan(&t) == nil {
-				blocked[strings.ToLower(t)] = true
-			}
-		}
-		iterErr := rows.Err()
-		rows.Close()
-		// A half-read list would leave user tables unblocked, so refuse the query.
-		if iterErr != nil {
-			return unavailable, nil
-		}
+	authTables, err := store.LoadAuthEndpointTables(projectDB)
+	if err != nil {
+		return unavailable, nil
 	}
-	// A lookup that fails for any reason but a missing registry (no dynamic table,
-	// so no hash column, can exist yet) must not let the query through unguarded.
+	for _, t := range authTables {
+		blocked[strings.ToLower(t)] = true
+	}
+	// A failed lookup must not let the query through unguarded.
 	hashTables, err := store.LoadHashTableNames(projectDB)
-	if err != nil && !isNoSuchTable(err) {
+	if err != nil {
 		return unavailable, nil
 	}
 	hashed, err := store.LoadHashColumnNames(projectDB)
-	if err != nil && !isNoSuchTable(err) {
+	if err != nil {
 		return unavailable, nil
 	}
 	toks := queryIdentRef.FindAllString(query, -1)
@@ -136,39 +96,14 @@ func guardQueryTargets(projectDB *sql.DB, query string) (string, map[string]bool
 // comes from the table it was read from.
 var queryCompoundWords = map[string]bool{"with": true, "union": true, "intersect": true, "except": true, "values": true}
 
-// isNoSuchTable reports a SQLite "no such table" error.
-func isNoSuchTable(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no such table")
-}
-
 // queryMemoryHogs are SQLite functions that let one anonymous request allocate
 // hundreds of megabytes in a single value (randomblob(500000000)) or load code.
 // The row cap and the timeout do not bound a single oversized value, and the public
 // endpoint can be unauthenticated, so they are refused outright.
 var queryMemoryHogs = map[string]bool{"randomblob": true, "zeroblob": true, "load_extension": true}
 
-type queryEndpoint struct {
-	Path         string
-	MaxRows      int
-	RequiresAuth bool
-	RateLimit    int
-}
-
-// loadQueryEndpoint returns the opt-in config for the query endpoint, or an
-// error when the project has not enabled it.
-func (h *Handler) loadQueryEndpoint(projectDB *sql.DB, path string) (*queryEndpoint, error) {
-	var ep queryEndpoint
-	err := projectDB.QueryRow(
-		"SELECT path, COALESCE(max_rows,200), COALESCE(requires_auth,0), COALESCE(rate_limit,60) FROM of_query_endpoints WHERE path = ?",
-		path,
-	).Scan(&ep.Path, &ep.MaxRows, &ep.RequiresAuth, &ep.RateLimit)
-	if err != nil {
-		return nil, err
-	}
-	if ep.MaxRows <= 0 || ep.MaxRows > 1000 {
-		ep.MaxRows = 200
-	}
-	return &ep, nil
+func (h *Handler) loadQueryEndpoint(projectDB *sql.DB, path string) (*store.QueryEndpoint, error) {
+	return store.LoadQueryEndpoint(projectDB, path)
 }
 
 type queryRequest struct {
@@ -187,7 +122,7 @@ func (h *Handler) apiQuery(w http.ResponseWriter, r *http.Request, project *mode
 
 	if ep.RequiresAuth {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !h.validateProjectTokenOrJWT(project.ID, token) {
+		if _, ok := h.projectUserClaims(project.ID, token); !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -196,7 +131,7 @@ func (h *Handler) apiQuery(w http.ResponseWriter, r *http.Request, project *mode
 	// Rate limit by IP. ClientIP only trusts X-Forwarded-For from a loopback
 	// peer, so a remote client cannot spoof the header to dodge the per-IP limit.
 	rateLimitKey := fmt.Sprintf("query:%d:%s:%s", project.ID, ep.Path, middleware.RateLimitIdentity(r))
-	if !checkEndpointRateLimit(rateLimitKey, ep.RateLimit) {
+	if !h.checkEndpointRateLimit(rateLimitKey, ep.RateLimit) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
@@ -232,61 +167,13 @@ func (h *Handler) apiQuery(w http.ResponseWriter, r *http.Request, project *mode
 	defer cancel()
 
 	start := time.Now()
-	rows, err := projectDB.QueryContext(ctx, finalSQL)
+	cols, out, truncated, err := store.ExecReadOnlyQuery(ctx, projectDB, finalSQL, hashed, limit)
 	if err != nil {
-		// Surface the database error text, as a SQL tool should.
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	allCols, err := rows.Columns()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query error")
-		return
-	}
-	// A SELECT * can still surface a password-hash column no token named; drop any
-	// result column that carries one.
-	var keep []int
-	cols := make([]string, 0, len(allCols))
-	for i, c := range allCols {
-		if hashed[strings.ToLower(c)] {
-			continue
-		}
-		keep = append(keep, i)
-		cols = append(cols, c)
-	}
-
-	out := make([][]any, 0, min(limit, 1000))
-	truncated := false
-	for rows.Next() {
-		if len(out) >= limit {
-			truncated = true
-			break
-		}
-		holders := make([]any, len(allCols))
-		ptrs := make([]any, len(allCols))
-		for i := range holders {
-			ptrs[i] = &holders[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
+		if errors.Is(err, store.ErrQueryScan) {
 			writeError(w, http.StatusInternalServerError, "query error")
 			return
 		}
-		row := make([]any, len(cols))
-		for i, idx := range keep {
-			v := holders[idx]
-			// The SQLite driver hands back []byte for TEXT/BLOB; render as a
-			// string so the JSON grid shows readable values, not base64.
-			if b, ok := v.([]byte); ok {
-				row[i] = string(b)
-			} else {
-				row[i] = v
-			}
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
+		// Surface the database error text, as a SQL tool should.
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}

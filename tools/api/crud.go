@@ -107,7 +107,7 @@ func resolveOwnerColumn(ctx *tools.ToolContext, ownerColumnStr, tableName string
 // epCreateAPI takes typed args straight from APICreate. authModel is the raw
 // enum (public/authenticated/role/owner); it is translated here into the
 // requires_auth / required_role / owner_column shape the row stores. Empty/zero
-// optional fields fall back to the same defaults the prior map path used.
+// optional fields take the defaults set below.
 func epCreateAPI(ctx *tools.ToolContext, a *APICreate) (*tools.Result, error) {
 	tableName := a.TableName
 	methodsArg := a.Methods

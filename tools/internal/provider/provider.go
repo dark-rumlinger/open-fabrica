@@ -55,9 +55,7 @@ func Load(ctx *tools.ToolContext, name string) (*Creds, *tools.Result) {
 		return c, nil
 	}
 	if err != sql.ErrNoRows {
-		// A real query error (not "no such row") - surface it as not-found, the
-		// same shape callers handled before.
-		return nil, tools.Fail("provider '%s' not found or disabled", name)
+		return nil, tools.Fail("could not load provider '%s': %v", name, err)
 	}
 	if c, gerr := loadGlobalConnector(ctx, name); gerr == nil {
 		return c, nil

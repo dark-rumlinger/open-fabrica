@@ -17,8 +17,8 @@ import (
 // (see parseItemsTag) lets the field stay []any while the schema states the truth.
 //
 // These are the tag MECHANICS. The registry-wide sweep that catches an untagged string list
-// lives in engine/tool_items_schema_test.go, because only the engine test binary imports
-// every tool subpackage - this package cannot, it is the one they all import.
+// lives in internal/archtest/tool_items_schema_test.go, which imports every tool
+// subpackage - this package cannot, it is the one they all import.
 
 // TestItemsTagOverridesGoKind is the positive control for the tag itself: it has to reach
 // the rendered schema, or the registry sweep passes because nothing is tagged rather than

@@ -1,6 +1,7 @@
 package archtest
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -138,5 +139,56 @@ func TestLayeringScanSeesTheModule(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join("..", "..", "go.mod")); err != nil {
 		t.Fatalf("archtest must run two levels below the module root: %v", err)
+	}
+}
+
+// TestServerHasNoRawSQL ensures HTTP handler packages (server/admin and
+// server/public) delegate all SQL queries and DML/DDL to store or db/models
+// rather than embedding raw SQL statements in handlers.
+func TestServerHasNoRawSQL(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlPrefixes := []string{
+		"SELECT ", "INSERT ", "UPDATE ", "DELETE ",
+		"CREATE ", "ALTER ", "DROP ", "PRAGMA ",
+	}
+	fset := token.NewFileSet()
+	for _, sub := range []string{filepath.Join("server", "admin"), filepath.Join("server", "public")} {
+		dir := filepath.Join(root, sub)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("readdir %s: %v", sub, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+				continue
+			}
+			full := filepath.Join(dir, e.Name())
+			f, err := parser.ParseFile(fset, full, nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", full, err)
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				lit, ok := n.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return true
+				}
+				val, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					return true
+				}
+				trimmed := strings.TrimSpace(val)
+				for _, p := range sqlPrefixes {
+					if strings.HasPrefix(trimmed, p) {
+						pos := fset.Position(lit.Pos())
+						t.Errorf("%s:%d embeds raw SQL (%q): move query into store or db/models", filepath.ToSlash(filepath.Join(sub, e.Name())), pos.Line, p)
+						break
+					}
+				}
+				return true
+			})
+		}
 	}
 }

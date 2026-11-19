@@ -46,7 +46,7 @@ const minResultContractLineLen = 90
 // pasted contract line fails and a REWORDED one does not. The rewordings that
 // actually shipped here - the wrong e2ee blob-chunk shape, a self-contradiction about
 // presence - are caught by the anti-pattern scanners in
-// engine/tool_prose_drift_test.go, which read this file's literals directly.
+// internal/archtest/tool_prose_drift_test.go, which read this file's literals directly.
 //
 // A whole-body transclusion is the sanctioned form and passes.
 func TestNoContractRestatementInCreateResult(t *testing.T) {

@@ -97,8 +97,7 @@ func TestApiListOverViewWithoutID(t *testing.T) {
 // join returns the {columns, rows, row_count, execution_ms} envelope, and a
 // write statement is rejected with 400.
 func TestApiQueryRunsSelect(t *testing.T) {
-	db := setupRowIDColumnDB(t,
-		`CREATE TABLE of_query_endpoints (id INTEGER PRIMARY KEY, path TEXT UNIQUE, max_rows INTEGER, requires_auth INTEGER, rate_limit INTEGER)`,
+	db := migratedTestDB(t,
 		`INSERT INTO of_query_endpoints (path, max_rows, requires_auth, rate_limit) VALUES ('_query', 200, 0, 60)`,
 		`CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)`,
 		`CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER, total REAL)`,
@@ -144,8 +143,7 @@ func TestApiQueryRunsSelect(t *testing.T) {
 
 // TestApiQueryNotEnabled returns 404 when the project never opted in.
 func TestApiQueryNotEnabled(t *testing.T) {
-	db := setupRowIDColumnDB(t,
-		`CREATE TABLE of_query_endpoints (id INTEGER PRIMARY KEY, path TEXT UNIQUE, max_rows INTEGER, requires_auth INTEGER, rate_limit INTEGER)`)
+	db := migratedTestDB(t)
 	h := &Handler{deps: &Deps{}}
 	req := httptest.NewRequest("POST", "/api/_query", strings.NewReader(`{"sql":"SELECT 1"}`))
 	rec := httptest.NewRecorder()
@@ -158,9 +156,8 @@ func TestApiQueryNotEnabled(t *testing.T) {
 // The public query endpoint never reads a table an auth endpoint authenticates
 // against, whatever the SQL calls it.
 func TestGuardQueryTargetsBlocksAuthTables(t *testing.T) {
-	d := columnsTestDB(t,
-		`CREATE TABLE of_auth_endpoints (table_name TEXT)`,
-		`INSERT INTO of_auth_endpoints VALUES ('members')`,
+	d := migratedTestDB(t,
+		`INSERT INTO of_auth_endpoints (table_name, path) VALUES ('members', 'auth')`,
 	)
 	if msg, _ := guardQueryTargets(d, "SELECT * FROM members"); !strings.Contains(msg, "protected table") {
 		t.Errorf("auth table not blocked: %q", msg)
@@ -175,10 +172,8 @@ func TestGuardQueryTargetsBlocksAuthTables(t *testing.T) {
 // refused against a table holding a password hash; a plain SELECT, and queries
 // over ordinary tables, still work. The memory-hungry blob functions are refused.
 func TestGuardQueryTargetsHashTablesAndMemoryHogs(t *testing.T) {
-	d := columnsTestDB(t,
-		`CREATE TABLE of_auth_endpoints (table_name TEXT)`,
-		`CREATE TABLE of_dynamic_tables (table_name TEXT, secure_columns TEXT)`,
-		`INSERT INTO of_dynamic_tables VALUES ('vault', '{"pw":"hash"}'), ('notes', '')`,
+	d := migratedTestDB(t,
+		`INSERT INTO of_dynamic_tables (table_name, schema_def, secure_columns) VALUES ('vault', '{}', '{"pw":"hash"}'), ('notes', '{}', '')`,
 	)
 	for name, q := range map[string]string{
 		"cte rename":     "WITH x(a, b) AS (SELECT * FROM vault) SELECT a, b FROM x",

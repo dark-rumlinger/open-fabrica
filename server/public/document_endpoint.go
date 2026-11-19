@@ -9,7 +9,6 @@ package public
 // concurrent renders per process.
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +21,7 @@ import (
 
 	"openfabrica/db"
 	"openfabrica/db/models"
+	"openfabrica/internal/browser"
 	"openfabrica/internal/doctemplate"
 	"openfabrica/server/middleware"
 	"openfabrica/store"
@@ -39,27 +39,6 @@ const (
 var renderSlots = make(chan struct{}, maxConcurrentRenders)
 
 var documentFilenameRe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
-type documentEndpoint struct {
-	Template     string
-	Filename     string
-	PageSize     string
-	Landscape    bool
-	RequiresAuth bool
-	RateLimit    int
-}
-
-func loadDocumentEndpoint(db *sql.DB, path string) (*documentEndpoint, error) {
-	var ep documentEndpoint
-	err := db.QueryRow(
-		`SELECT template_html, filename, page_size, COALESCE(landscape,0), COALESCE(requires_auth,1), COALESCE(rate_limit,?)
-		   FROM of_document_endpoints WHERE path = ?`, defaultDocumentLimit, path,
-	).Scan(&ep.Template, &ep.Filename, &ep.PageSize, &ep.Landscape, &ep.RequiresAuth, &ep.RateLimit)
-	if err != nil {
-		return nil, err
-	}
-	return &ep, nil
-}
 
 // documentFilename renders the endpoint's filename pattern from the request data
 // and reduces it to a safe basename ending in .pdf.
@@ -81,7 +60,7 @@ func documentFilename(pattern string, data map[string]any) string {
 }
 
 func (h *Handler) apiDocument(w http.ResponseWriter, r *http.Request, project *models.Project, projectDB *db.ProjectDB, path string) {
-	ep, err := loadDocumentEndpoint(projectDB.Reader(), path)
+	ep, err := store.LoadDocumentEndpoint(projectDB.Reader(), path, defaultDocumentLimit)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "document endpoint not found")
 		return
@@ -92,12 +71,12 @@ func (h *Handler) apiDocument(w http.ResponseWriter, r *http.Request, project *m
 	}
 	if ep.RequiresAuth {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !h.validateProjectTokenOrJWT(project.ID, token) {
+		if _, ok := h.projectUserClaims(project.ID, token); !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 	}
-	if !checkEndpointRateLimit(fmt.Sprintf("doc:%d:%s:%s", project.ID, path, middleware.RateLimitIdentity(r)), ep.RateLimit) {
+	if !h.checkEndpointRateLimit(fmt.Sprintf("doc:%d:%s:%s", project.ID, path, middleware.RateLimitIdentity(r)), ep.RateLimit) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
@@ -142,13 +121,13 @@ func (h *Handler) apiDocument(w http.ResponseWriter, r *http.Request, project *m
 		return
 	}
 
-	pdf, err := store.RenderHTMLToPDF(r.Context(), store.BrowserConfig{}, html, store.PDFOptions{
+	pdf, err := browser.RenderHTMLToPDF(r.Context(), browser.BrowserConfig{}, html, browser.PDFOptions{
 		PageSize:       ep.PageSize,
 		Landscape:      ep.Landscape,
 		DisableScripts: true,
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrBrowserUnavailable) {
+		if errors.Is(err, browser.ErrBrowserUnavailable) {
 			writeError(w, http.StatusServiceUnavailable, "PDF rendering needs Chrome or Edge installed on the server")
 			return
 		}

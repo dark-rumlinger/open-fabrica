@@ -19,8 +19,7 @@ import (
 // CSV export (xlsx not yet wired)
 
 // apiCreateExport takes typed args straight from ExportCreate. The format
-// column is fixed at "csv" (ExportCreate exposes no format arg), matching the
-// prior map path where the absent "format" key fell back to the default.
+// column is fixed at "csv" (ExportCreate exposes no format arg).
 func apiCreateExport(ctx *tools.ToolContext, rawPath, table string, publicColumns []any, requiresAuth bool, owner string) (*tools.Result, error) {
 	path, errRes := tools.ValidateAndNormalizeEndpointPath(rawPath)
 	if errRes != nil {

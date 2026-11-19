@@ -8,8 +8,8 @@
 // survives verbatim in of_llm_calls (response_tool_calls on the introducing call,
 // request_messages on every replay) and leaks through the build-log export.
 //
-// Redaction is structural: sensitive fields are identified from the tool name plus,
-// for manage_data, the table's secure-column registry. That covers the introducing
+// Redaction is structural: sensitive fields are the args a tool declares with
+// `sensitive:"true"` plus, for manage_data, the table's secure-column registry. That covers the introducing
 // response_tool_calls without depending on whether the tool has run yet (the response
 // is logged before the tool runs). A second pass scrubs every value found that way
 // from free text (response content and message prose), so a value echoed outside a
@@ -45,15 +45,20 @@ const (
 // for concurrent use, though in practice the single logger goroutine drives it.
 type Redactor struct {
 	db *sql.DB
+	// sensitive names the credential args of a tool (tools.Registry.SensitiveArgs).
+	sensitive func(tool string) []string
 
 	mu      sync.Mutex
 	secrets map[string]struct{} // distinct plaintext values seen, for the free-text pass
 }
 
-// New returns a Redactor backed by db for secure-column lookups. db needs only
-// read access (a reader pool is ideal).
-func New(db *sql.DB) *Redactor {
-	return &Redactor{db: db, secrets: map[string]struct{}{}}
+// New returns a Redactor backed by db for secure-column lookups (read access is
+// enough) and by sensitive for the credential args each tool declares.
+func New(db *sql.DB, sensitive func(tool string) []string) *Redactor {
+	if sensitive == nil {
+		sensitive = func(string) []string { return nil }
+	}
+	return &Redactor{db: db, sensitive: sensitive, secrets: map[string]struct{}{}}
 }
 
 // Redact scrubs sensitive tool arguments and any echoes of them from the entry.
@@ -148,18 +153,13 @@ func (r *Redactor) redactArgs(tool, argsJSON string) (string, bool) {
 	}
 	changed := false
 
-	// A field literally named "password" is sensitive regardless of tool: this
-	// covers manage_auth verify_password and any other caller that takes one.
-	if r.blank(args, "password") {
-		changed = true
+	for _, name := range r.sensitive(tool) {
+		if r.blank(args, name) {
+			changed = true
+		}
 	}
 
 	switch tool {
-	case "manage_secrets":
-		// store(name, value) - value is the credential material.
-		if r.blank(args, "value") {
-			changed = true
-		}
 	case "manage_data":
 		// insert/update/upsert carry user values for PASSWORD/ENCRYPTED columns
 		// (identified per table by the secure-column registry) and, defensively,

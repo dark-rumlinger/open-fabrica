@@ -963,12 +963,16 @@ func (s *FlowSuite) Lint() []string {
 // author expects a slow async result (a streamed or LLM reply, a server round trip).
 const flowSlowWait = 8000
 
+var flowLoaderSelRe = regexp.MustCompile(`(?i)\b(load(?:ing|er)?|spinner|typing|skeleton|shimmer|pending)\b`)
+
 // lintAsyncPresence flags a slow wait that only proves an element EXISTS and is
 // never followed by a check that the async work FINISHED. Apps render the reply
 // bubble, row or card at once with a spinner or typing indicator inside, so such a
 // wait passes before the request returns - and still passes when it fails and the
 // app shows its error card. Only a confirming assertion before the next action
-// (text, a hidden loader, changed pixels, or a JS condition) proves completion.
+// (text, count, a hidden loader, changed pixels, a non-loader sub-element, or a JS
+// condition) proves completion. Initial waits right after goto/reload are page-load
+// waits and are skipped.
 func lintAsyncPresence(f Flow) []string {
 	var out []string
 	for i, st := range f.Steps {
@@ -976,14 +980,32 @@ func lintAsyncPresence(f Flow) []string {
 		if (verb != "waitFor" && verb != "expectVisible") || st.Timeout < flowSlowWait {
 			continue
 		}
+		// Skip page-load waits immediately following goto/reload.
+		afterNav := false
+		for j := i - 1; j >= 0; j-- {
+			pv, _ := f.Steps[j].verb()
+			if pv == "wait" || pv == "snapshot" {
+				continue
+			}
+			afterNav = pv == "goto" || pv == "reload"
+			break
+		}
+		if afterNav {
+			continue
+		}
 		confirmed := false
 	scan:
 		for _, next := range f.Steps[i+1:] {
-			switch v, _ := next.verb(); v {
-			case "expectText", "expectNoText", "expectHidden", "expectChanged", "expectJs":
+			switch v, narg := next.verb(); v {
+			case "expectText", "expectNoText", "expectHidden", "expectChanged", "expectJs", "expectCount":
 				confirmed = true
 				break scan
-			case "waitFor", "expectVisible", "expectCount", "expectUrl", "expectAnimating", "snapshot", "wait":
+			case "expectVisible":
+				if narg != "" && narg != arg && !flowLoaderSelRe.MatchString(narg) {
+					confirmed = true
+					break scan
+				}
+			case "waitFor", "expectUrl", "expectAnimating", "snapshot", "wait":
 				continue
 			default:
 				break scan // the next action: the result was never checked

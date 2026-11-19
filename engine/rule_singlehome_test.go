@@ -29,10 +29,6 @@ package engine
 //     a human resolves that.
 //   - It is a RATCHET, not a cleanup: it stops the next restatement, and `known`
 //     makes existing debt legible. Green != coherent.
-//
-// Deliberately paired with TestStageFrameSizeBudget (pack/promptsize_test.go): a
-// lexical guard still rewards an author reaching for a thesaurus, while a byte
-// budget prices a restatement regardless of wording, because it never reads words.
 
 import (
 	"go/ast"
@@ -552,7 +548,7 @@ func splitMarkdownBlocks(file, body string) []block {
 		cur = nil
 	}
 	for i, rawLine := range strings.Split(body, "\n") {
-		if codeFence(rawLine) { // shared with pack_duplication_test.go
+		if strings.HasPrefix(strings.TrimSpace(rawLine), "```") {
 			inCode = !inCode
 			flush()
 			continue
@@ -618,9 +614,8 @@ func packBlocks(t *testing.T) []block {
 // WhenToUse, each action's summary, and each arg description.
 //
 // This surface was outside the guard entirely, and it is neither small nor quiet: the
-// core+backbone set alone has its own byte budget (TestAlwaysLoadedRoutingProseBudget)
-// because it rides every build's cached prefix, and a plan-declared tool's WhenToUse
-// rides the build seed. A rule stated in a frame AND in an arg description is the same
+// core+backbone set alone rides every build's cached prefix, and a plan-declared tool's
+// WhenToUse rides the build seed. A rule stated in a frame AND in an arg description is the same
 // two-wordings-read-as-two-rules failure the doctrine exists to stop, and until now
 // only review could see it - which is exactly how the auth-helper roster came to name
 // five helpers where the law names seven.

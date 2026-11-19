@@ -3,7 +3,6 @@ package admin
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -30,10 +29,6 @@ func (h *ProjectTablesHandler) InsertRow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Verify the table exists and load its declared column set. Unknown columns
-	// must be rejected before they reach Exec: SQLite would error on those, but
-	// without this check valid columns alongside an invalid one all get sent
-	// through, and a malformed identifier could break the quoted interpolation.
 	schemaCols, err := store.LoadTableSchema(projectDB.Reader(), tableName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "table not found")
@@ -49,18 +44,14 @@ func (h *ProjectTablesHandler) InsertRow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Fail closed: without the projection we can't tell which columns are secret,
-	// and skipping the hash/encrypt step below would store the caller's value in a
-	// PASSWORD/ENCRYPTED column verbatim.
 	secureCols, err := store.LoadSecureColumns(projectDB.Reader(), tableName)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "cannot read secure-column projection for this table")
 		return
 	}
 
-	var colNames, placeholders []string
+	var quotedCols []string
 	var values []any
-
 	for col, val := range req.Data {
 		if !store.ValidColumnName.MatchString(col) {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid column name: %s", col))
@@ -70,8 +61,7 @@ func (h *ProjectTablesHandler) InsertRow(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown column: %s", col))
 			return
 		}
-		colNames = append(colNames, security.QuoteIdent(col))
-		placeholders = append(placeholders, "?")
+		quotedCols = append(quotedCols, security.QuoteIdent(col))
 
 		if kind, ok := secureCols[col]; ok {
 			processed, err := security.ProcessSecureValue(kind, val, h.deps.Encryptor)
@@ -84,18 +74,9 @@ func (h *ProjectTablesHandler) InsertRow(w http.ResponseWriter, r *http.Request)
 		values = append(values, val)
 	}
 
-	query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
-		security.QuoteIdent(tableName), strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
-
-	res, err := projectDB.ExecWrite(query, values...)
+	id, err := store.InsertDynamicTableRow(projectDB, tableName, quotedCols, values)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to insert row")
-		return
-	}
-
-	id, err := res.LastInsertId()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get inserted row ID")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
@@ -118,7 +99,6 @@ func (h *ProjectTablesHandler) UpdateRow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Verify the table exists and load its declared column set; see InsertRow.
 	schemaCols, err := store.LoadTableSchema(projectDB.Reader(), tableName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "table not found")
@@ -134,7 +114,6 @@ func (h *ProjectTablesHandler) UpdateRow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Fail closed: see InsertRow.
 	secureCols, err := store.LoadSecureColumns(projectDB.Reader(), tableName)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "cannot read secure-column projection for this table")
@@ -143,7 +122,7 @@ func (h *ProjectTablesHandler) UpdateRow(w http.ResponseWriter, r *http.Request)
 
 	var setClauses []string
 	var values []any
-	changedCols := []string{} // non-nil even when empty: nil means "a delete" to AccountToRevoke
+	changedCols := []string{}
 
 	for col, val := range req.Data {
 		if !store.ValidColumnName.MatchString(col) {
@@ -155,10 +134,8 @@ func (h *ProjectTablesHandler) UpdateRow(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		if kind, ok := secureCols[col]; ok {
-			// Skip empty password fields (means "no change").
 			if kind == "hash" {
-				strVal := fmt.Sprintf("%v", val)
-				if strVal == "" {
+				if fmt.Sprintf("%v", val) == "" {
 					continue
 				}
 			}
@@ -179,16 +156,8 @@ func (h *ProjectTablesHandler) UpdateRow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Editing an app user's password, role or standing here ends their sessions, as
-	// the same change through the app's own API would.
 	revokeUser := tokenrevoke.AccountToRevoke(projectDB.Reader(), tableName, "id", rowID, changedCols)
-
-	values = append(values, rowID)
-	query := fmt.Sprintf(`UPDATE %s SET %s WHERE id = ?`,
-		security.QuoteIdent(tableName), strings.Join(setClauses, ", "))
-
-	_, err = projectDB.ExecWrite(query, values...)
-	if err != nil {
+	if err := store.UpdateDynamicTableRow(projectDB, tableName, rowID, setClauses, values); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update row")
 		return
 	}
@@ -214,25 +183,13 @@ func (h *ProjectTablesHandler) DeleteRow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Verify the table exists in this project's database.
-	var count int
-	err := projectDB.QueryRow(
-		"SELECT COUNT(*) FROM of_dynamic_tables WHERE table_name = ?",
-		tableName,
-	).Scan(&count)
-	if err != nil || count == 0 {
+	if !store.DynamicTableExists(projectDB, tableName) {
 		writeError(w, http.StatusNotFound, "table not found")
 		return
 	}
 
-	// A deleted app user's sessions end with the account; resolve who it is first.
 	revokeUser := tokenrevoke.AccountToRevoke(projectDB.Reader(), tableName, "id", rowID, nil)
-
-	_, err = projectDB.ExecWrite(
-		fmt.Sprintf(`DELETE FROM %s WHERE id = ?`, security.QuoteIdent(tableName)),
-		rowID,
-	)
-	if err != nil {
+	if err := store.DeleteDynamicTableRow(projectDB, tableName, rowID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete row")
 		return
 	}
@@ -241,9 +198,6 @@ func (h *ProjectTablesHandler) DeleteRow(w http.ResponseWriter, r *http.Request)
 	writeStatus(w, "deleted")
 }
 
-// revokeAccountSessions ends the sessions of an app user whose account row was just
-// changed or deleted (userID 0 means the row was not an account). A failure to
-// record it is logged, not returned: the edit itself succeeded.
 func (h *ProjectTablesHandler) revokeAccountSessions(projectDB *db.ProjectDB, projectID, userID int, why string) {
 	if userID <= 0 {
 		return

@@ -17,17 +17,15 @@ import (
 	"openfabrica/internal/qrcode"
 	"openfabrica/security"
 	"openfabrica/server/middleware"
+	"openfabrica/store"
 )
 
 func (h *Handler) handleTOTP(w http.ResponseWriter, r *http.Request, projectID int,
 	readDB *sql.DB, writeDB *sql.DB, physTable string, ae *authEndpointConfig, sub string) {
 
 	// Enforce that TOTP is enabled for this auth endpoint.
-	var enforced bool
-	var issuer string
-	if err := readDB.QueryRow(
-		"SELECT issuer, enforced FROM of_totp_endpoints WHERE path = ?", ae.Path,
-	).Scan(&issuer, &enforced); err != nil {
+	issuer, _, err := store.GetTOTPEndpointConfig(readDB, ae.Path)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "TOTP not enabled for this auth endpoint")
 		return
 	}
@@ -61,11 +59,7 @@ func (h *Handler) totpSetup(w http.ResponseWriter, r *http.Request, projectID in
 		return
 	}
 
-	var secretEnc string
-	var verified bool
-	err := readDB.QueryRow(
-		"SELECT secret_encrypted, verified FROM of_user_totp WHERE user_id = ?", userID,
-	).Scan(&secretEnc, &verified)
+	_, verified, err := store.GetUserTOTP(readDB, userID)
 
 	var secret string
 	if err == sql.ErrNoRows || (err == nil && !verified) {
@@ -80,12 +74,7 @@ func (h *Handler) totpSetup(w http.ResponseWriter, r *http.Request, projectID in
 			writeError(w, http.StatusInternalServerError, "encrypt: "+encErr.Error())
 			return
 		}
-		_, dbErr := writeDB.Exec(`
-			INSERT INTO of_user_totp (user_id, auth_endpoint_path, secret_encrypted, verified)
-			VALUES (?, ?, ?, 0)
-			ON CONFLICT(user_id) DO UPDATE SET secret_encrypted = excluded.secret_encrypted, verified = 0`,
-			userID, ae.Path, enc)
-		if dbErr != nil {
+		if dbErr := store.UpsertUserTOTP(writeDB, userID, ae.Path, enc); dbErr != nil {
 			writeError(w, http.StatusInternalServerError, "save: "+dbErr.Error())
 			return
 		}
@@ -135,11 +124,8 @@ func (h *Handler) totpVerify(w http.ResponseWriter, r *http.Request, projectID i
 		return
 	}
 
-	var enc string
-	var verified bool
-	if err := readDB.QueryRow(
-		"SELECT secret_encrypted, verified FROM of_user_totp WHERE user_id = ?", userID,
-	).Scan(&enc, &verified); err != nil {
+	enc, verified, err := store.GetUserTOTP(readDB, userID)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "totp not set up")
 		return
 	}
@@ -159,7 +145,7 @@ func (h *Handler) totpVerify(w http.ResponseWriter, r *http.Request, projectID i
 	if !verified {
 		// The response claims setup is complete, so the write must have stuck;
 		// otherwise 2FA would silently never be enforced at login.
-		if _, err := writeDB.Exec("UPDATE of_user_totp SET verified = 1, verified_at = CURRENT_TIMESTAMP WHERE user_id = ?", userID); err != nil {
+		if err := store.MarkUserTOTPVerified(writeDB, userID); err != nil {
 			writeError(w, http.StatusInternalServerError, "save: "+err.Error())
 			return
 		}
@@ -169,23 +155,19 @@ func (h *Handler) totpVerify(w http.ResponseWriter, r *http.Request, projectID i
 		// completes the sign-in that was waiting on the second factor (an enforced
 		// enrollment, or an OAuth / magic-link sign-in of an enrolled user). The token is
 		// single use, claimed atomically so two racing verifies cannot both sign in.
-		res, err := writeDB.Exec("UPDATE of_magic_tokens SET used = 1 WHERE token = ? AND used = 0", stepUp.hash)
+		ok, err := store.ConsumeMagicToken(writeDB, stepUp.hash)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "save: "+err.Error())
 			return
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "this enrollment link has expired or was already used")
 			return
 		}
 		username := h.lookupUsername(readDB, physTable, ae, userID)
 		role := ae.DefaultRole
-		var dbRole sql.NullString
 		if validTableName.MatchString(physTable) && validTableName.MatchString(ae.RoleColumn) {
-			_ = readDB.QueryRow(fmt.Sprintf("SELECT %s FROM %s WHERE id = ?", security.QuoteIdent(ae.RoleColumn), security.QuoteIdent(physTable)), userID).Scan(&dbRole) // no role column keeps the default role
-		}
-		if dbRole.Valid && dbRole.String != "" {
-			role = dbRole.String
+			role = store.ReadAuthUserRole(readDB, physTable, ae.RoleColumn, userID, ae.DefaultRole)
 		}
 		extra := map[string]any{"verified": true}
 		if stepUp.purpose == totpPurposeEnroll {
@@ -231,11 +213,7 @@ func mintStepUpToken(writeDB *sql.DB, ae *authEndpointConfig, userID int, userna
 		return "", err
 	}
 	token := hex.EncodeToString(raw)
-	_, _ = writeDB.Exec("DELETE FROM of_magic_tokens WHERE purpose = ? AND user_id = ? AND auth_endpoint_path = ?", purpose, userID, ae.Path)
-	if _, err := writeDB.Exec(
-		`INSERT INTO of_magic_tokens (token, auth_endpoint_path, email, user_id, expires_at, purpose, method) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		magicTokenHash(token), ae.Path, username, userID, time.Now().Add(ttl), purpose, method,
-	); err != nil {
+	if err := store.ReplaceUserMagicToken(writeDB, magicTokenHash(token), ae.Path, username, userID, time.Now().Add(ttl), purpose, method); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -274,15 +252,15 @@ func writeEnrollmentReply(w http.ResponseWriter, ae *authEndpointConfig, token s
 // is needed) and the single-use token. A database error is returned, never treated as
 // "no 2FA": a sign-in must not skip the factor because a read failed.
 func (h *Handler) totpStepUp(readDB, writeDB *sql.DB, ae *authEndpointConfig, userID int, username, method string) (string, string, error) {
-	var enforced bool
-	if err := readDB.QueryRow("SELECT enforced FROM of_totp_endpoints WHERE path = ?", ae.Path).Scan(&enforced); err != nil {
+	_, enforced, err := store.GetTOTPEndpointConfig(readDB, ae.Path)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", "", nil
 		}
 		return "", "", err
 	}
-	var verified bool
-	switch err := readDB.QueryRow("SELECT verified FROM of_user_totp WHERE user_id = ?", userID).Scan(&verified); {
+	_, verified, err := store.GetUserTOTP(readDB, userID)
+	switch {
 	case err != nil && err != sql.ErrNoRows:
 		return "", "", err
 	case err == nil && verified:
@@ -338,21 +316,16 @@ func (h *Handler) requireUserOrEnrollment(w http.ResponseWriter, r *http.Request
 		}
 	}
 	hash := magicTokenHash(token)
-	var userIDN sql.NullInt64
-	var expires time.Time
-	var used bool
-	var purpose, method string
-	if err := readDB.QueryRow(
-		`SELECT user_id, expires_at, used, purpose, method FROM of_magic_tokens WHERE token = ? AND auth_endpoint_path = ? AND purpose IN (?, ?)`,
-		hash, ae.Path, totpPurposeEnroll, totpPurposeLogin,
-	).Scan(&userIDN, &expires, &used, &purpose, &method); err != nil || !userIDN.Valid || used || time.Now().After(expires) {
+	mt, err := store.LookupMagicToken(readDB, hash, ae.Path, totpPurposeEnroll, totpPurposeLogin)
+	if err != nil || !mt.UserID.Valid || mt.Used || time.Now().After(mt.ExpiresAt) {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return 0, nil
 	}
+	method := mt.Method
 	if method == "" {
 		method = authMethodPassword
 	}
-	return int(userIDN.Int64), &stepUpToken{hash: hash, purpose: purpose, method: method}
+	return int(mt.UserID.Int64), &stepUpToken{hash: hash, purpose: mt.Purpose, method: method}
 }
 
 func (h *Handler) totpDisable(w http.ResponseWriter, r *http.Request, projectID int,
@@ -366,8 +339,8 @@ func (h *Handler) totpDisable(w http.ResponseWriter, r *http.Request, projectID 
 		Code string `json:"code"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body) // bad JSON leaves an empty code, rejected below
-	var enc string
-	if err := readDB.QueryRow("SELECT secret_encrypted FROM of_user_totp WHERE user_id = ?", userID).Scan(&enc); err != nil {
+	enc, _, err := store.GetUserTOTP(readDB, userID)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "totp not set up")
 		return
 	}
@@ -382,7 +355,7 @@ func (h *Handler) totpDisable(w http.ResponseWriter, r *http.Request, projectID 
 	}
 	// The response claims 2FA is off, so the delete must have stuck; otherwise
 	// the user would keep being challenged for codes they meant to disable.
-	if _, err := writeDB.Exec("DELETE FROM of_user_totp WHERE user_id = ?", userID); err != nil {
+	if err := store.DeleteUserTOTP(writeDB, userID); err != nil {
 		writeError(w, http.StatusInternalServerError, "delete: "+err.Error())
 		return
 	}
@@ -410,8 +383,7 @@ func (h *Handler) lookupUsername(readDB *sql.DB, physTable string, ae *authEndpo
 	if !validTableName.MatchString(physTable) || !validTableName.MatchString(ae.UsernameColumn) {
 		return fmt.Sprintf("user-%d", userID)
 	}
-	var name string
-	_ = readDB.QueryRow(fmt.Sprintf("SELECT %s FROM %s WHERE id = ?", security.QuoteIdent(ae.UsernameColumn), security.QuoteIdent(physTable)), userID).Scan(&name) // falls back to user-<id> below
+	name := store.ReadAuthUsername(readDB, physTable, ae.UsernameColumn, userID)
 	if name == "" {
 		name = fmt.Sprintf("user-%d", userID)
 	}

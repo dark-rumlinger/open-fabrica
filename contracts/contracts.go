@@ -41,6 +41,7 @@ const (
 	IDTrustBoundary     = "trust-boundary"
 	IDRoomReducer       = "room-reducer"
 	IDModuleScope       = "module-scope"
+	IDGameRuntime       = "game-runtime"
 )
 
 // AllIDs is every shipped contract id (the single home for the set). Adding a
@@ -48,7 +49,7 @@ const (
 var AllIDs = []string{
 	IDAPIResponse, IDEndpointRoutes, IDAuthWindowAPI, IDE2EEWire, IDE2EESecurityModel,
 	IDRealtimeFrames, IDRoomReducer, IDPageLayout, IDRouting, IDTriggerEvents,
-	IDPaymentFlow, IDWebRTC, IDModuleScope, IDTrustBoundary,
+	IDPaymentFlow, IDWebRTC, IDModuleScope, IDTrustBoundary, IDGameRuntime,
 }
 
 // Contract is one canonical fact.

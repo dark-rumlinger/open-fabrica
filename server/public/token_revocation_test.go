@@ -41,14 +41,14 @@ func (h *Handler) mint(t *testing.T, userID int) string {
 
 // valid reports whether a token is accepted by every path the public server uses
 // to accept a user's token: the claims check, the Authorization-header extractor and
-// the combined API-key-or-JWT check the WebSocket and stream endpoints use.
+// the per-project check the WebSocket and stream endpoints use.
 func (h *Handler) valid(t *testing.T, tok string) bool {
 	t.Helper()
 	_, errClaims := h.validateUserClaims(tok)
 	req := httptest.NewRequest(http.MethodGet, "/api/x", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	_, errHeader := h.extractUserClaims(req)
-	okCombined, _ := h.validateProjectTokenOrJWTWithClaims(1, tok)
+	_, okCombined := h.projectUserClaims(1, tok)
 
 	ok := errClaims == nil
 	if (errHeader == nil) != ok || okCombined != ok {

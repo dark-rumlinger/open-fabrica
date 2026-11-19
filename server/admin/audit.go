@@ -1,14 +1,12 @@
 package admin
 
 import (
-	"database/sql"
 	"net/http"
 	"strconv"
-	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"openfabrica/db/models"
 	"openfabrica/security"
 	"openfabrica/server/middleware"
 )
@@ -60,28 +58,19 @@ func (h *AuditHandler) record(next http.Handler) http.Handler {
 		// empty (and so 0) for a global action such as a user or provider change.
 		projectID, _ := strconv.Atoi(chi.URLParam(r, "projectID"))
 
-		if _, err := h.deps.DB.ExecWrite(
-			`INSERT INTO admin_audit (user_id, username, method, path, target_project_id, status, request_id, ip)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			userID, username, r.Method, r.URL.Path, projectID, sw.status,
-			middleware.GetRequestID(r.Context()), middleware.ClientIP(r),
-		); err != nil {
+		if err := models.InsertAdminAudit(h.deps.DB.DB, models.AuditEntry{
+			UserID:          userID,
+			Username:        username,
+			Method:          r.Method,
+			Path:            r.URL.Path,
+			TargetProjectID: projectID,
+			Status:          sw.status,
+			RequestID:       middleware.GetRequestID(r.Context()),
+			IP:              middleware.ClientIP(r),
+		}); err != nil {
 			h.deps.Logger.Error("audit log insert failed", "error", err, "method", r.Method, "path", r.URL.Path)
 		}
 	})
-}
-
-type auditEntry struct {
-	ID              int64     `json:"id"`
-	UserID          int       `json:"user_id"`
-	Username        string    `json:"username"`
-	Method          string    `json:"method"`
-	Path            string    `json:"path"`
-	TargetProjectID int       `json:"target_project_id"`
-	Status          int       `json:"status"`
-	RequestID       string    `json:"request_id"`
-	IP              string    `json:"ip"`
-	CreatedAt       time.Time `json:"created_at"`
 }
 
 // List returns audit rows newest-first with offset pagination and optional
@@ -97,46 +86,16 @@ func (h *AuditHandler) List(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 
-	// Filters are bound parameters, never interpolated. "user" is a substring
-	// match on the actor; "action" matches the HTTP method exactly.
-	where := " WHERE 1=1"
-	var args []any
-	if user := strings.TrimSpace(r.URL.Query().Get("user")); user != "" {
-		where += " AND username LIKE ?"
-		args = append(args, "%"+user+"%")
-	}
-	if action := strings.TrimSpace(r.URL.Query().Get("action")); action != "" {
-		where += " AND method = ?"
-		args = append(args, strings.ToUpper(action))
-	}
-
-	var total int
-	if err := h.deps.DB.DB.QueryRow("SELECT COUNT(*) FROM admin_audit"+where, args...).Scan(&total); err != nil {
-		h.deps.serverError(w, "failed to query audit log", err)
-		return
-	}
-
-	queryArgs := append(append([]any{}, args...), limit, offset)
-	rows, err := h.deps.DB.DB.Query(
-		"SELECT id, user_id, username, method, path, target_project_id, status, request_id, ip, created_at "+
-			"FROM admin_audit"+where+" ORDER BY id DESC LIMIT ? OFFSET ?",
-		queryArgs...,
+	items, total, err := models.ListAdminAudit(
+		h.deps.DB.DB,
+		r.URL.Query().Get("user"),
+		r.URL.Query().Get("action"),
+		limit,
+		offset,
 	)
 	if err != nil {
 		h.deps.serverError(w, "failed to query audit log", err)
 		return
 	}
-	defer rows.Close()
-
-	items := collectRows(rows, func(rs *sql.Rows) (auditEntry, error) {
-		var e auditEntry
-		err := rs.Scan(&e.ID, &e.UserID, &e.Username, &e.Method, &e.Path,
-			&e.TargetProjectID, &e.Status, &e.RequestID, &e.IP, &e.CreatedAt)
-		return e, err
-	})
-	if items == nil {
-		items = []auditEntry{}
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
 }

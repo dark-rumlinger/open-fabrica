@@ -139,11 +139,17 @@ func ReconcileWebhook(env WebhookEnv, body, signature string) (*WebhookOutcome, 
 		}
 	}
 
-	// Idempotency: claim this event before mutating any money row so a replayed or
-	// duplicated delivery can't double-apply. Runs after signature verification so
-	// only authentic events are recorded.
+	// Idempotency + state mutation run inside a single transaction so a crash or
+	// failure cannot leave an event claimed without its payment/subscription update.
+	// Runs after signature verification so only authentic events are recorded.
 	eventKey := webhookEventKey(providerType, body, webhookData)
-	claimed, claimErr := claimWebhookEvent(env.DB, eventKey)
+	tx, err := env.DB.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("starting webhook transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	claimed, claimErr := claimWebhookEvent(tx, eventKey)
 	if claimErr != nil {
 		return nil, fmt.Errorf("webhook idempotency check: %w", claimErr)
 	}
@@ -156,43 +162,49 @@ func ReconcileWebhook(env WebhookEnv, body, signature string) (*WebhookOutcome, 
 		if isLink {
 			ch = subscriptionChange{externalID: link.subscriptionID, sessionID: link.sessionID, status: link.status}
 		}
-		matched, err := applySubscriptionChange(env, ch, func() (time.Time, bool) {
+		matched, shouldPublish, err := applySubscriptionChange(tx, ch, func() (time.Time, bool) {
 			end := parseRenewalPeriodEnd(providerType, webhookData)
 			return end, !end.IsZero()
 		})
 		if err != nil {
-			// Release the claim so the provider's redelivery reprocesses.
-			releaseWebhookEvent(env.DB, eventKey)
 			return nil, fmt.Errorf("updating subscription: %w", err)
 		}
 		if !matched {
-			releaseWebhookEvent(env.DB, eventKey)
 			log.Warn("webhook for unknown subscription ignored", "external_id", ch.externalID)
 			return &WebhookOutcome{Kind: WebhookIgnored, ExternalID: ch.externalID}, nil
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("committing subscription webhook: %w", err)
+		}
+		if shouldPublish {
+			publishSubscriptionEvent(env, ch.externalID, ch.status)
 		}
 		return &WebhookOutcome{Kind: WebhookSubscription, ExternalID: ch.externalID, Status: ch.status}, nil
 	}
 
 	// paid is terminal: a late or out-of-order event never moves a settled
 	// payment back.
-	res, err := env.DB.Exec(
+	res, err := tx.Exec(
 		"UPDATE of_payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE external_id = ? AND status NOT IN ('paid', 'refunded')",
 		newStatus, externalID,
 	)
 	if err != nil {
-		// Release the idempotency claim so the provider's redelivery reprocesses
-		// rather than being swallowed as a duplicate.
-		releaseWebhookEvent(env.DB, eventKey)
 		return nil, fmt.Errorf("updating payment status: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		var known int
-		_ = env.DB.QueryRow("SELECT COUNT(*) FROM of_payments WHERE external_id = ?", externalID).Scan(&known)
+		_ = tx.QueryRow("SELECT COUNT(*) FROM of_payments WHERE external_id = ?", externalID).Scan(&known)
 		if known == 0 {
-			releaseWebhookEvent(env.DB, eventKey)
 			log.Warn("webhook for unknown payment ignored", "external_id", externalID)
+			return &WebhookOutcome{Kind: WebhookIgnored, ExternalID: externalID}, nil
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("committing settled payment webhook: %w", err)
 		}
 		return &WebhookOutcome{Kind: WebhookIgnored, ExternalID: externalID}, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing payment webhook: %w", err)
 	}
 	// Raised only after the row commits and only inside the idempotency claim
 	// above, so a redelivered webhook cannot fire fulfillment twice.

@@ -24,6 +24,7 @@ type Config struct {
 	// network - only do this behind a firewall or reverse proxy you control.
 	AdminBindAddr string `json:"admin_bind_addr"`
 	PublicPort    int    `json:"public_port"`
+	MQTTPort      int    `json:"mqtt_port"` // optional raw TCP MQTT port (e.g. 1883); 0 = WebSocket (/mqtt) only
 	DataDir       string `json:"data_dir"`
 	DBPath        string `json:"db_path"`
 	JWTSecret     string `json:"jwt_secret"`
@@ -73,10 +74,24 @@ type Config struct {
 	// startup. Defaults to true; honor OPENFABRICA_NO_BROWSER as an override.
 	AutoOpenBrowser bool `json:"auto_open_browser"`
 
+	// BrowserPath overrides headless Chrome/Chromium executable discovery for
+	// page probes and screenshots. Empty uses OPENFABRICA_CHROME_PATH /
+	// CHROME_PATH / default OS paths.
+	BrowserPath string `json:"browser_path"`
+
 	// PublicCSP is the Content-Security-Policy header applied to HTML
 	// responses on the public project router. Empty disables the header.
 	// Defaults to DefaultPublicCSP; set to "" to opt out.
 	PublicCSP string `json:"public_csp"`
+
+	// ExtraDownloadExtensions lists additional file extensions (e.g. [".wasm", ".hdr"])
+	// that manage_web_fetch action=download may save into /files/. Executable and
+	// scriptable extensions remain blocked by a hardcoded security deny-list.
+	ExtraDownloadExtensions []string `json:"extra_download_extensions"`
+
+	// WebFetchMaxAssetMB caps the size in MiB of binary assets downloaded via
+	// manage_web_fetch action=download. Zero falls back to 25 MiB.
+	WebFetchMaxAssetMB int `json:"web_fetch_max_asset_mb"`
 }
 
 // DefaultConfigPath is the config file read when no path is supplied on the
@@ -244,6 +259,9 @@ func applyEnvOverrides(cfg *Config) {
 	if p, ok := envInt("OPENFABRICA_PUBLIC_PORT", 1); ok {
 		cfg.PublicPort = p
 	}
+	if p, ok := envInt("OPENFABRICA_MQTT_PORT", 0); ok {
+		cfg.MQTTPort = p
+	}
 	if v := os.Getenv("OPENFABRICA_DATA_DIR"); v != "" {
 		cfg.DataDir = v
 	}
@@ -261,6 +279,12 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("OPENFABRICA_TRUSTED_PROXIES"); v != "" {
 		cfg.TrustedProxies = splitList(v)
+	}
+	if v := os.Getenv("OPENFABRICA_EXTRA_DOWNLOAD_EXTENSIONS"); v != "" {
+		cfg.ExtraDownloadExtensions = splitList(v)
+	}
+	if n, ok := envInt("OPENFABRICA_WEB_FETCH_MAX_ASSET_MB", 1); ok {
+		cfg.WebFetchMaxAssetMB = n
 	}
 	if v := os.Getenv("OPENFABRICA_LOG_FILE"); v != "" {
 		cfg.LogFile = v
@@ -307,6 +331,11 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if envTrue(os.Getenv("OPENFABRICA_NO_BROWSER")) {
 		cfg.AutoOpenBrowser = false
+	}
+	if v := strings.TrimSpace(os.Getenv("OPENFABRICA_CHROME_PATH")); v != "" {
+		cfg.BrowserPath = v
+	} else if v := strings.TrimSpace(os.Getenv("CHROME_PATH")); v != "" && cfg.BrowserPath == "" {
+		cfg.BrowserPath = v
 	}
 }
 

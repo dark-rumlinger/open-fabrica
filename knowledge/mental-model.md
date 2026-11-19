@@ -23,13 +23,15 @@ tools; the platform wires them.
 - **Components** (`kind=component`) - reusable fragments, included with
   `{{include:name}}`.
 - **Files** (`kind=file`) - page or global JS/CSS at `/files/<path>` (`/files/js/app.js`,
-  imported by basename as `'app'`; basenames are unique). The design system is one
-  `scope=global` CSS file; page behaviour is a linked file, never an inline `<script>`.
+  imported by basename as `'app'`; basenames are unique). Shared CSS/shell JS are
+  `scope=global` (auto-injected via `{{assets}}`); page JS/CSS are `scope=page` attached
+  via `attach_to` — never inline `<script>` or hand-written `<script>`/`<link>` tags.
 - **Tables** - SQLite tables. A REST API over a table comes from `manage_api` create.
-- **Endpoints** - REST CRUD / view reads (`manage_api` create), auth
-  (`manage_auth` / `manage_oauth` create), realtime WebSocket (a realtime tool's
-  create; the `realtime_signaling` guide owns the model choice), SSE (`manage_sse` create),
-  LLM proxy (`manage_llm_proxy` create), uploads, exports, feeds, and more.
+- **Endpoints** - REST CRUD / view reads (`manage_api` create), custom server
+  functions (`manage_function` create), auth (`manage_auth` / `manage_oauth` create),
+  realtime WebSocket (a realtime tool's create; the `realtime_signaling` guide owns the
+  model choice), SSE (`manage_sse` create), LLM proxy (`manage_llm_proxy` create),
+  uploads, exports, feeds, and more.
 - **Scheduled tasks** - cron / native actions / (rarely) prompt schedules.
 
 ## Platform-managed helper modules (you do NOT author these)

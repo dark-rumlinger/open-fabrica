@@ -282,6 +282,11 @@ var transportMeta = map[string]transportMetaEntry{
 		DefaultBaseURL: "https://api.search.brave.com/res/v1",
 		RequiresAPIKey: true,
 	},
+	"duckduckgo": {
+		Label:          "DuckDuckGo (web search, no key)",
+		DefaultBaseURL: "https://html.duckduckgo.com/html/",
+		RequiresAPIKey: false,
+	},
 }
 
 // providerTypeInfo is one selectable provider type returned by Transports.

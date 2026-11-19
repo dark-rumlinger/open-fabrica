@@ -18,13 +18,20 @@ import (
 	"testing"
 
 	"openfabrica/pack"
+	"openfabrica/tools"
 )
 
 // TestGuideFrontMatterToolsAreRegistered: every tool a guide's `tools:`
 // front-matter names must exist in the tool registry, or the tool->guide
 // prefetch route for that guide is dead and the build never sees its contract.
 func TestGuideFrontMatterToolsAreRegistered(t *testing.T) {
-	known, _ := registryTools(t)
+	known := map[string]bool{}
+	for _, td := range tools.DefaultRegistry().List() {
+		known[td.Name] = true
+	}
+	if len(known) < 20 {
+		t.Fatalf("registry looks unpopulated (%d tools)", len(known))
+	}
 	ps, err := pack.Embedded()
 	if err != nil {
 		t.Fatalf("pack.Embedded: %v", err)

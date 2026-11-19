@@ -18,6 +18,7 @@ import (
 
 	"openfabrica/db/models"
 	"openfabrica/internal/triage"
+	"openfabrica/store"
 )
 
 // TriageHandler serves the cross-project build-anomaly scan.
@@ -119,8 +120,7 @@ func (h *TriageHandler) serveRawExport(w http.ResponseWriter, projects []models.
 		if err != nil {
 			continue
 		}
-		var found string
-		if pdb.Reader().QueryRow(`SELECT id FROM of_runs WHERE id = ?`, runID).Scan(&found) != nil {
+		if !store.RunExists(pdb.Reader(), runID) {
 			continue // not this project's run
 		}
 		payload, err := (&BuildsHandler{deps: h.deps}).exportPayload(pdb, runID)

@@ -51,7 +51,7 @@ func buildAllTools(plan *Plan) []string {
 	// keyword-inferred schema for another model ("multiplayer" infers all four) would
 	// ride every turn for a model the plan ruled out; a locked "none" rules them all
 	// out ("chat" in a chatbot task infers manage_relay). Planner-declared tools always stay.
-	choice := planRealtimeChoice(plan.Decisions)
+	choice := plan.RealtimeChoice()
 	if locked, ok := realtimeChoiceTool(choice); ok || choice == realtimeNone {
 		kept := names[:0]
 		for _, n := range names {
@@ -168,6 +168,7 @@ var impliedTools = map[string][]string{
 	// task cannot be built without all three.
 	"manage_payments":      {"manage_function", "manage_providers", "manage_triggers"},
 	"manage_subscriptions": {"manage_function", "manage_providers", "manage_triggers"},
+	"manage_web_search":    {"manage_web_fetch"},
 }
 
 // planNeedsBackbone reports whether a plan does plain data work, which is what the
@@ -291,6 +292,8 @@ var taskToolInference = []struct {
 	{"manage_stockphotos", []string{"photo", "photos", "photography", "stock image", "stock images"}},
 	{"manage_media", []string{"thumbnail", "thumbnails"}},
 	{"manage_seo", []string{"seo", "meta tags", "meta description", "sitemap", "robots", "open graph", "structured data"}},
+	{"manage_web_search", []string{"web search", "search online", "search the web", "research"}},
+	{"manage_web_fetch", []string{"rss", "atom feed", "news feed", "fetch url", "scrape"}},
 }
 
 // wordByte reports whether b can be part of a word for boundary purposes.

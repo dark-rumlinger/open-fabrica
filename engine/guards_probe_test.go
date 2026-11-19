@@ -18,7 +18,7 @@ func probeArgs() map[string]any {
 // blocked: it is how the model confirms its last fix worked.
 func TestRepeatGuard_ProbeNotBlockedAcrossInterveningWrites(t *testing.T) {
 	g, st := RepeatGuard{}, NewGuardState()
-	files := []string{"main.js", "planet.js", "procedural.js"}
+	files := []string{"main.js", "module_a.js", "module_b.js"}
 
 	for i, f := range files {
 		// Probe fails on the bug currently surfaced.

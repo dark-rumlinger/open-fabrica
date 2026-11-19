@@ -156,13 +156,11 @@ func (h *Handler) loadWSEndpoint(projectDB *sql.DB, path string) (*wsEndpointCon
 
 	// Pre-load table column schema for structured write_to_table inserts.
 	if ws.WriteToTable != "" && validTableName.MatchString(ws.WriteToTable) {
-		var schemaDef sql.NullString
 		// A miss leaves tableColumns nil; wsWriteToTable then falls back to the
 		// raw-JSON `data` column insert. The shared schema reader handles both forms
 		// a column may be stored in, so constraints map like bare types.
-		_ = projectDB.QueryRow("SELECT schema_def FROM of_dynamic_tables WHERE table_name = ?", ws.WriteToTable).Scan(&schemaDef)
-		if schemaDef.Valid && schemaDef.String != "" {
-			ws.tableColumns = store.SchemaDefColumnSet(schemaDef.String)
+		if schemaDef, err := store.LoadDynamicTableSchemaDef(projectDB, ws.WriteToTable); err == nil && schemaDef != "" {
+			ws.tableColumns = store.SchemaDefColumnSet(schemaDef)
 		}
 		// Cache the table's required (NOT NULL, no-default) columns from the live
 		// schema so wsWriteToTable can skip a frame that can't fill them, rather than
@@ -299,12 +297,12 @@ func (h *Handler) prepareWSConnect(w http.ResponseWriter, r *http.Request, proje
 	}
 	var userID, tenantID int
 	if token != "" {
-		okTok, claims := h.validateProjectTokenOrJWTWithClaims(projectID, token)
+		claims, okTok := h.projectUserClaims(projectID, token)
 		if !okTok && wsCfg.RequiresAuth {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return spec, nil, false
 		}
-		if claims != nil {
+		if okTok {
 			userID = claims.UserID
 			tenantID = claims.TenantID
 		}
@@ -465,10 +463,15 @@ func (h *Handler) apiWebSocket(w http.ResponseWriter, r *http.Request, projectID
 	defer cancel()
 
 	// Track current room (key + user-facing name) for dynamic room switching via room_column.
+	// The read pump owns both while it runs; the cleanup below reads them only
+	// after readDone, so a room switch can never land after the leave.
 	currentRoomKey := roomKey
 	currentRoomName := initialRoom
+	readDone := make(chan struct{})
 
 	defer func() {
+		cancel()
+		<-readDone
 		empty, owner := h.deps.WSHub.leave(currentRoomKey, currentRoomName, client)
 		sess.onDisconnect(owner)
 		if owner && empty {
@@ -506,6 +509,7 @@ func (h *Handler) apiWebSocket(w http.ResponseWriter, r *http.Request, projectID
 
 	// Read pump: reads incoming messages and broadcasts to room.
 	go func() {
+		defer close(readDone)
 		defer cancel()
 		defer safego.Recover("ws-read-pump")
 		spectatorNotified := false
@@ -780,8 +784,8 @@ func (h *Handler) apiWSRooms(w http.ResponseWriter, r *http.Request, projectID i
 		if token == "" {
 			token = r.URL.Query().Get("token")
 		}
-		ok, claims := h.validateProjectTokenOrJWTWithClaims(projectID, token)
-		if !ok || claims == nil || claims.TenantID == 0 {
+		claims, ok := h.projectUserClaims(projectID, token)
+		if !ok || claims.TenantID == 0 {
 			writeError(w, http.StatusUnauthorized, "tenant-scoped token required")
 			return
 		}
@@ -794,7 +798,7 @@ func (h *Handler) apiWSRooms(w http.ResponseWriter, r *http.Request, projectID i
 		if token == "" {
 			token = r.URL.Query().Get("token")
 		}
-		if ok, _ := h.validateProjectTokenOrJWTWithClaims(projectID, token); !ok {
+		if _, ok := h.projectUserClaims(projectID, token); !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}

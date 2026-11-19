@@ -23,19 +23,9 @@ func init() {
 		Category:           "api",
 		FullResultInEvents: true,
 		OneLiner:           "Define REST CRUD endpoints (GET/POST/PUT/DELETE) over a project table, GET over a view, or a read-only SQL query endpoint.",
-		WhenToUse: `One create per table exposed at /api/<path>; the handler is auto-emitted. LIST and single-row/POST/PUT responses use different shapes: build to the api-response contract in your mental model.
+		WhenToUse: `Expose a table or SQL VIEW as REST CRUD (/api/<path>); views are read-only GET. Row-level auth_model: public, authenticated, role (required_role), owner (private per user via owner_column), or authored (shared GET, owner-scoped PUT/DELETE). Use public_write=true + authenticated for anonymous-submit / admin-read forms. PUT /api/<path>/<value> upserts on non-id unique keys (lookup_column -> uuid/slug -> sole unique TEXT).
 
-create also accepts a SQL VIEW as table_name: the endpoint is read-only (GET list and single row, public_read), so a view's joined or aggregated rows are browsable like a table's. Use it for report views instead of materialising them in the browser.
-
-enable_query adds a read-only raw-SELECT endpoint (POST /api/<path>, default "_query") returning {columns, rows (arrays), row_count, execution_ms, truncated}: the only runtime way to run free-form joins or aggregations (manage_sql is build-time only). It reads every non-auth table with NO owner or tenant scoping, so enable it only for a query tool, with requires_auth=true unless all tables are public. delete removes it.
-
-auth_model (exactly one): public; authenticated (any logged-in user); role (required_role names it); owner (owner_column; per-user RLS, each user reads AND writes only their own rows); authored (owner_column names the AUTHOR: every logged-in user reads all rows, each writes only their own). Use authored, not owner, when rows are shared within a workspace, channel or room: owner hides everyone else's rows. public_read=true keeps GET open while writes need auth. public_write=true is the inverse (anyone POSTs, GET stays auth-gated), the public-submission shape (contact form, feedback): use authenticated + public_write=true, not public, which also exposes the reads. public_write is invalid with owner/authored.
-
-On a writable, non-public endpoint with no owner_column, the platform scopes it to a detected owner-like column (user_id, owner_id) and reports owner_scope_applied; set owner_column explicitly, or public_read, to control it.
-
-Single-row GET/PUT/DELETE /api/<path>/<value>: numeric matches id; for strings the column is (1) lookup_column, (2) a "uuid" or "slug" column, (3) the table's sole non-id UNIQUE TEXT column; set lookup_column when there are several. searchable_columns feeds FTS5 (manage_data action=search), not ?q=. The key goes in the URL path (a bare PUT/DELETE /api/<path> is refused), and a PUT on a non-id unique key UPSERTS, so an idempotent write by a natural key is one PUT /api/<path>/<value>.
-
-LIST filters, sorting, ?q= search and GET /api/<path>/_stats (server-side aggregates, use it instead of totalling rows in the browser) are built in; the api_response_contract guide has the grammar. generate_docs writes an OpenAPI spec to /api/docs.json.`,
+enable_query exposes a read-only raw-SELECT endpoint (POST /api/<path>, default "_query") with no owner/tenant scoping; use only for query tools with requires_auth=true unless all tables are public. List filters, ?q= search, and /_stats are built in (see api_response_contract).`,
 		Actions: []tools.Action{
 			&APICreate{},
 			&APIUpdate{},
@@ -88,7 +78,7 @@ type APICreate struct {
 	Methods         []string `arg:"methods"                desc:"Allowed HTTP methods (default GET/POST/PUT/DELETE). Set explicitly to lock down the surface."`
 	PublicColumns   []string `arg:"public_columns"         desc:"Columns returned in responses. PASSWORD columns are always hidden. Default: every non-PASSWORD column. Also bounds which columns a client may filter, search, sort and aggregate on."`
 	WritableColumns []string `arg:"writable_columns"     desc:"Columns a client may set on POST/PUT; anything else in the body is dropped. Default: every column, so set this whenever the table has privileged fields (status, role, paid, credits). Owner and tenant columns are stamped from the session regardless."`
-	AuthModel       string   `arg:"auth_model"             desc:"Authentication model (default public). The tool's WhenToUse carries the enum semantics and when to pick each." enum:"public,authenticated,role,owner,authored"`
+	AuthModel       string   `arg:"auth_model,required"    desc:"Authentication model. Always set explicitly (use \"public\" for open endpoints). The tool's WhenToUse carries the enum semantics and when to pick each." enum:"public,authenticated,role,owner,authored"`
 	RequiredRole    string   `arg:"required_role"          desc:"Role name required when auth_model=role (e.g. admin, editor)."`
 	OwnerColumn     string   `arg:"owner_column"           desc:"Column holding the owning/authoring user id, required when auth_model=owner or authored. Auto-set from the JWT on POST. owner scopes it on GET/PUT/DELETE (private per user); authored scopes it on PUT/DELETE only, leaving GET shared."`
 	ReadIsPublic    bool     `arg:"public_read"            desc:"With auth_model != public: allow GET without a token even though writes require auth."`
@@ -105,7 +95,7 @@ func (a *APICreate) Doc() string {
 	return "Scaffold CRUD over a table. Create-only: if the path already exists this is a no-op that changes nothing (it does not re-apply options) - use action=update to change an existing endpoint."
 }
 func (a *APICreate) Example() any {
-	return &APICreate{EndpointPath: "items", TableName: "items"}
+	return &APICreate{EndpointPath: "items", TableName: "items", AuthModel: "public"}
 }
 func (a *APICreate) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	return epCreateAPI(ctx, a)
@@ -181,7 +171,7 @@ func (a *APIGenerateDocs) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 type APIEnableQuery struct {
 	EndpointPath string `arg:"endpoint_path" desc:"Path for the query endpoint (default \"_query\"); POST /api/<path>."`
 	MaxRows      int    `arg:"max_rows"      desc:"Hard cap on rows returned per query; max 1000, a larger value is rejected." default:"200" min:"1" max:"1000"`
-	RequiresAuth bool   `arg:"requires_auth" desc:"Require a Bearer token (project key or user JWT) to run queries. Default false: anyone can read every non-auth table, so set true unless all of them are public."`
+	RequiresAuth bool   `arg:"requires_auth" desc:"Require a signed-in user (Bearer JWT) to run queries. Default false: anyone can read every non-auth table, so set true unless all of them are public."`
 	RateLimit    int    `arg:"rate_limit"    desc:"Requests/minute per IP." default:"60"`
 }
 

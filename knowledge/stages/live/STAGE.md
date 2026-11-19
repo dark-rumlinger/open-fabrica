@@ -51,18 +51,22 @@ nowhere.
   what exists is wasted. To find where something lives *inside* a file (a function,
   selector, id/class, or an error string), use `manage_codebase`
   resolve/where_used/grep - it returns file:line straight away. Don't list artifacts and
-  read whole files to hunt for it.
+  read whole files to hunt for it. When you need to inspect multiple files or sections,
+  batch those `manage_files get` / `manage_codebase` calls in parallel in one turn
+  rather than reading one slice per turn.
 - For literal edits ("change X to Y", "rename Z", "swap colour"), make at most one read
   before the patch.
 - **Diagnostics:** a function-endpoint 500: `manage_diagnostics action=errors` holds the thrown
   message. A blank page or dead button: at most ONE `manage_testing action=test_page` probe to
   reproduce it. Then patch the upstream cause; don't probe in circles.
-- **Keep `of_test.js` in step with the app** (skip this when `project_state` says the owner turned user-flow tests off). When a change renames, moves or removes
+<!-- when:flows -->
+- **Keep `of_test.js` in step with the app.** When a change renames, moves or removes
   something a flow clicks, fills, drags or expects (a label, a route, a field, a canvas
   id), re-save the file with `manage_testing action=write_flows` in the same change; a new
   feature, page or game mechanic gets its own flow. A project with pages but no
   `of_test.js` gets one as part of the next change you make (never on a question-only
   turn). `write_flows` replays it as it saves; after an app fix, re-run with `action=test_flows` once before you reply, and follow the `user_flows` guide for a flow that stays red.
+<!-- /when -->
 
 ## Owner preferences
 

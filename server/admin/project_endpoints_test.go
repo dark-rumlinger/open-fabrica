@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
+
+	"openfabrica/store"
 )
 
 // The APIs tab lists every kind of endpoint a project can have, labels each, and only
@@ -40,11 +42,11 @@ func TestEndpointsListCoversEveryKindThroughTheRouter(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
 	}
-	var eps []projectEndpoint
+	var eps []store.ProjectEndpoint
 	if err := json.Unmarshal(rec.Body.Bytes(), &eps); err != nil {
 		t.Fatal(err)
 	}
-	byKind := map[string]projectEndpoint{}
+	byKind := map[string]store.ProjectEndpoint{}
 	ids := map[int]string{}
 	for _, e := range eps {
 		if prev, dup := ids[e.ID]; dup {

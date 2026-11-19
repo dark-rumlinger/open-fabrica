@@ -31,9 +31,9 @@ func TestFixableErrorsFiltersAndSorts(t *testing.T) {
 func TestFingerprintDiscriminatesBySignature(t *testing.T) {
 	base := Issue{Severity: store.SeverityError, Category: "runtime", Page: "/", Deterministic: true}
 	a, b, same := base, base, base
-	a.Signature = "makeFloraMesh@game.terrain.js"
-	b.Signature = "genFloraName@game.terrain.js"
-	same.Signature = "makeFloraMesh@game.terrain.js"
+	a.Signature = "renderView@app.view.js"
+	b.Signature = "formatLabel@app.view.js"
+	same.Signature = "renderView@app.view.js"
 	if a.Fingerprint() == b.Fingerprint() {
 		t.Fatalf("distinct failing sites must not collapse to one fingerprint:\n %q\n %q", a.Fingerprint(), b.Fingerprint())
 	}

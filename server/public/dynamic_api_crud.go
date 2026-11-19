@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"openfabrica/events"
-	"openfabrica/internal/sqliteretry"
 	"openfabrica/internal/tokenrevoke"
 	"openfabrica/security"
 	"openfabrica/store"
@@ -47,6 +46,11 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 		cols = fieldsCols
 	}
 
+	// Read the table's columns ONCE (name -> declared type). The filter loop below checks
+	// many columns; a per-column PRAGMA made k filters cost ~2k introspection queries.
+	colTypes := columnTypesOnce(projectDB, physTable)
+	has := func(c string) bool { _, ok := colTypes[c]; return ok }
+
 	// Build WHERE clause from query parameters (column filters).
 	// Supports: ?col=val (exact), ?col__like=term, ?col__has=token,
 	// ?col__gt=5, ?col__gte=5, ?col__lt=10, ?col__lte=10, ?col__ne=val,
@@ -66,7 +70,7 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 		}
 		// Skip unknown columns silently so unrelated params (e.g. order_dir=desc)
 		// do not end up as a non-existent column in the WHERE clause.
-		if !columnExists(projectDB, physTable, col) {
+		if !has(col) {
 			continue
 		}
 		if _, ok := ep.SecureCols[col]; ok {
@@ -93,7 +97,7 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 			whereArgs = append(whereArgs, "%"+vals[0]+"%")
 		default:
 			whereClauses = append(whereClauses, security.QuoteIdent(col)+" "+op+" ?")
-			whereArgs = append(whereArgs, coerceFilterValue(columnType(projectDB, physTable, col), vals[0]))
+			whereArgs = append(whereArgs, coerceFilterValue(colTypes[col], vals[0]))
 		}
 	}
 
@@ -131,7 +135,7 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 	// "ORDER BY id" that errors at the SQLite layer. Tables always have id, so
 	// their behaviour is unchanged.
 	orderSQL := ""
-	if !ep.ReadOnly || columnExists(projectDB, physTable, "id") {
+	if !ep.ReadOnly || has("id") {
 		orderSQL = `"id" DESC`
 	}
 	sortCol := r.URL.Query().Get("sort")
@@ -139,7 +143,7 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 		sortCol = r.URL.Query().Get("order_by")
 	}
 	if sortCol != "" {
-		if security.ValidateColumnName(sortCol) == nil && columnExists(projectDB, physTable, sortCol) {
+		if security.ValidateColumnName(sortCol) == nil && has(sortCol) {
 			if !columnReadable(ep, sortCol) {
 				writeError(w, http.StatusBadRequest, "column not available: "+sortCol)
 				return
@@ -162,15 +166,17 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 		}
 	}
 
-	orderByClause := ""
-	if orderSQL != "" {
-		orderByClause = " ORDER BY " + orderSQL
-	}
-	query := fmt.Sprintf("SELECT %s FROM %s%s%s LIMIT ? OFFSET ?", quoteColumnList(cols), security.QuoteIdent(physTable), whereSQL, orderByClause)
-	args := append(whereArgs, limit, offset)
 	ctx, cancel := context.WithTimeout(r.Context(), dynamicAPIQueryTimeout)
 	defer cancel()
-	rows, err := projectDB.QueryContext(ctx, query, args...) // #nosec G701 -- identifiers are QuoteIdent'd/validated; every value is a ? placeholder
+	results, err := store.ListDynamicRows(ctx, projectDB, store.DynamicListQuery{
+		Table:      physTable,
+		QuotedCols: quoteColumnList(cols),
+		WhereSQL:   whereSQL,
+		OrderBySQL: orderSQL,
+		Args:       whereArgs,
+		Limit:      limit,
+		Offset:     offset,
+	})
 	if err != nil {
 		slog.Error("public API list query failed", "table", physTable, "error", err)
 		if strings.Contains(err.Error(), "no such column") {
@@ -180,9 +186,6 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 		}
 		return
 	}
-	defer rows.Close()
-
-	results := h.scanRowsToMaps(rows)
 	stripSecureCols(results, ep.SecureCols)
 	// The LIST array is `rows`. It is deliberately NOT also exposed as `data`:
 	// two same-named `.data` fields (this envelope + a caller's own `{resp, data}`
@@ -206,19 +209,21 @@ func (h *Handler) apiGetOne(w http.ResponseWriter, r *http.Request, projectDB *s
 	}
 
 	lookupCol, lookupVal := rowIDColumn(projectDB, physTable, rowID, ep)
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?", quoteColumnList(cols), security.QuoteIdent(physTable), security.QuoteIdent(lookupCol))
-	args := []any{lookupVal}
-	query, args = rc.applyRLS(query, args)
+	rlsSQL, rlsArgs := rc.applyRLS("", nil)
 	ctx, cancel := context.WithTimeout(r.Context(), dynamicAPIQueryTimeout)
 	defer cancel()
-	rows, err := projectDB.QueryContext(ctx, query, args...) // #nosec G701 -- identifiers are QuoteIdent'd/validated; every value is a ? placeholder
+	results, err := store.GetDynamicRow(ctx, projectDB, store.DynamicRowLookup{
+		Table:      physTable,
+		QuotedCols: quoteColumnList(cols),
+		LookupCol:  lookupCol,
+		LookupVal:  lookupVal,
+		RLSClauses: rlsSQL,
+		RLSArgs:    rlsArgs,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query error")
 		return
 	}
-	defer rows.Close()
-
-	results := h.scanRowsToMaps(rows)
 	if len(results) == 0 {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -243,14 +248,7 @@ func (h *Handler) apiInsert(w http.ResponseWriter, r *http.Request, projectDB *s
 		return
 	}
 
-	// Row-level security: auto-set owner column on insert.
-	if ep.OwnerColumn != "" && rc.AuthUserID > 0 {
-		body[ep.OwnerColumn] = rc.AuthUserID
-	}
-	// Tenant column is stamped from the JWT, never trust a body-supplied value.
-	if ep.TenantColumn != "" && rc.AuthTenantID > 0 {
-		body[ep.TenantColumn] = rc.AuthTenantID
-	}
+	stampScope(ep, rc, body)
 
 	for col, kind := range ep.SecureCols {
 		if val, ok := body[col]; ok {
@@ -279,28 +277,14 @@ func (h *Handler) apiInsert(w http.ResponseWriter, r *http.Request, projectDB *s
 		writeError(w, http.StatusBadRequest, "invalid table name")
 		return
 	}
-	rows, err := projectDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", physTable))
-	if err == nil {
-		validCols = make(map[string]colMeta)
-		for rows.Next() {
-			var cid int
-			var name, colType string
-			var notNull int
-			var dfltValue sql.NullString
-			var pk int
-			if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err == nil {
-				validCols[name] = colMeta{
-					notNull: notNull != 0,
-					hasDflt: dfltValue.Valid,
-					isPK:    pk != 0,
-				}
+	if info, err := store.GetTableColumnInfo(projectDB, physTable); err == nil {
+		validCols = make(map[string]colMeta, len(info))
+		for _, c := range info {
+			validCols[c.Name] = colMeta{
+				notNull: c.NotNull,
+				hasDflt: c.HasDefault,
+				isPK:    c.IsPK,
 			}
-		}
-		rows.Close()
-		if rows.Err() != nil {
-			// Treat a failed iteration like a failed PRAGMA query: skip column
-			// validation and let the INSERT surface any real problem.
-			validCols = nil
 		}
 		if len(validCols) > 0 {
 			for col := range body {
@@ -330,33 +314,14 @@ func (h *Handler) apiInsert(w http.ResponseWriter, r *http.Request, projectDB *s
 			}
 		}
 		if len(missingNotNull) > 0 && rc.AuthUserID > 0 {
-			fkRef := make(map[string]string)
-			if fkRows, fkErr := projectDB.Query(fmt.Sprintf("PRAGMA foreign_key_list(%s)", physTable)); fkErr == nil {
-				for fkRows.Next() {
-					var id, seq int
-					var refTable, from, to, onUpdate, onDelete, match string
-					if fkRows.Scan(&id, &seq, &refTable, &from, &to, &onUpdate, &onDelete, &match) == nil {
-						fkRef[from] = refTable
-					}
-				}
-				fkRows.Close()
-				if fkRows.Err() != nil {
-					// Treat like a failed PRAGMA query: no FK info.
-					fkRef = map[string]string{}
-				}
+			fkRef, fkErr := store.LoadTableForeignKeys(projectDB, physTable)
+			if fkErr != nil {
+				fkRef = map[string]string{}
 			}
 			authTables := make(map[string]bool)
-			if authRows, authErr := projectDB.Query("SELECT table_name FROM of_auth_endpoints"); authErr == nil {
-				for authRows.Next() {
-					var tbl string
-					if authRows.Scan(&tbl) == nil {
-						authTables[tbl] = true
-					}
-				}
-				authRows.Close()
-				if authRows.Err() != nil {
-					// Treat like a failed query: no known auth tables.
-					authTables = map[string]bool{}
+			if tbls, authErr := store.LoadAuthEndpointTables(projectDB); authErr == nil {
+				for _, tbl := range tbls {
+					authTables[tbl] = true
 				}
 			}
 			var stillMissing []string
@@ -380,20 +345,17 @@ func (h *Handler) apiInsert(w http.ResponseWriter, r *http.Request, projectDB *s
 	}
 
 	columns := make([]string, 0, len(body))
-	placeholders := make([]string, 0, len(body))
 	values := make([]any, 0, len(body))
 	for col, val := range body {
 		if err := security.ValidateColumnName(col); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid field name: "+col)
 			return
 		}
-		columns = append(columns, security.QuoteIdent(col))
-		placeholders = append(placeholders, "?")
+		columns = append(columns, col)
 		values = append(values, val)
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", security.QuoteIdent(physTable), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
-	result, err := sqliteretry.Exec(projectDB, query, values...)
+	result, err := store.InsertDynamicRow(projectDB, physTable, columns, values)
 	if err != nil {
 		slog.Error("public API insert failed", "table", physTable, "error", err)
 		writeError(w, http.StatusBadRequest, "insert failed")
@@ -434,18 +396,7 @@ func (h *Handler) apiUpdate(w http.ResponseWriter, r *http.Request, projectDB *s
 		return
 	}
 
-	// Row-level security: never let a scoped client move a row to another owner
-	// or tenant via PUT. Insert stamps these columns from the JWT (apiInsert);
-	// update must not trust a body-supplied value, or a user could reassign their
-	// own row's owner_id or inject it into another tenant's scope. Stripped only
-	// when an identity is present, mirroring apiInsert's stamping condition so a
-	// project API key (owner-level access) keeps full control.
-	if ep.OwnerColumn != "" && rc.AuthUserID > 0 {
-		delete(body, ep.OwnerColumn)
-	}
-	if ep.TenantColumn != "" && rc.AuthTenantID > 0 {
-		delete(body, ep.TenantColumn)
-	}
+	stripScope(ep, body)
 
 	for col, kind := range ep.SecureCols {
 		if val, ok := body[col]; ok {
@@ -463,18 +414,17 @@ func (h *Handler) apiUpdate(w http.ResponseWriter, r *http.Request, projectDB *s
 		return
 	}
 
-	setClauses := make([]string, 0, len(body))
-	values := make([]any, 0, len(body)+1)
+	setCols := make([]string, 0, len(body))
+	values := make([]any, 0, len(body))
 	for col, val := range body {
 		if err := security.ValidateColumnName(col); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid field name: "+col)
 			return
 		}
-		setClauses = append(setClauses, security.QuoteIdent(col)+" = ?")
+		setCols = append(setCols, col)
 		values = append(values, val)
 	}
 	lookupCol, lookupVal := rowIDColumn(projectDB, physTable, rowID, ep)
-	values = append(values, lookupVal)
 
 	// An account row whose password, role or standing is being changed: its existing
 	// sessions end once the change lands (resolved first, in case the update moves
@@ -485,9 +435,16 @@ func (h *Handler) apiUpdate(w http.ResponseWriter, r *http.Request, projectDB *s
 	}
 	revokeUser := tokenrevoke.AccountToRevoke(projectDB, physTable, lookupCol, lookupVal, changedCols)
 
-	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = ?", security.QuoteIdent(physTable), strings.Join(setClauses, ", "), security.QuoteIdent(lookupCol))
-	query, values = rc.applyRLS(query, values)
-	result, err := sqliteretry.Exec(projectDB, query, values...)
+	rlsSQL, rlsArgs := rc.applyRLS("", nil)
+	result, err := store.UpdateDynamicRow(projectDB, store.DynamicUpdateSpec{
+		Table:      physTable,
+		Columns:    setCols,
+		Values:     values,
+		LookupCol:  lookupCol,
+		LookupVal:  lookupVal,
+		RLSClauses: rlsSQL,
+		RLSArgs:    rlsArgs,
+	})
 	if err != nil {
 		slog.Error("public API update failed", "table", physTable, "error", err)
 		writeError(w, http.StatusBadRequest, "update failed")
@@ -573,29 +530,20 @@ func (h *Handler) apiUpsertInsert(w http.ResponseWriter, p upsertInsertParams) {
 		insert[k] = v
 	}
 	insert[lookupCol] = lookupVal
-	// Owner/tenant stamped from the JWT, never trusted from the body (mirrors apiCreate).
-	if ep.OwnerColumn != "" && rc.AuthUserID > 0 {
-		insert[ep.OwnerColumn] = rc.AuthUserID
-	}
-	if ep.TenantColumn != "" && rc.AuthTenantID > 0 {
-		insert[ep.TenantColumn] = rc.AuthTenantID
-	}
+	stampScope(ep, rc, insert)
 
 	columns := make([]string, 0, len(insert))
-	placeholders := make([]string, 0, len(insert))
 	values := make([]any, 0, len(insert))
 	for col, val := range insert {
 		if err := security.ValidateColumnName(col); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid field name: "+col)
 			return
 		}
-		columns = append(columns, security.QuoteIdent(col))
-		placeholders = append(placeholders, "?")
+		columns = append(columns, col)
 		values = append(values, val)
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", security.QuoteIdent(physTable), strings.Join(columns, ", "), strings.Join(placeholders, ", "))
-	result, err := sqliteretry.Exec(projectDB, query, values...)
+	result, err := store.InsertDynamicRow(projectDB, physTable, columns, values)
 	if err != nil {
 		// The key exists but belongs to another owner (the owner-scoped UPDATE
 		// missed it): stay a 404 instead of overwriting an invisible row.
@@ -618,52 +566,48 @@ func (h *Handler) apiUpsertInsert(w http.ResponseWriter, p upsertInsertParams) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
 }
 
-// writeReadBackRow re-reads the row identified by lookupCol=lookupVal through the
-// endpoint's visible-column projection, strips secure columns, and writes it as
-// the response with status. Returns true when it wrote a row; on a read error or
-// a missing row it writes nothing and returns false, so the caller falls back to
-// a minimal ack.
-func (h *Handler) writeReadBackRow(w http.ResponseWriter, projectDB *sql.DB, ep *apiEndpoint, physTable, lookupCol string, lookupVal any, status int) bool {
+// readVisibleRow re-reads the row identified by lookupCol=lookupVal through the endpoint's
+// visible-column projection and strips secure columns, so neither the HTTP response nor a
+// data.* event ever carries a hidden column. Returns nil on a read error or a missing row.
+// The one read-back both the response and the event snapshot share.
+func (h *Handler) readVisibleRow(projectDB *sql.DB, ep *apiEndpoint, physTable, lookupCol string, lookupVal any) map[string]any {
 	cols := h.visibleColumns(ep)
 	if cols == "" {
 		cols = "*"
 	}
-	readBack, err := projectDB.Query(fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?", quoteColumnList(cols), security.QuoteIdent(physTable), security.QuoteIdent(lookupCol)), lookupVal)
-	if err != nil {
-		return false
-	}
-	rows := h.scanRowsToMaps(readBack)
-	if len(rows) == 0 {
-		return false
-	}
-	stripSecureCols(rows, ep.SecureCols)
-	writeJSON(w, status, rows[0])
-	return true
-}
-
-// rowSnapshotForEvent reads the row back so a data.* event carries the row as it
-// actually landed, not just the request body. The body is missing every
-// server-generated value - column DEFAULTs, created_at, the owner/tenant stamp -
-// and on a PUT it holds only the columns that changed, so a subscriber that
-// rendered it straight (an SSE feed, a {{template}} in a trigger) got undefined
-// fields or a half-blank row. Same visibility rules as the HTTP response, so a
-// secure column never reaches the bus. Returns nil when the read-back fails; the
-// caller then falls back to the request body rather than losing the event.
-func (h *Handler) rowSnapshotForEvent(projectDB *sql.DB, ep *apiEndpoint, physTable, lookupCol string, lookupVal any) map[string]any {
-	cols := h.visibleColumns(ep)
-	if cols == "" {
-		cols = "*"
-	}
-	readBack, err := projectDB.Query(fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?", quoteColumnList(cols), security.QuoteIdent(physTable), security.QuoteIdent(lookupCol)), lookupVal)
-	if err != nil {
-		return nil
-	}
-	rows := h.scanRowsToMaps(readBack)
-	if len(rows) == 0 {
+	rows, err := store.GetDynamicRow(context.Background(), projectDB, store.DynamicRowLookup{
+		Table:      physTable,
+		QuotedCols: quoteColumnList(cols),
+		LookupCol:  lookupCol,
+		LookupVal:  lookupVal,
+	})
+	if err != nil || len(rows) == 0 {
 		return nil
 	}
 	stripSecureCols(rows, ep.SecureCols)
 	return rows[0]
+}
+
+// writeReadBackRow writes the read-back row as the response with status. Returns true when it
+// wrote a row; on a read error or a missing row it writes nothing and returns false, so the
+// caller falls back to a minimal ack.
+func (h *Handler) writeReadBackRow(w http.ResponseWriter, projectDB *sql.DB, ep *apiEndpoint, physTable, lookupCol string, lookupVal any, status int) bool {
+	row := h.readVisibleRow(projectDB, ep, physTable, lookupCol, lookupVal)
+	if row == nil {
+		return false
+	}
+	writeJSON(w, status, row)
+	return true
+}
+
+// rowSnapshotForEvent reads the row back so a data.* event carries the row as it actually
+// landed, not just the request body. The body is missing every server-generated value -
+// column DEFAULTs, created_at, the owner/tenant stamp - and on a PUT it holds only the
+// columns that changed, so a subscriber that rendered it straight (an SSE feed, a
+// {{template}} in a trigger) got undefined fields or a half-blank row. Returns nil when the
+// read-back fails; the caller then falls back to the request body rather than losing the event.
+func (h *Handler) rowSnapshotForEvent(projectDB *sql.DB, ep *apiEndpoint, physTable, lookupCol string, lookupVal any) map[string]any {
+	return h.readVisibleRow(projectDB, ep, physTable, lookupCol, lookupVal)
 }
 
 // eventFields prefers the read-back snapshot and falls back to the request body.
@@ -679,10 +623,14 @@ func (h *Handler) apiDelete(w http.ResponseWriter, projectDB *sql.DB, physTable,
 	lookupCol, lookupVal := rowIDColumn(projectDB, physTable, rowID, ep)
 	// A deleted account's sessions end with it; resolve who it is before the row goes.
 	revokeUser := tokenrevoke.AccountToRevoke(projectDB, physTable, lookupCol, lookupVal, nil)
-	query := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", security.QuoteIdent(physTable), security.QuoteIdent(lookupCol))
-	args := []any{lookupVal}
-	query, args = rc.applyRLS(query, args)
-	result, err := sqliteretry.Exec(projectDB, query, args...)
+	rlsSQL, rlsArgs := rc.applyRLS("", nil)
+	result, err := store.DeleteDynamicRow(projectDB, store.DynamicDeleteSpec{
+		Table:      physTable,
+		LookupCol:  lookupCol,
+		LookupVal:  lookupVal,
+		RLSClauses: rlsSQL,
+		RLSArgs:    rlsArgs,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "delete failed")
 		return

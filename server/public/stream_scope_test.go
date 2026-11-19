@@ -75,12 +75,6 @@ func TestStreamScopeOwnerColumn(t *testing.T) {
 	if !admin.allow(events.EventDataInsert, theirs) {
 		t.Error("the admin role bypasses owner scoping on REST, so it must here too")
 	}
-
-	key := newScope(pdb, 0, 0, "", "")
-	key.isProjectKey = true
-	if !key.allow(events.EventDataInsert, theirs) {
-		t.Error("a project API key has owner-level access, so it must here too")
-	}
 }
 
 func TestStreamScopeTenantColumn(t *testing.T) {
@@ -137,8 +131,8 @@ func TestStreamScopeUnscopedAndPublicReadPassThrough(t *testing.T) {
 
 // The stream must clear the same read gate REST applies: an endpoint that requires
 // auth withholds its rows from a subscriber with no identity even when it has no
-// owner or tenant column, and a required_role holds on the stream too. A project key
-// and the admin role keep their bypass.
+// owner or tenant column, and a required_role holds on the stream too. The admin
+// role keeps its bypass.
 func TestStreamScopeHonoursEndpointAuthGate(t *testing.T) {
 	gated := scopeFixtureAuth(t, "posts", "", "", false, true, "")
 	row := map[string]any{"endpoint": "posts", "table": "posts", "id": 1, "title": "hello"}
@@ -147,11 +141,6 @@ func TestStreamScopeHonoursEndpointAuthGate(t *testing.T) {
 	}
 	if !newScope(gated, 7, 0, "", "").allow(events.EventDataInsert, row) {
 		t.Error("an authenticated subscriber must receive rows of an auth-gated endpoint")
-	}
-	key := newScope(gated, 0, 0, "", "")
-	key.isProjectKey = true
-	if !key.allow(events.EventDataInsert, row) {
-		t.Error("a project API key has owner-level access, so it must here too")
 	}
 
 	roled := scopeFixtureAuth(t, "reports", "", "", false, true, "editor")

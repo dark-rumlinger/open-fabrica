@@ -325,21 +325,21 @@ export function moveMove(e){ var p = getEventPos(e); return p; }`)
 // the in-build probe's window); the static check must now catch it up front.
 func TestStaticCode_FlagsArityMismatch(t *testing.T) {
 	db := setupStaticDB(t)
-	saveCodeFile(t, db, "files/game.terrain.js", `function buildFlora(planet){
-  return genFloraName(planet, planet.rng());
+	saveCodeFile(t, db, "files/app.module.js", `function processItem(ctx){
+  return formatLabel(ctx, ctx.next());
 }
-function genFloraName(rng){ return String(rng()); }`)
+function formatLabel(next){ return String(next()); }`)
 
 	issues := staticIssues(t, db)
-	if !hasIssue(issues, "arity_mismatch", "files/game.terrain.js") {
-		t.Fatalf("expected arity_mismatch for files/game.terrain.js, got %+v", issues)
+	if !hasIssue(issues, "arity_mismatch", "files/app.module.js") {
+		t.Fatalf("expected arity_mismatch for files/app.module.js, got %+v", issues)
 	}
 	for _, is := range issues {
-		if is.Category == "arity_mismatch" && is.File == "files/game.terrain.js" {
+		if is.Category == "arity_mismatch" && is.File == "files/app.module.js" {
 			if is.Severity != "warning" || !is.Deterministic {
 				t.Fatalf("arity_mismatch is a deterministic warning (usually an ignored extra argument): %+v", is)
 			}
-			if !strings.Contains(is.Message, "genFloraName") {
+			if !strings.Contains(is.Message, "formatLabel") {
 				t.Errorf("message should name the over-applied function, got: %s", is.Message)
 			}
 		}
@@ -350,12 +350,12 @@ function genFloraName(rng){ return String(rng()); }`)
 // call passes the function reference in the single slot the definition declares.
 func TestStaticCode_ArityCorrectIsSilent(t *testing.T) {
 	db := setupStaticDB(t)
-	saveCodeFile(t, db, "files/game.terrain.js", `function buildFlora(planet){
-  return genFloraName(planet.rng);
+	saveCodeFile(t, db, "files/app.module.js", `function processItem(ctx){
+  return formatLabel(ctx.next);
 }
-function genFloraName(rng){ return String(rng()); }`)
+function formatLabel(next){ return String(next()); }`)
 
-	if issues := staticIssues(t, db); hasIssue(issues, "arity_mismatch", "files/game.terrain.js") {
+	if issues := staticIssues(t, db); hasIssue(issues, "arity_mismatch", "files/app.module.js") {
 		t.Fatalf("clean call must not be flagged, got %+v", issues)
 	}
 }

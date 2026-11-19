@@ -23,8 +23,11 @@ import (
 	"github.com/chromedp/chromedp"
 
 	"openfabrica/analysis"
+	"openfabrica/internal/browser"
 	"openfabrica/internal/stringutil"
+
 	"openfabrica/store"
+
 	"openfabrica/tools"
 )
 
@@ -116,9 +119,9 @@ func (a *DiagTestModule) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	// build's non-LLM time. The tab below is still per-call. Partition
 	// the pool by project so a domainless project never shares a process (and its
 	// cookies / storage) with another.
-	allocCtx, releaseBrowser, err := store.AcquireBrowser(parentCtx, store.BrowserConfig{HostResolverMap: domain, PoolPartition: browserPoolPartition(ctx)})
+	allocCtx, releaseBrowser, err := browser.AcquireBrowser(parentCtx, browser.BrowserConfig{HostResolverMap: domain, PoolPartition: browserPoolPartition(ctx)})
 	if err != nil {
-		if errors.Is(err, store.ErrBrowserUnavailable) {
+		if errors.Is(err, browser.ErrBrowserUnavailable) {
 			return tools.Fail("%v, install Chrome/Edge so chromedp can launch", err), nil
 		}
 		return tools.FailErr(err), nil
@@ -127,7 +130,7 @@ func (a *DiagTestModule) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 
 	// The pooled allocator is shared, so the tab (not the browser) carries this
 	// call's cancellation.
-	tabCtx, cancelTab := store.NewPooledTab(parentCtx, allocCtx)
+	tabCtx, cancelTab := browser.NewPooledTab(parentCtx, allocCtx)
 	defer cancelTab()
 
 	var (
@@ -396,7 +399,7 @@ func (r *pageRenderReport) failureReason() (string, bool) {
 		return "page threw an uncaught error during load: " + r.exceptions[0], true
 	}
 	if len(r.failedAssets) > 0 {
-		return "page referenced a script or stylesheet that failed to load: " + r.failedAssets[0] + " (check the file is saved and attached to this page)", true
+		return "page referenced an asset (script, stylesheet, or image) that failed to load: " + r.failedAssets[0] + " (check the file is saved and referenced under /files/<path>)", true
 	}
 	// A boot/subsystem failure the project's own code CAUGHT and logged never surfaces
 	// as an uncaught throw, so the page still paints and a dead feature ships looking
@@ -493,13 +496,13 @@ func browserPoolPartition(ctx *tools.ToolContext) string {
 
 // verifyPageRender loads path in a real browser and reports what it painted,
 // catching pages that pass an HTTP status check but show nothing. Returns
-// store.ErrBrowserUnavailable (verbatim) when Chrome cannot launch so the caller
+// browser.ErrBrowserUnavailable (verbatim) when Chrome cannot launch so the caller
 // can fall back to the status-only result rather than fail on a browser-less host.
 func verifyPageRender(ctx *tools.ToolContext, domain string, port int, path, authToken string) (*pageRenderReport, error) {
 	parentCtx, cancelParent := context.WithTimeout(ctx.Context(), 20*time.Second)
 	defer cancelParent()
 
-	allocCtx, releaseBrowser, err := store.AcquireBrowser(parentCtx, store.BrowserConfig{HostResolverMap: domain, PoolPartition: browserPoolPartition(ctx)})
+	allocCtx, releaseBrowser, err := browser.AcquireBrowser(parentCtx, browser.BrowserConfig{HostResolverMap: domain, PoolPartition: browserPoolPartition(ctx)})
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +510,7 @@ func verifyPageRender(ctx *tools.ToolContext, domain string, port int, path, aut
 
 	// The pooled allocator is shared, so the tab (not the browser) carries this
 	// call's cancellation.
-	tabCtx, cancelTab := store.NewPooledTab(parentCtx, allocCtx)
+	tabCtx, cancelTab := browser.NewPooledTab(parentCtx, allocCtx)
 	defer cancelTab()
 
 	var (
@@ -596,7 +599,7 @@ func verifyPageRender(ctx *tools.ToolContext, domain string, port int, path, aut
 			}
 		case *network.EventResponseReceived:
 			if e.Response != nil && e.Response.Status >= 400 &&
-				(e.Type == network.ResourceTypeScript || e.Type == network.ResourceTypeStylesheet) &&
+				(e.Type == network.ResourceTypeScript || e.Type == network.ResourceTypeStylesheet || e.Type == network.ResourceTypeImage) &&
 				ownAssetURL(e.Response.URL, domain) {
 				mu.Lock()
 				failed = append(failed, fmt.Sprintf("%d %s", int(e.Response.Status), clip(e.Response.URL)))
@@ -604,7 +607,7 @@ func verifyPageRender(ctx *tools.ToolContext, domain string, port int, path, aut
 				mu.Unlock()
 			}
 		case *network.EventLoadingFailed:
-			if e.Type == network.ResourceTypeScript || e.Type == network.ResourceTypeStylesheet {
+			if e.Type == network.ResourceTypeScript || e.Type == network.ResourceTypeStylesheet || e.Type == network.ResourceTypeImage {
 				mu.Lock()
 				url := reqURLs[e.RequestID]
 				if url != "" && !ownAssetURL(url, domain) {
@@ -639,9 +642,9 @@ func verifyPageRender(ctx *tools.ToolContext, domain string, port int, path, aut
 		// same window after navigate, so this probe observes what the gate would: a
 		// deferred init / first-frame throw that fires after first paint is caught here
 		// too. The auth token is empty (an anonymous visitor) unless signed_in was asked for.
-		store.RuntimeInstrumentationAction(authToken),
+		browser.RuntimeInstrumentationAction(authToken),
 		chromedp.Navigate(origin+path),
-		chromedp.Sleep(store.RuntimeIdleWindow),
+		chromedp.Sleep(browser.RuntimeIdleWindow),
 	); err != nil {
 		return nil, fmt.Errorf("render probe failed: %w", err)
 	}

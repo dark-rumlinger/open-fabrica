@@ -4,11 +4,11 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"openfabrica/db"
@@ -19,33 +19,35 @@ import (
 
 // apiCSVExport streams a CSV of the bound table at GET /api/<path>/export.
 func (h *Handler) apiCSVExport(w http.ResponseWriter, r *http.Request, projectID int, projectDB *sql.DB, path string) {
-	var table string
-	var publicColsJSON, ownerCol, tenantCol sql.NullString
-	var requiresAuth bool
-	err := projectDB.QueryRow(
-		`SELECT table_name, public_columns, requires_auth, COALESCE(owner_column,''), COALESCE(tenant_column,'')
-		 FROM of_export_endpoints WHERE path = ?`,
-		path,
-	).Scan(&table, &publicColsJSON, &requiresAuth, &ownerCol, &tenantCol)
+	ep, err := store.LoadExportEndpoint(projectDB, path)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "export endpoint not found")
 		return
 	}
+	table := ep.TableName
+	publicColsJSON := ep.PublicCols
+	requiresAuth := ep.RequiresAuth
+	ownerCol := sql.NullString{String: ep.OwnerColumn, Valid: ep.OwnerColumn != ""}
+	tenantCol := sql.NullString{String: ep.TenantColumn, Valid: ep.TenantColumn != ""}
 
 	authUserID := 0
 	authTenantID := 0
+	var authUserRole, authTenantRole string
 	if requiresAuth || ownerCol.String != "" || tenantCol.String != "" {
-		uid, tid, ok := h.requireJWTClaims(w, r, projectID)
+		claims, ok := h.requireJWTClaims(w, r, projectID)
 		if !ok {
 			return
 		}
-		authUserID, authTenantID = uid, tid
+		authUserID = claims.UserID
+		authTenantID = claims.TenantID
+		authUserRole = claims.Role
+		authTenantRole = claims.TenantRole
 	}
 
 	// A tenant-scoped export must run under an active tenant session; without
 	// one the tenant filter below cannot bind and the export would stream every
 	// tenant's rows. Mirrors the CRUD RLS tenancy gate and the import handler.
-	if tenantCol.String != "" && authTenantID == 0 {
+	if tenantCol.String != "" && authTenantID == 0 && authTenantRole != "platform_admin" {
 		writeError(w, http.StatusForbidden, "no active tenant; call /tenant/switch first")
 		return
 	}
@@ -61,24 +63,11 @@ func (h *Handler) apiCSVExport(w http.ResponseWriter, r *http.Request, projectID
 	}
 	// PRAGMA-derived column list when public_columns is empty.
 	if len(publicCols) == 0 {
-		rows, err := projectDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var cid int
-				var name, ctype string
-				var notNull, pk int
-				var dflt any
-				if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err == nil {
-					if !strings.EqualFold(ctype, "PASSWORD") {
-						publicCols = append(publicCols, name)
-					}
+		if info, err := store.GetTableColumnInfo(projectDB, table); err == nil {
+			for _, c := range info {
+				if !strings.EqualFold(c.Type, "PASSWORD") {
+					publicCols = append(publicCols, c.Name)
 				}
-			}
-			if rows.Err() != nil {
-				// Treat a failed iteration like a failed PRAGMA query: no
-				// derived column list.
-				publicCols = nil
 			}
 		}
 	}
@@ -111,15 +100,9 @@ func (h *Handler) apiCSVExport(w http.ResponseWriter, r *http.Request, projectID
 		}
 	}
 
-	quotedCols := make([]string, len(publicCols))
-	for i, c := range publicCols {
-		quotedCols[i] = security.QuoteIdent(c)
-	}
-	colList := strings.Join(quotedCols, ", ")
-	query := "SELECT " + colList + " FROM " + security.QuoteIdent(table)
 	args := []any{}
 	var whereClauses []string
-	if ownerCol.String != "" && authUserID > 0 {
+	if ownerCol.String != "" && authUserID > 0 && authUserRole != "admin" {
 		clause, err := security.OwnerFilterClause(ownerCol.String)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid owner column")
@@ -128,9 +111,9 @@ func (h *Handler) apiCSVExport(w http.ResponseWriter, r *http.Request, projectID
 		whereClauses = append(whereClauses, clause)
 		args = append(args, authUserID)
 	}
-	// Tenant scope stacks on top of owner scope (matches the CRUD RLS path). The
-	// gate above guarantees authTenantID > 0 whenever tenant_column is set.
-	if tenantCol.String != "" && authTenantID > 0 {
+	// Tenant scope stacks on top of owner scope (matches the CRUD RLS path).
+	// platform_admin bypasses tenant scoping.
+	if tenantCol.String != "" && authTenantID > 0 && authTenantRole != "platform_admin" {
 		clause, err := security.TenantFilterClause(tenantCol.String)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid tenant column")
@@ -139,66 +122,39 @@ func (h *Handler) apiCSVExport(w http.ResponseWriter, r *http.Request, projectID
 		whereClauses = append(whereClauses, clause)
 		args = append(args, authTenantID)
 	}
-	if len(whereClauses) > 0 {
-		query += " WHERE " + strings.Join(whereClauses, " AND ")
-	}
-	query += " ORDER BY rowid"
 
-	rows, err := projectDB.Query(query, args...)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query failed")
-		return
-	}
-	defer rows.Close()
-
-	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(path)+`.csv"`)
-	cw := csv.NewWriter(w)
-	_ = cw.Write(publicCols) // streaming to the client; write errors are unactionable
-
-	scanVals := make([]any, len(publicCols))
-	scanPtrs := make([]any, len(publicCols))
-	for i := range scanVals {
-		scanPtrs[i] = &scanVals[i]
-	}
-
-	for rows.Next() {
-		if err := rows.Scan(scanPtrs...); err != nil {
-			continue
-		}
-		record := make([]string, len(publicCols))
-		for i, v := range scanVals {
-			record[i] = csvsafe.Cell(csvStringify(v))
+	var cw *csv.Writer
+	started := false
+	err = store.StreamCSVExport(projectDB, store.CSVExportQuery{
+		Table:        table,
+		Columns:      publicCols,
+		WhereClauses: whereClauses,
+		WhereArgs:    args,
+	}, func() {
+		started = true
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(path)+`.csv"`)
+		cw = csv.NewWriter(w)
+		_ = cw.Write(publicCols) // streaming to the client; write errors are unactionable
+	}, func(raw []string) error {
+		record := make([]string, len(raw))
+		for i, v := range raw {
+			record[i] = csvsafe.Cell(v)
 		}
 		_ = cw.Write(record)
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
+		if !started {
+			writeError(w, http.StatusInternalServerError, "query failed")
+			return
+		}
 		// Headers and rows are already streamed; deliver what we have.
 		slog.Warn("csv export: row iteration failed", "path", path, "error", err)
 	}
-	cw.Flush()
-}
-
-func csvStringify(v any) string {
-	if v == nil {
-		return ""
+	if cw != nil {
+		cw.Flush()
 	}
-	switch t := v.(type) {
-	case []byte:
-		return string(t)
-	case string:
-		return t
-	case int64:
-		return strconv.FormatInt(t, 10)
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
-	case bool:
-		if t {
-			return "true"
-		}
-		return "false"
-	}
-	return fmt.Sprintf("%v", v)
 }
 
 func sanitizeFilename(s string) string {
@@ -222,28 +178,21 @@ func sanitizeFilename(s string) string {
 // apiCSVImport accepts multipart/form-data with file=<csv> and inserts/upserts
 // rows into the bound table.
 func (h *Handler) apiCSVImport(w http.ResponseWriter, r *http.Request, projectID int, projectDB *db.ProjectDB, path string) {
-	var table, mode, uniqueCol string
-	var requiresAuth bool
-	var maxRows int
-	var uniqueColNull sql.NullString
-	err := projectDB.Reader().QueryRow(
-		`SELECT table_name, mode, COALESCE(unique_column,''), requires_auth, max_rows
-		 FROM of_import_endpoints WHERE path = ?`,
-		path,
-	).Scan(&table, &mode, &uniqueColNull, &requiresAuth, &maxRows)
+	imp, err := store.LoadImportEndpoint(projectDB.Reader(), path)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "import endpoint not found")
 		return
 	}
-	uniqueCol = uniqueColNull.String
+	table, mode, uniqueCol, requiresAuth, maxRows := imp.TableName, imp.Mode, imp.UniqueColumn, imp.RequiresAuth, imp.MaxRows
 
 	var authUserID, authTenantID int
 	if requiresAuth {
-		uid, tid, ok := h.requireJWTClaims(w, r, projectID)
+		claims, ok := h.requireJWTClaims(w, r, projectID)
 		if !ok {
 			return
 		}
-		authUserID, authTenantID = uid, tid
+		authUserID = claims.UserID
+		authTenantID = claims.TenantID
 	}
 
 	if !validTableName.MatchString(table) {
@@ -284,18 +233,29 @@ func (h *Handler) apiCSVImport(w http.ResponseWriter, r *http.Request, projectID
 	// endpoint, those columns are stamped from the caller's identity and any
 	// CSV-supplied value for them is ignored, so an authenticated user cannot
 	// attribute imported rows to another owner or tenant.
-	var ownerCol, tenantCol string
-	_ = projectDB.Reader().QueryRow(
-		`SELECT COALESCE(owner_column,''), COALESCE(tenant_column,'')
-		 FROM of_api_endpoints
-		 WHERE table_name = ? AND (COALESCE(owner_column,'') != '' OR COALESCE(tenant_column,'') != '')
-		 LIMIT 1`, table,
-	).Scan(&ownerCol, &tenantCol)
-	if ownerCol != "" && !validTableName.MatchString(ownerCol) {
-		ownerCol = ""
+	ownerCol, tenantCol, err := store.FindTableRLSScopeColumns(projectDB.Reader(), table)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "import endpoint misconfigured")
+		return
 	}
-	if tenantCol != "" && !validTableName.MatchString(tenantCol) {
-		tenantCol = ""
+	for _, c := range []string{ownerCol, tenantCol} {
+		if c != "" && !validTableName.MatchString(c) {
+			writeError(w, http.StatusInternalServerError, "import endpoint misconfigured")
+			return
+		}
+	}
+	// A scoped table needs a caller to stamp; an anonymous import would write
+	// rows owned by nobody.
+	if (ownerCol != "" && authUserID == 0) || (tenantCol != "" && authTenantID == 0) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// PASSWORD and ENCRYPTED columns are hashed or encrypted like any other write.
+	// Fail closed when the registry cannot be read.
+	secureCols, err := store.LoadSecureColumns(projectDB.Reader(), table)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "import endpoint misconfigured")
+		return
 	}
 	stampCols := map[string]bool{}
 	if ownerCol != "" {
@@ -326,74 +286,61 @@ func (h *Handler) apiCSVImport(w http.ResponseWriter, r *http.Request, projectID
 		stampValues = append(stampValues, authTenantID)
 	}
 
-	// Build SQL once.
-	cols := strings.Join(insertCols, ", ")
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(insertCols)), ",")
-	var stmt string
-	if mode == "upsert" && uniqueCol != "" {
-		if !validTableName.MatchString(uniqueCol) {
-			writeError(w, http.StatusBadRequest, "invalid unique column")
-			return
-		}
-		setClauses := make([]string, 0, len(insertCols))
-		for _, c := range insertCols {
-			// Skip the conflict key and the stamped RLS columns: an upsert must
-			// not rewrite an existing row's owner/tenant to the caller's.
-			if c == uniqueCol || stampCols[c] {
-				continue
-			}
-			setClauses = append(setClauses, c+" = excluded."+c)
-		}
-		stmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT(%s) DO UPDATE SET %s",
-			table, cols, placeholders, uniqueCol, strings.Join(setClauses, ", "))
-	} else {
-		stmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, cols, placeholders)
-	}
-
-	tx, err := projectDB.Writer().Begin()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "begin tx")
-		return
-	}
-	prep, err := tx.Prepare(stmt)
-	if err != nil {
-		tx.Rollback()
-		writeError(w, http.StatusBadRequest, "prepare: "+err.Error())
+	if mode == "upsert" && uniqueCol != "" && !validTableName.MatchString(uniqueCol) {
+		writeError(w, http.StatusBadRequest, "invalid unique column")
 		return
 	}
 
-	imported := 0
-	for {
-		if imported >= maxRows {
-			break
+	imported, err := store.RunCSVImport(projectDB.Writer(), store.CSVImportSpec{
+		Table:        table,
+		Columns:      insertCols,
+		Mode:         mode,
+		UniqueColumn: uniqueCol,
+		StampColumns: stampCols,
+	}, func(rowNum int) ([]any, error) {
+		if rowNum > maxRows {
+			return nil, io.EOF
 		}
 		record, err := rdr.Read()
-		if err == io.EOF {
-			break
-		}
 		if err != nil {
-			tx.Rollback()
-			writeError(w, http.StatusBadRequest, "csv parse: "+err.Error())
-			return
+			return nil, err
 		}
 		if len(record) != len(header) {
-			continue
+			return nil, nil
 		}
 		args := make([]any, 0, len(insertCols))
 		for _, idx := range dataIdx {
-			args = append(args, record[idx])
+			val, serr := security.ProcessSecureValue(secureCols[header[idx]], record[idx], h.deps.Encryptor)
+			if serr != nil {
+				return nil, fmt.Errorf("secure: %w", serr)
+			}
+			args = append(args, val)
 		}
 		args = append(args, stampValues...)
-		if _, err := prep.Exec(args...); err != nil {
-			tx.Rollback()
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("row %d: %v", imported+1, err))
+		return args, nil
+	})
+	if err != nil {
+		var impErr *store.CSVImportError
+		if errors.As(err, &impErr) {
+			switch impErr.Stage {
+			case "begin":
+				writeError(w, http.StatusInternalServerError, "begin tx")
+			case "prepare":
+				writeError(w, http.StatusBadRequest, "prepare: "+impErr.Wrapped.Error())
+			case "caller":
+				if strings.HasPrefix(impErr.Wrapped.Error(), "secure: ") {
+					writeError(w, http.StatusInternalServerError, "import failed")
+				} else {
+					writeError(w, http.StatusBadRequest, "csv parse: "+impErr.Wrapped.Error())
+				}
+			case "row":
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("row %d: %v", impErr.RowNum, impErr.Wrapped))
+			case "commit":
+				writeError(w, http.StatusInternalServerError, "commit: "+impErr.Wrapped.Error())
+			}
 			return
 		}
-		imported++
-	}
-	_ = prep.Close()
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, "commit: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "import failed")
 		return
 	}
 
@@ -405,20 +352,20 @@ func (h *Handler) apiCSVImport(w http.ResponseWriter, r *http.Request, projectID
 }
 
 // requireJWTClaims validates the request's Bearer token against this project and
-// returns the caller's user and tenant id. On a missing or invalid token it
-// writes the 401 and returns ok=false; callers gate it behind their own
-// "is auth required?" condition. This is a strict JWT-only check (no project
-// token fallback), matching the CSV export/import handlers' access model.
-func (h *Handler) requireJWTClaims(w http.ResponseWriter, r *http.Request, projectID int) (userID, tenantID int, ok bool) {
+// returns the caller's claims. On a missing or invalid token it writes the 401
+// and returns ok=false; callers gate it behind their own "is auth required?"
+// condition. This is a strict JWT-only check (no project token fallback),
+// matching the CSV export/import handlers' access model.
+func (h *Handler) requireJWTClaims(w http.ResponseWriter, r *http.Request, projectID int) (*security.Claims, bool) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if h.deps.JWTManager == nil || token == "" {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return 0, 0, false
+		return nil, false
 	}
 	claims, err := h.validateUserClaims(token)
 	if err != nil || claims.ProjectID != projectID {
 		writeError(w, http.StatusUnauthorized, "invalid token")
-		return 0, 0, false
+		return nil, false
 	}
-	return claims.UserID, claims.TenantID, true
+	return claims, true
 }

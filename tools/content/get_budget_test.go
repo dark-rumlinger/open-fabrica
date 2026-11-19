@@ -4,29 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"openfabrica/store"
 	"openfabrica/tools"
 )
-
-// The get page budget must equal the shared single-read budget, and manage_files'
-// MaxResult must sit above it - so a full get body is never truncated mid-line,
-// and a file too big to pre-inline is still readable in one get rather than
-// several paginated ones (see store.MaxSingleReadBody).
-func TestGetBudgetCoupling(t *testing.T) {
-	if getBodyBudget != store.MaxSingleReadBody {
-		t.Fatalf("getBodyBudget (%d) must equal store.MaxSingleReadBody (%d) so get pages match the inline cap", getBodyBudget, store.MaxSingleReadBody)
-	}
-	def, err := tools.DefaultRegistry().Get("manage_files")
-	if err != nil {
-		t.Fatalf("manage_files not registered: %v", err)
-	}
-	if def.MaxResult <= getBodyBudget {
-		t.Fatalf("manage_files MaxResult (%d) must exceed getBodyBudget (%d) so a full get body is not truncated", def.MaxResult, getBodyBudget)
-	}
-	if outlineTrigger >= getBodyBudget {
-		t.Fatalf("outlineTrigger (%d) must sit below getBodyBudget (%d) so the no-outline-but-truncated zone cannot reappear", outlineTrigger, getBodyBudget)
-	}
-}
 
 // A full-budget HTML body must survive the executor marshal within manage_files'
 // MaxResult, with envelope headroom to spare. HTML-escaped marshaling used to

@@ -1,25 +1,15 @@
 package admin
 
 import (
-	"database/sql"
+	"errors"
 	"net/http"
-	"time"
+
+	"openfabrica/store"
 )
 
-// ProjectMemoryHandler exposes a project's of_memory store (the engine's durable
-// per-project facts/preferences) for operator viewing and editing. The engine
-// reads/writes the same table via manage_memory; this is the human window onto it.
+// ProjectMemoryHandler exposes a project's of_memory store for operator viewing and editing.
 type ProjectMemoryHandler struct {
 	deps *Deps
-}
-
-type memoryEntry struct {
-	ID        int       `json:"id"`
-	Key       string    `json:"key"`
-	Value     string    `json:"value"`
-	Category  string    `json:"category"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // List returns all memory entries for a project, newest first.
@@ -28,24 +18,7 @@ func (h *ProjectMemoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	if projectDB == nil {
 		return
 	}
-	rows, err := projectDB.Query(
-		"SELECT id, key, value, category, created_at, updated_at FROM of_memory ORDER BY updated_at DESC",
-	)
-	if err != nil {
-		writeJSON(w, http.StatusOK, []memoryEntry{})
-		return
-	}
-	entries := collectRows(rows, func(rows *sql.Rows) (memoryEntry, error) {
-		var e memoryEntry
-		if err := rows.Scan(&e.ID, &e.Key, &e.Value, &e.Category, &e.CreatedAt, &e.UpdatedAt); err != nil {
-			return e, err
-		}
-		return e, nil
-	})
-	if entries == nil {
-		entries = []memoryEntry{}
-	}
-	writeJSON(w, http.StatusOK, entries)
+	writeJSON(w, http.StatusOK, store.ListMemories(projectDB))
 }
 
 type memoryRequest struct {
@@ -71,13 +44,7 @@ func (h *ProjectMemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.Category == "" {
 		req.Category = "general"
 	}
-	_, err := projectDB.ExecWrite(
-		`INSERT INTO of_memory (key, value, category, updated_at)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, category = excluded.category, updated_at = CURRENT_TIMESTAMP`,
-		req.Key, req.Value, req.Category,
-	)
-	if err != nil {
+	if err := store.UpsertMemory(projectDB, req.Key, req.Value, req.Category); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store memory")
 		return
 	}
@@ -106,16 +73,13 @@ func (h *ProjectMemoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if category == "" {
 		category = "general"
 	}
-	res, err := projectDB.ExecWrite(
-		"UPDATE of_memory SET value = ?, category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-		req.Value, category, id,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update memory")
+	err := store.UpdateMemory(projectDB, id, req.Value, category)
+	if errors.Is(err, store.ErrMemoryNotFound) {
+		writeError(w, http.StatusNotFound, "memory not found")
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeError(w, http.StatusNotFound, "memory not found")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update memory")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"updated": id})
@@ -131,13 +95,13 @@ func (h *ProjectMemoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := projectDB.ExecWrite("DELETE FROM of_memory WHERE id = ?", id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to delete memory")
+	err := store.DeleteMemory(projectDB, id)
+	if errors.Is(err, store.ErrMemoryNotFound) {
+		writeError(w, http.StatusNotFound, "memory not found")
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeError(w, http.StatusNotFound, "memory not found")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete memory")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})

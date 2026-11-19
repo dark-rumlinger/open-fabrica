@@ -49,8 +49,22 @@ func dropFile(ctx context.Context, timeout time.Duration, path, name string) *fl
 	return nil
 }
 
-func settle(ctx context.Context) *flowFailure {
+// settle waits for synchronous handlers and microtasks (flowSettle), and then—if
+// the step started any same-origin Fetch/XHR/Document request—waits briefly for it
+// to finish and flush its callbacks before the next step or error check runs.
+func settle(ctx context.Context, errs *pageErrorCollector) *flowFailure {
 	_ = chromedp.Run(ctx, chromedp.Sleep(flowSettle))
+	if errs == nil || errs.inflightCount() == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(flowSettleNetworkCap)
+	for errs.inflightCount() > 0 && time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return nil
+		}
+		_ = chromedp.Run(ctx, chromedp.Sleep(50*time.Millisecond))
+	}
+	_ = chromedp.Run(ctx, chromedp.Sleep(50*time.Millisecond))
 	return nil
 }
 

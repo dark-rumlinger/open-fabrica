@@ -5,14 +5,11 @@
 
 import { h } from '../core/dom.js';
 import { icon } from './icon.js';
-import { isAdmin } from '../core/state.js';
 
-// An action flagged adminOnly is dropped for non-admins: every write route is
-// admin-only server-side, so showing the button only invites a 403.
-const allowed = (a) => !a.hidden && !(a.adminOnly && !isAdmin());
+const allowed = (a) => !a.hidden;
 
 /**
- * card({ title, subtitle?, iconName?, badge?, actions?: [{label, iconName?, kind?, onClick, hidden?, adminOnly?}], children? })
+ * card({ title, subtitle?, iconName?, badge?, actions?: [{label, iconName?, kind?, onClick, hidden?}], children? })
  */
 export function card(opts) {
   const { title, subtitle, iconName, badge, actions = [], children = [] } = opts;

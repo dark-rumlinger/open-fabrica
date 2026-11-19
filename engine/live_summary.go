@@ -34,11 +34,12 @@ const (
 // It mirrors the human markdown of the same message: the overview counts and
 // names, the preview/publish links, and the sign-in block.
 type goLivePayload struct {
-	Kind        string   `json:"kind"` // always "golive"
-	KnownIssues bool     `json:"known_issues"`
-	PreviewURL  string   `json:"preview_url"`
-	SettingsURL string   `json:"settings_url"`
-	Pages       []string `json:"pages,omitempty"`
+	Kind         string   `json:"kind"` // always "golive"
+	KnownIssues  bool     `json:"known_issues"`
+	PreviewURL   string   `json:"preview_url"`
+	PreviewImage string   `json:"preview_image,omitempty"`
+	SettingsURL  string   `json:"settings_url"`
+	Pages        []string `json:"pages,omitempty"`
 	// PageLinks names every page with its route and a preview link, so the owner
 	// learns that /board or /staff exist without guessing from a title.
 	PageLinks  []goLivePage `json:"page_links,omitempty"`

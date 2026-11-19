@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"openfabrica/store"
+	"openfabrica/internal/browser"
 	"openfabrica/tools"
 )
 
@@ -65,10 +65,10 @@ func sanitizePDFFilename(name, fallback string) string {
 	return name + ".pdf"
 }
 
-// pdfOptsFrom builds store.PDFOptions from the action args common to both render
+// pdfOptsFrom builds browser.PDFOptions from the action args common to both render
 // paths. printBackground defaults to true; the arg inverts into DisableBackground.
-func pdfOptsFrom(pageSize string, landscape, printBackground bool, marginInches float64) store.PDFOptions {
-	return store.PDFOptions{
+func pdfOptsFrom(pageSize string, landscape, printBackground bool, marginInches float64) browser.PDFOptions {
+	return browser.PDFOptions{
 		PageSize:          pageSize,
 		Landscape:         landscape,
 		DisableBackground: !printBackground,
@@ -97,7 +97,7 @@ func saveAndReport(ctx *tools.ToolContext, data []byte, filename, source string)
 // stable browser_unavailable code when Chrome is missing (so the LLM knows it's
 // an environment gap, not a project bug), otherwise a plain failure.
 func browserFail(err error) *tools.Result {
-	if errors.Is(err, store.ErrBrowserUnavailable) {
+	if errors.Is(err, browser.ErrBrowserUnavailable) {
 		return tools.FailCode("browser_unavailable",
 			"%v. PDF generation needs a Chrome/Edge binary on the host; install one so chromedp can launch", err)
 	}
@@ -126,8 +126,8 @@ func documentRenderURL(ctx *tools.ToolContext, urlPath, filename, pageSize strin
 	}
 
 	url := fmt.Sprintf("http://%s:%d%s", domain, port, urlPath)
-	cfg := store.BrowserConfig{HostResolverMap: domain}
-	data, err := store.RenderURLToPDF(ctx.Context(), cfg, url, pdfOptsFrom(pageSize, landscape, printBackground, marginInches))
+	cfg := browser.BrowserConfig{HostResolverMap: domain}
+	data, err := browser.RenderURLToPDF(ctx.Context(), cfg, url, pdfOptsFrom(pageSize, landscape, printBackground, marginInches))
 	if err != nil {
 		return browserFail(err), nil
 	}
@@ -145,11 +145,11 @@ func documentRenderHTML(ctx *tools.ToolContext, html, filename, pageSize string,
 	out := sanitizePDFFilename(filename, "document")
 	// HTML renders on about:blank, so a project vhost is optional here.
 	domain, _, _ := docResolveDomain(ctx)
-	cfg := store.BrowserConfig{}
+	cfg := browser.BrowserConfig{}
 	if domain != "" {
 		cfg.HostResolverMap = domain
 	}
-	data, err := store.RenderHTMLToPDF(ctx.Context(), cfg, html, pdfOptsFrom(pageSize, landscape, printBackground, marginInches))
+	data, err := browser.RenderHTMLToPDF(ctx.Context(), cfg, html, pdfOptsFrom(pageSize, landscape, printBackground, marginInches))
 	if err != nil {
 		return browserFail(err), nil
 	}

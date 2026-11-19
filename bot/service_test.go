@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"openfabrica/db"
+	"openfabrica/db/models"
+	"openfabrica/engine"
 	"openfabrica/events"
 	"openfabrica/security"
 )
@@ -29,6 +31,7 @@ type fakeProvider struct {
 	nextID    int
 	failQ     bool // make SendQuestion fail (simulate no-button fallback)
 	failEdit  bool // make EditMessageKeyboard fail (simulate stale message)
+	stopped   bool
 }
 
 type editRecord struct {
@@ -44,7 +47,12 @@ type keyboard struct {
 
 func (f *fakeProvider) Name() string                    { return "telegram" }
 func (f *fakeProvider) Start(ctx context.Context) error { return nil }
-func (f *fakeProvider) Stop() error                     { return nil }
+func (f *fakeProvider) Stop() error {
+	f.mu.Lock()
+	f.stopped = true
+	f.mu.Unlock()
+	return nil
+}
 
 func (f *fakeProvider) SendMessage(chatID, text string) (int, error) {
 	f.mu.Lock()
@@ -344,5 +352,46 @@ func TestOffsetRoundTrip(t *testing.T) {
 	svc.SaveOffset(12345)
 	if got := svc.LoadOffset(); got != 12345 {
 		t.Errorf("offset round-trip = %d, want 12345", got)
+	}
+}
+
+func TestBotServiceStopHaltsProviders(t *testing.T) {
+	svc, fp, _ := newTestService(t)
+	svc.Stop()
+	fp.mu.Lock()
+	stopped := fp.stopped
+	fp.mu.Unlock()
+	if !stopped {
+		t.Error("expected Stop() to stop registered providers")
+	}
+}
+
+func TestHandleChatPersistsUserMessageToTimeline(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	st := screenUser(t, svc, "ChatProj")
+	_ = models.UpdateProjectMode(svc.deps.DB.DB, st.ActiveProjectID, models.ModePaused)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng := engine.New(&engine.Deps{
+		DB:               svc.deps.DB,
+		ProjectDBManager: svc.deps.ProjectDBManager,
+		Bus:              svc.deps.Bus,
+		Encryptor:        svc.deps.Encryptor,
+	}, ctx)
+	defer eng.StopAll()
+	svc.deps.Engine = eng
+
+	svc.HandleIncoming("telegram", "555", "999", 50, "Make the header blue")
+
+	pdb := svc.deps.ProjectDBManager.Get(st.ActiveProjectID)
+	var sessionID, role, content string
+	if err := pdb.QueryRow(
+		"SELECT session_id, role, content FROM of_chat_messages WHERE role = 'user' ORDER BY id DESC LIMIT 1",
+	).Scan(&sessionID, &role, &content); err != nil {
+		t.Fatalf("expected chat message in of_chat_messages: %v", err)
+	}
+	if sessionID != "admin" || role != "user" || content != "Make the header blue" {
+		t.Errorf("got (%q, %q, %q), want (admin, user, Make the header blue)", sessionID, role, content)
 	}
 }

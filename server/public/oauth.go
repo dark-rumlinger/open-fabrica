@@ -15,34 +15,15 @@ import (
 
 	"openfabrica/internal/netguard"
 	"openfabrica/security"
+	"openfabrica/store"
 )
 
 // --- OAuth (Social Login) ---
 
-type oauthProviderConfig struct {
-	ID               int
-	Name             string
-	DisplayName      string
-	ClientID         string
-	ClientSecretName string
-	AuthorizeURL     string
-	TokenURL         string
-	UserinfoURL      string
-	Scopes           string
-	UsernameField    string
-	AuthEndpointPath string
-}
+type oauthProviderConfig = store.OAuthProviderRow
 
 func loadOAuthProvider(projectDB *sql.DB, providerName, authPath string) (*oauthProviderConfig, error) {
-	var op oauthProviderConfig
-	err := projectDB.QueryRow(
-		"SELECT id, name, display_name, client_id, client_secret_name, authorize_url, token_url, userinfo_url, scopes, username_field, auth_endpoint_path FROM of_oauth_providers WHERE name = ? AND auth_endpoint_path = ? AND is_enabled = 1",
-		providerName, authPath,
-	).Scan(&op.ID, &op.Name, &op.DisplayName, &op.ClientID, &op.ClientSecretName, &op.AuthorizeURL, &op.TokenURL, &op.UserinfoURL, &op.Scopes, &op.UsernameField, &op.AuthEndpointPath)
-	if err != nil {
-		return nil, err
-	}
-	return &op, nil
+	return store.LoadOAuthProvider(projectDB, providerName, authPath)
 }
 
 // oauthAuthorize handles GET /api/{authPath}/oauth/{provider}, redirects to the OAuth provider.
@@ -146,8 +127,7 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	// Decrypt client secret (read pool).
-	var encryptedSecret string
-	err = readDB.QueryRow("SELECT value_encrypted FROM of_secrets WHERE name = ?", op.ClientSecretName).Scan(&encryptedSecret)
+	encryptedSecret, err := store.LoadSecretEncrypted(readDB, op.ClientSecretName)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "OAuth client secret not found")
 		return
@@ -182,34 +162,25 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	// Find or create user in the project's user table.
-	var userID int
-	var role sql.NullString
-	err = readDB.QueryRow(
-		fmt.Sprintf("SELECT id, %s FROM %s WHERE %s = ?", security.QuoteIdent(ae.RoleColumn), security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn)),
-		username,
-	).Scan(&userID, &role)
+	userID, roleStr, err := store.FindOAuthUserByUsername(readDB, physTable, ae.UsernameColumn, ae.RoleColumn, username)
 	if err == sql.ErrNoRows {
 		// Create new user with an unusable password and default role.
 		// Hash before write pool, CPU-intensive.
 		unusableHash, _ := security.HashPassword(hex.EncodeToString(randomBytes) + "!oauth-no-password-login")
-		result, err := writeDB.Exec(
-			fmt.Sprintf("INSERT INTO %s (%s, %s, %s) VALUES (?, ?, ?)", security.QuoteIdent(physTable), security.QuoteIdent(ae.UsernameColumn), security.QuoteIdent(ae.PasswordColumn), security.QuoteIdent(ae.RoleColumn)),
-			username, unusableHash, ae.DefaultRole,
-		)
+		newID, err := store.CreateOAuthUser(writeDB, physTable, ae.UsernameColumn, ae.PasswordColumn, ae.RoleColumn, username, unusableHash, ae.DefaultRole)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create user")
 			return
 		}
-		id, _ := result.LastInsertId()
-		userID = int(id)
-		role.String = ae.DefaultRole
+		userID = newID
+		roleStr = ae.DefaultRole
 		h.publishAuthRegister(projectID, ae, userID, authMethodOAuth, map[string]any{ae.UsernameColumn: username})
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "database error")
 		return
 	}
 
-	userRole := role.String
+	userRole := roleStr
 	if userRole == "" {
 		userRole = ae.DefaultRole
 	}
@@ -225,8 +196,13 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
-	// Generate JWT.
-	jwtToken, err := h.generateUserToken(userID, username, userRole, projectID, ae)
+	// Generate JWT. A user with exactly one tenant gets it folded in, like a
+	// password login. With none or several the redirect cannot show a chooser,
+	// so the token is tenantless and the client picks through /tenant/switch.
+	jwtToken, _, _, err := h.generateUserTokenWithTenant(readDB, projectID, userID, username, userRole, "", ae)
+	if err == nil && jwtToken == "" {
+		jwtToken, err = h.generateUserToken(userID, username, userRole, projectID, ae)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return

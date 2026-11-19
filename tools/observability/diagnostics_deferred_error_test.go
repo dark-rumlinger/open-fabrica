@@ -9,14 +9,14 @@ import (
 	"strconv"
 	"testing"
 
-	"openfabrica/store"
+	"openfabrica/internal/browser"
 	"openfabrica/tools"
 )
 
 // TestVerifyPageRender_CatchesDeferredPostPaintError covers an error thrown after
 // first paint: a page paints immediately, then runs init code that throws and is
 // caught-and-logged (console.error) from a /files/ script. The in-build probe idles
-// the shared window (store.RuntimeIdleWindow) and injects the shared
+// the shared window (browser.RuntimeIdleWindow) and injects the shared
 // instrumentation, so it catches the boot failure just as the authoritative gate
 // does; stopping at first paint would report passed. Needs a headless browser;
 // skips cleanly when one is unavailable or under `go test -short`.
@@ -55,7 +55,7 @@ setTimeout(function () {
 	ctx := &tools.ToolContext{Ctx: context.Background()}
 	report, rerr := verifyPageRender(ctx, "", port, "/", "")
 	if rerr != nil {
-		if errors.Is(rerr, store.ErrBrowserUnavailable) {
+		if errors.Is(rerr, browser.ErrBrowserUnavailable) {
 			t.Skip("headless browser unavailable; skipping deferred-error probe test")
 		}
 		t.Fatalf("verifyPageRender: %v", rerr)

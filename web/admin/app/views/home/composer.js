@@ -45,6 +45,7 @@ async function createProject(values) {
       llm_model_id: values.model.id,
       ambition_level: values.ambition,
       user_flows: values.userFlows,
+      images: values.images?.length ? values.images : undefined,
     });
     toast.success(t('composer.created'));
     clearDraft();

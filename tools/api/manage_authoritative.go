@@ -25,17 +25,7 @@ func init() {
 		FullResultInEvents: true,
 		MaxResult:          16000,
 		OneLiner:           "Authoritative multiplayer WebSocket: a server reducer owns & validates shared state (turn-based games, auctions; anti-cheat).",
-		WhenToUse: `Use whenever the SERVER must own the truth for contested, cheat-sensitive, or
-hidden-information shared state. Games are the most common case (turn-based,
-scored, hidden hands), but the same model fits auctions/bidding, seat or
-inventory booking under contention, live voting/quizzes, and collaborative state
-that needs server arbitration. Two steps: create the endpoint, then set_reducer
-with reduce(state, event, ctx) (optional view(state, playerId) to hide info per
-player). The reducer runs sandboxed in a per-room actor and persists durable
-state itself via ctx.insert/update/upsert - never trust a client POST for
-money/score/result. Read the current reducer with action=get before fixing it. Cannot also be
-a matchmaking endpoint: pair on manage_matchmaking, then connect matched peers
-here via ?room=. See the realtime_signaling guide.`,
+		WhenToUse:          `Server-owned shared state for contested, cheat-sensitive, or hidden-info rooms (turn-based/scored games, auctions, bookings, voting). Create the endpoint, then set_reducer with reduce(state, event, ctx) (and optional view(state, playerId)). Cannot share an endpoint with manage_matchmaking (pair there, connect matched peers here via ?room=). Action=get before fixing; see realtime_signaling.`,
 		Actions: []tools.Action{
 			&AuthoritativeCreate{},
 			&AuthoritativeUpdate{},
@@ -110,7 +100,7 @@ func (a *AuthoritativeUpdate) Run(ctx *tools.ToolContext) (*tools.Result, error)
 
 type AuthoritativeSetReducer struct {
 	EndpointPath  string   `arg:"endpoint_path,required" desc:"Authoritative endpoint to attach/replace the server-side reducer on."`
-	Code          string   `arg:"code,required"          desc:"Server-side reducer JS defining reduce(state, event, ctx), and optionally view(state, playerId) for hidden info. Runs sandboxed in a per-room actor; never served to the browser. The rules it must satisfy are the room-reducer contract, carried in this endpoint's create result and in the realtime_signaling guide: they are NOT guessable from the JavaScript (Math.random() and Date.now() throw, a throw freezes the room, ctx.after fires once, @tick dt is seconds). Read them before writing this, and use action=get to read the current reducer before fixing it."`
+	Code          string   `arg:"code,required"          desc:"Sandboxed reducer JS defining reduce(state, event, ctx) and optional view(state, playerId). Obey the room-reducer contract (see realtime_signaling; no Math.random/Date.now). Use action=get before fixing."`
 	SeedTable     string   `arg:"seed_table"       desc:"Optional: table the reducer's authoritative state is seeded from at @join. The actor reads seed_columns WHERE seed_key_column = <authenticated user id> and injects them as event.player.seed, so balances come from the DB, not client meta. Requires requires_auth."`
 	SeedKeyColumn string   `arg:"seed_key_column"  desc:"Column in seed_table matched against the joining user's authenticated id. Defaults to 'id'."`
 	SeedColumns   []string `arg:"seed_columns"     desc:"Columns to read from seed_table into event.player.seed (e.g. [\"bankroll\",\"role\"])."`

@@ -38,6 +38,7 @@ type selfDestructDeps struct {
 	cfg           *config.Config
 	configPath    string
 	cancelActions context.CancelFunc
+	drainActions  func()
 	tlsMgr        *tlsproxy.Manager
 	netHelpers    *networkHelpers
 	engineMgr     *engine.Engine
@@ -52,7 +53,7 @@ func wireSelfDestruct(d selfDestructDeps) {
 	run := func() bot.SelfDestructReport {
 		rep := selfdestruct.Run(context.Background(), plan, selfdestruct.Actions{
 			Quiesce: func() {
-				gracefulShutdown(d.cancelActions, d.tlsMgr, d.netHelpers, d.engineMgr, d.jobsMgr)
+				gracefulShutdown(d.cancelActions, d.drainActions, d.botService, d.tlsMgr, d.netHelpers, d.engineMgr, d.jobsMgr)
 				d.projectDBMgr.CloseAll()
 				_ = d.database.Close()
 			},

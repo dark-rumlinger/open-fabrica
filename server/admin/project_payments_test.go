@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"openfabrica/store"
 )
 
 // The Payments view lists what a project has taken, newest first, for the owner
@@ -53,11 +55,11 @@ func TestPaymentsOverviewThroughTheRouter(t *testing.T) {
 		}
 	}
 	var got struct {
-		Configured   bool           `json:"configured"`
-		ProviderType string         `json:"provider_type"`
-		Totals       []paymentTotal `json:"totals"`
-		Payments     []paymentRow   `json:"payments"`
-		Plans        []planRow      `json:"plans"`
+		Configured   bool                 `json:"configured"`
+		ProviderType string               `json:"provider_type"`
+		Totals       []store.PaymentTotal `json:"totals"`
+		Payments     []store.PaymentRow   `json:"payments"`
+		Plans        []store.PlanRow      `json:"plans"`
 		Subs         []struct {
 			Plan   string `json:"plan"`
 			Status string `json:"status"`

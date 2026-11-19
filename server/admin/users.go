@@ -15,13 +15,11 @@ type UsersHandler struct {
 type createUserRequest struct {
 	Username    string `json:"username"`
 	Password    string `json:"password"`
-	Role        string `json:"role"`
 	DisplayName string `json:"display_name"`
 }
 
 type updateUserRequest struct {
 	Password    string `json:"password,omitempty"`
-	Role        string `json:"role,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 }
 
@@ -40,7 +38,7 @@ func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, users)
 }
 
-// Create creates a new user.
+// Create creates a new panel account. Every panel account is an admin.
 func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
 	if !decodeJSON(w, r, &req) {
@@ -57,10 +55,6 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Role == "" {
-		req.Role = "user"
-	}
-
 	hash, err := security.HashPassword(req.Password)
 	if err != nil {
 		h.deps.Logger.Error("failed to hash password", "error", err)
@@ -68,7 +62,7 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := models.CreateUser(h.deps.DB.DB, req.Username, hash, req.Role, req.DisplayName)
+	user, err := models.CreateUser(h.deps.DB.DB, req.Username, hash, "admin", req.DisplayName)
 	if err != nil {
 		h.deps.serverError(w, "failed to create user", err)
 		return
@@ -77,7 +71,7 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, user)
 }
 
-// Update updates a user's password and/or role.
+// Update updates a user's password and/or display name.
 func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireIntParam(w, r, "userID", "invalid user ID")
 	if !ok {
@@ -102,26 +96,6 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := models.UpdateUserPassword(h.deps.DB.DB, userID, hash); err != nil {
 			h.deps.Logger.Error("failed to update user password", "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to update user")
-			return
-		}
-	}
-
-	if req.Role != "" {
-		// Prevent demoting the last admin.
-		if req.Role != "admin" {
-			existing, _ := models.GetUserByID(h.deps.DB.DB, userID)
-			if existing != nil && existing.Role == "admin" {
-				var adminCount int
-				_ = h.deps.DB.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&adminCount) // scan failure leaves 0, which fails safe below
-				if adminCount <= 1 {
-					writeError(w, http.StatusBadRequest, "cannot demote the last admin user")
-					return
-				}
-			}
-		}
-		if err := models.UpdateUserRole(h.deps.DB.DB, userID, req.Role); err != nil {
-			h.deps.Logger.Error("failed to update user role", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to update user")
 			return
 		}
@@ -154,9 +128,7 @@ func (h *UsersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// Prevent deleting the last admin user.
 	user, _ := models.GetUserByID(h.deps.DB.DB, userID)
 	if user != nil && user.Role == "admin" {
-		var adminCount int
-		_ = h.deps.DB.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&adminCount) // scan failure leaves 0, which fails safe below
-		if adminCount <= 1 {
+		if models.CountAdminUsers(h.deps.DB.DB) <= 1 {
 			writeError(w, http.StatusBadRequest, "cannot delete the last admin user")
 			return
 		}

@@ -35,6 +35,7 @@ import (
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
+	"openfabrica/internal/browser"
 	"openfabrica/store"
 )
 
@@ -175,7 +176,7 @@ func RunExplore(ctx context.Context, db *sql.DB, baseURL, hostHeader string) Run
 	if len(pages) == 0 {
 		return RuntimeResult{}
 	}
-	allocCtx, cancelAlloc, err := store.LaunchBrowser(ctx, store.BrowserConfig{HostResolverMap: hostHeader})
+	allocCtx, cancelAlloc, err := browser.LaunchBrowser(ctx, browser.BrowserConfig{HostResolverMap: hostHeader})
 	if err == nil {
 		allocCtx, cancelAlloc, err = startSharedFrom(allocCtx, cancelAlloc)
 	}
@@ -222,7 +223,7 @@ func exploreWithFallback(alloc context.Context, url, pagePath, authToken string)
 // to the load probe, which already reports it.
 func explorePage(alloc context.Context, url, pagePath, authToken string) pageReport {
 	rep := pageReport{Page: pagePath}
-	tabCtx, cancelTab := store.NewIsolatedTab(alloc)
+	tabCtx, cancelTab := browser.NewIsolatedTab(alloc)
 	defer cancelTab()
 	ctx, cancel := context.WithTimeout(tabCtx, explorePageTimeout)
 	defer cancel()
@@ -235,7 +236,7 @@ func explorePage(alloc context.Context, url, pagePath, authToken string) pageRep
 		if err := chromedp.Run(ctx,
 			viewportAction(viewport),
 			chromedp.Navigate(url),
-			chromedp.Sleep(store.RuntimeIdleWindow),
+			chromedp.Sleep(browser.RuntimeIdleWindow),
 		); err != nil {
 			return false
 		}
@@ -258,7 +259,7 @@ func explorePage(alloc context.Context, url, pagePath, authToken string) pageRep
 		return true
 	}
 
-	if err := chromedp.Run(ctx, runtime.Enable(), network.Enable(), store.RuntimeInstrumentationAction(authToken), seedRandomAction("explore|"+pagePath)); err != nil {
+	if err := chromedp.Run(ctx, runtime.Enable(), network.Enable(), browser.RuntimeInstrumentationAction(authToken), seedRandomAction("explore|"+pagePath)); err != nil {
 		rep.LoadFailed = true
 		return rep
 	}
@@ -580,7 +581,7 @@ func exploreIssues(rep pageReport) []ValidationIssue {
 			Deterministic: true,
 			Signature:     "overflow|" + o.Viewport,
 			Message: fmt.Sprintf("page %q scrolls sideways at %s size: the content is %dpx wide in a %dpx viewport.%s "+
-				"Make those elements shrink (max-width:100%%, min-width:0 on flex/grid children, wrapping, a narrower layout below the breakpoint) instead of clipping the page.",
+				"Make those elements shrink (max-width:100%%, min-width:0 on flex/grid children, wrapping, a narrower layout or smaller/clamp() font-size and overflow-wrap:break-word for oversized headings below the breakpoint) instead of clipping the page.",
 				rep.Page, o.Viewport, o.Scroll, o.Width, detail),
 		})
 	}
@@ -626,7 +627,7 @@ func ExplorePageAt(ctx context.Context, baseURL, hostHeader, pagePath, authToken
 	if baseURL == "" {
 		return RuntimeResult{Skipped: "no base URL configured"}, sum
 	}
-	allocCtx, cancelAlloc, err := store.LaunchBrowser(ctx, store.BrowserConfig{HostResolverMap: hostHeader})
+	allocCtx, cancelAlloc, err := browser.LaunchBrowser(ctx, browser.BrowserConfig{HostResolverMap: hostHeader})
 	if err == nil {
 		allocCtx, cancelAlloc, err = startSharedFrom(allocCtx, cancelAlloc)
 	}

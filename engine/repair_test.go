@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"openfabrica/store"
 )
 
 // Only deterministic errors become repair items; warnings and speculative guesses do
@@ -61,10 +63,10 @@ func TestRepairDisputes(t *testing.T) {
 	inert := Issue{Severity: "error", Category: "inert_click", Page: "/", Deterministic: true, Signature: "inert|1"}
 	clickErr := Issue{Severity: "error", Category: "click_error", Page: "/", Deterministic: true, Signature: "err|1"}
 	w.repairSignatures([]Issue{inert, clickErr}, 1)
-	if got := w.repairSigs[repairTaskID(inert, 1)]; len(got) != 1 {
-		t.Fatalf("repairSigs = %+v", w.repairSigs)
+	if got := w.bs().repairSigs[repairTaskID(inert, 1)]; len(got) != 1 {
+		t.Fatalf("repairSigs = %+v", w.bs().repairSigs)
 	}
-	w.disputed = map[string]bool{"inert_click\x00inert|1": true}
+	w.bs().disputed = map[string]bool{"inert_click\x00inert|1": true}
 	got := w.dropDisputed([]Issue{inert, clickErr})
 	if len(got) != 1 || got[0].Category != "click_error" {
 		t.Fatalf("dropDisputed = %+v", got)
@@ -111,5 +113,22 @@ func TestStyleDriftAsWarning(t *testing.T) {
 	}
 	if len(FixableErrors(out)) != 1 {
 		t.Fatalf("a lowered style drift is not fixable: %+v", FixableErrors(out))
+	}
+}
+
+// Repair progress counts every fixable finding, not the capped list a round works on.
+func TestRepairProgressIsUncapped(t *testing.T) {
+	mk := func(n int) []Issue {
+		out := make([]Issue, n)
+		for i := range out {
+			out[i] = Issue{Severity: store.SeverityError, Category: "runtime", Deterministic: true, Signature: fmt.Sprint(i)}
+		}
+		return out
+	}
+	if !repairProgress(mk(100), mk(70)) {
+		t.Error("100 -> 70 findings is progress even though both exceed the per-round cap")
+	}
+	if repairProgress(mk(10), mk(10)) {
+		t.Error("an unchanged count is not progress")
 	}
 }

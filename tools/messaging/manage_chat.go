@@ -20,28 +20,12 @@ func init() {
 		// list actions return full rows; the 3000-byte default would cut them mid-JSON.
 		MaxResult:          8000,
 		FullResultInEvents: true,
+		PreservesFlows:     true,
 		RequestsPause: func(action string, _ map[string]any) bool {
 			return action == "ask"
 		},
-		OneLiner: "Reply to the project owner, ask a blocking question, or check for answers.",
-		WhenToUse: `Use reply for non-blocking updates the owner can read whenever. Use ask only
-for genuine blocking ambiguity - it pauses the build until the owner answers.
-
-How ask works: your session ENDS after the call and resumes later with the
-owner's answers in your context. Do not poll and do not call check. Ask
-everything you need in ONE turn: several ask calls in the same turn reach the
-owner as one grouped form. Put a short context line on each saying why it
-matters.
-
-Pick the question_type that gives the owner the least typing:
-  single_choice  options=["Photo","Illustration"]   pick one (they may still type their own)
-  multi_choice   options=["Email","SMS","Push"]     pick several
-  text           free-text answer
-  secret         secret_name="STRIPE_KEY"            credential, encrypted, never shown to you
-  form           fields=[{"name":"key","label":"API key","type":"secret","secret_name":"API_KEY"}]
-
-An answer of "(owner will provide later)" means the owner skipped the question:
-choose a sensible default, say so, and do not ask it again.`,
+		OneLiner:  "Reply to the project owner, ask a blocking question, or check for answers.",
+		WhenToUse: `Use reply for non-blocking updates. Use ask only for genuine blocking ambiguity — it ends your turn and resumes when the owner answers (never poll/check). Batch all needed asks in one turn with a short context line and the lowest-typing question_type (single_choice, multi_choice, text, secret, form). An answer of "(owner will provide later)" means skipped: pick a sensible default and do not re-ask.`,
 		Actions: []tools.Action{
 			&ChatReply{},
 			&ChatAsk{},

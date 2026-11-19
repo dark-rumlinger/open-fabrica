@@ -138,7 +138,7 @@ func TestExpandSelfSkips(t *testing.T) {
 	pdb, _ := mgr.Open(1)
 
 	// Update run: skipped.
-	updateRun, err := createRun(pdb, RunKindUpdate, StageExpand, "make it blue")
+	updateRun, err := createRun(pdb, RunKindUpdate, StageExpand, "make it blue", "", "")
 	if err != nil {
 		t.Fatalf("create update run: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestExpandSelfSkips(t *testing.T) {
 	}
 
 	// Already-expanded run: skipped.
-	buildRun, err := createRun(pdb, RunKindBuild, StageExpand, "")
+	buildRun, err := createRun(pdb, RunKindBuild, StageExpand, "", "", "")
 	if err != nil {
 		t.Fatalf("create build run: %v", err)
 	}
@@ -214,6 +214,6 @@ func TestResolveRunEntryStage(t *testing.T) {
 // expansion lean rather than inflating the brief.
 func TestAmbitionDirectiveOffFallsBackToLow(t *testing.T) {
 	if got, want := ambitionDirective(AmbitionOff), expandDirectives[AmbitionLow]; got != want {
-		t.Errorf("ambitionDirective(off) = %q, want low's directive", firstWords(got, 4))
+		t.Errorf("ambitionDirective(off) = %q, want low's directive", got)
 	}
 }

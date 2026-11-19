@@ -41,7 +41,7 @@ type OAuthCreate struct {
 	ProviderName  string `arg:"provider_name,required" desc:"OAuth provider id (e.g. 'google', 'github')."`
 	DisplayName   string `arg:"display_name"           desc:"OAuth button label."`
 	ClientID      string `arg:"client_id,required"     desc:"OAuth client id."`
-	ClientSecret  string `arg:"client_secret,required" desc:"OAuth client secret (encrypted at rest)."`
+	ClientSecret  string `arg:"client_secret,required" desc:"OAuth client secret (encrypted at rest)." sensitive:"true"`
 	AuthorizeURL  string `arg:"authorize_url,required" desc:"Provider authorize URL."`
 	TokenURL      string `arg:"token_url,required"     desc:"Provider token URL."`
 	UserinfoURL   string `arg:"userinfo_url,required"  desc:"Provider userinfo URL."`
@@ -104,7 +104,7 @@ type OAuthUpdate struct {
 	ProviderName  string `arg:"provider_name,required" desc:"OAuth provider id to change."`
 	DisplayName   string `arg:"display_name"           desc:"New button label."`
 	ClientID      string `arg:"client_id"              desc:"New OAuth client id."`
-	ClientSecret  string `arg:"client_secret"          desc:"New OAuth client secret (encrypted at rest)."`
+	ClientSecret  string `arg:"client_secret"          desc:"New OAuth client secret (encrypted at rest)." sensitive:"true"`
 	AuthorizeURL  string `arg:"authorize_url"          desc:"New provider authorize URL."`
 	TokenURL      string `arg:"token_url"              desc:"New provider token URL."`
 	UserinfoURL   string `arg:"userinfo_url"           desc:"New provider userinfo URL."`

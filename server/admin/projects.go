@@ -5,14 +5,18 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"openfabrica/chat"
 	"openfabrica/db/models"
 	"openfabrica/engine"
 	"openfabrica/events"
 	"openfabrica/internal/msgcat"
 	"openfabrica/internal/projectident"
+	"openfabrica/store"
 	"openfabrica/tlsproxy"
 )
 
@@ -33,7 +37,8 @@ type createProjectRequest struct {
 	AmbitionLevel *string `json:"ambition_level,omitempty"`
 	// UserFlows turns the project's user-flow tests (of_test.js) on or off. Pointer so
 	// an absent field keeps the default, which is off (the feature is experimental).
-	UserFlows *bool `json:"user_flows,omitempty"`
+	UserFlows *bool             `json:"user_flows,omitempty"`
+	Images    []chat.ImageInput `json:"images,omitempty"`
 }
 
 type updateProjectRequest struct {
@@ -106,6 +111,11 @@ func (h *ProjectsHandler) List(w http.ResponseWriter, r *http.Request) {
 func (h *ProjectsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createProjectRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	briefImages, imgErr := chat.DecodeImageInputs(req.Images)
+	if imgErr != nil {
+		writeError(w, http.StatusBadRequest, imgErr.Error())
 		return
 	}
 
@@ -185,6 +195,23 @@ func (h *ProjectsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		_ = models.DeleteProject(h.deps.DB.DB, project.ID)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create project database: %v", err))
 		return
+	}
+	if len(briefImages) > 0 {
+		dir := filepath.Join(h.deps.ProjectDBManager.ProjectDir(project.ID), "brief_images")
+		if os.MkdirAll(dir, 0755) == nil {
+			for i, img := range briefImages {
+				ext := "jpg"
+				switch img.MIMEType {
+				case "image/png":
+					ext = "png"
+				case "image/webp":
+					ext = "webp"
+				case "image/gif":
+					ext = "gif"
+				}
+				_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.%s", i, ext)), img.Data, 0644)
+			}
+		}
 	}
 
 	// The project-created event starts the first build, so record the language first.
@@ -429,48 +456,19 @@ func (h *ProjectsHandler) Summary(w http.ResponseWriter, r *http.Request) {
 		DailyTokenBudget  int    `json:"daily_token_budget"`
 	}
 
-	var s summary
-
-	// Token usage + engine call count (per-project DB). of_llm_calls logs both
-	// engine and chat calls, tagged by `source`: total tokens count all LLM spend,
-	// while brain_actions stays scoped to engine calls so live-chat turns don't
-	// inflate the build action count.
-	_ = projectDB.QueryRow(
-		`SELECT COALESCE(SUM(input_tokens + output_tokens), 0),
-		        COALESCE(SUM(CASE WHEN source = 'engine' THEN 1 ELSE 0 END), 0)
-		 FROM of_llm_calls`,
-	).Scan(&s.TotalTokens, &s.BrainActions)
-
-	// Today's engine spend vs the configured daily ceiling, so the owner can see
-	// how close the autonomous build/self-repair loop is to pausing. Budget 0 =
-	// unlimited; the field is still returned so the UI can show "X used today".
-	_ = projectDB.QueryRow(
-		`SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens), 0)
-		 FROM of_llm_calls WHERE source = 'engine' AND created_at >= date('now')`,
-	).Scan(&s.EngineTokensToday)
+	m := store.LoadProjectSummaryMetrics(projectDB)
+	s := summary{
+		TotalTokens:       int(m.TotalTokens),
+		BrainActions:      m.BrainActions,
+		EngineTokensToday: int(m.EngineTokensToday),
+		PageViews:         m.PageViews,
+		UniqueVisitors:    m.UniqueVisitors,
+		PagesCount:        m.PagesCount,
+		Model:             models.GetProjectModelDisplayName(h.deps.DB.DB, projectID),
+	}
 	if h.deps.Config != nil {
 		s.DailyTokenBudget = h.deps.Config.EngineDailyTokenBudget
 	}
-
-	// Page views + unique visitors (last 24h) (per-project DB)
-	_ = projectDB.QueryRow(
-		`SELECT COUNT(*), COUNT(DISTINCT visitor_hash)
-		 FROM of_analytics WHERE created_at > datetime('now', '-1 day')`,
-	).Scan(&s.PageViews, &s.UniqueVisitors)
-
-	// Published pages count (per-project DB)
-	_ = projectDB.QueryRow(
-		`SELECT COUNT(*) FROM of_files WHERE kind = 'page' AND is_deleted = 0`,
-	).Scan(&s.PagesCount)
-
-	// Configured model (global DB): the model the engine runs for this project,
-	// shown next to the token spend so the owner can see what's using them.
-	_ = h.deps.DB.DB.QueryRow(
-		`SELECT m.display_name FROM projects p
-		   JOIN llm_models m ON m.id = p.llm_model_id
-		  WHERE p.id = ?`,
-		projectID,
-	).Scan(&s.Model)
 
 	writeJSON(w, http.StatusOK, s)
 }
@@ -504,15 +502,13 @@ func (h *ProjectsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		h.deps.Jobs.StopProject(projectID)
 	}
 
-	// Delete via serialized writer to ensure the row is actually removed
-	// before we clean up files. Using raw Exec can race with other writes.
-	res, err := h.deps.DB.ExecWrite("DELETE FROM projects WHERE id = ?", projectID)
-	if err != nil {
-		h.deps.serverError(w, "failed to delete project", err)
+	err := models.DeleteProjectByID(h.deps.DB.DB, projectID)
+	if errors.Is(err, models.ErrProjectNotFound) {
+		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeError(w, http.StatusNotFound, "project not found")
+	if err != nil {
+		h.deps.serverError(w, "failed to delete project", err)
 		return
 	}
 

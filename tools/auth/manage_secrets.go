@@ -37,7 +37,7 @@ it itself.`,
 // on conflict.
 type SecretStore struct {
 	Name  string `arg:"name,required"  desc:"Secret name (referenced by other tools)."`
-	Value string `arg:"value,required" desc:"Secret value to encrypt and store."`
+	Value string `arg:"value,required" desc:"Secret value to encrypt and store." sensitive:"true"`
 }
 
 func (a *SecretStore) ActionName() string { return "store" }

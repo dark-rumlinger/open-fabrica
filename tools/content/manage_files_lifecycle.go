@@ -167,7 +167,11 @@ func renameImporterNote(ctx *tools.ToolContext, kind, oldPath, newPath string) s
 		return ""
 	}
 	var importers []string
-	for p, body := range projectJSBodies(ctx, newPath, "") {
+	bodies, err := projectJSBodies(ctx, newPath, "")
+	if err != nil {
+		return ""
+	}
+	for p, body := range bodies {
 		if p == newPath {
 			continue
 		}

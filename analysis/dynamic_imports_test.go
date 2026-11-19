@@ -65,28 +65,28 @@ func issuesByName(iss []ImportIssue) map[string]ImportIssue {
 	return m
 }
 
-// A representative bug: explorer.js destructures registerDiscovery
-// from explorer.discovery.js (which only exports CREDIT_REWARDS); the function
-// lives in explorer.state.js. registerDiscovery must flag (target explorer.discovery.js),
-// CREDIT_REWARDS must stay clean.
+// A representative bug: app.js destructures registerHandler
+// from feature.js (which only exports DEFAULT_CONFIG); the function
+// lives in state.js. registerHandler must flag (target feature.js),
+// DEFAULT_CONFIG must stay clean.
 func TestResolveDynamicNamedImports_WrongModule(t *testing.T) {
 	bodies := map[string]string{
-		"explorer.discovery.js": `export const CREDIT_REWARDS = {};`,
-		"explorer.state.js":     `export function registerDiscovery(){} export const state = {};`,
-		"explorer.js": `import { state } from './explorer.state.js';
-function onLand(planet){
-  import('./explorer.discovery.js').then(({ CREDIT_REWARDS, registerDiscovery }) => {
-    registerDiscovery('planet', planet.id);
+		"feature.js": `export const DEFAULT_CONFIG = {};`,
+		"state.js":   `export function registerHandler(){} export const state = {};`,
+		"app.js": `import { state } from './state.js';
+function onInit(ctx){
+  import('./feature.js').then(({ DEFAULT_CONFIG, registerHandler }) => {
+    registerHandler('item', ctx.id);
   });
 }`,
 	}
-	got := issuesByName(ResolveDynamicNamedImports("explorer.js", bodies, AnalyzeModules(bodies)))
-	rd, ok := got["registerDiscovery"]
-	if !ok || rd.Reason != "dynamic_name_missing" || rd.Target != "explorer.discovery.js" {
-		t.Fatalf("registerDiscovery should flag as dynamic_name_missing on explorer.discovery.js, got %+v", got)
+	got := issuesByName(ResolveDynamicNamedImports("app.js", bodies, AnalyzeModules(bodies)))
+	rd, ok := got["registerHandler"]
+	if !ok || rd.Reason != "dynamic_name_missing" || rd.Target != "feature.js" {
+		t.Fatalf("registerHandler should flag as dynamic_name_missing on feature.js, got %+v", got)
 	}
-	if _, ok := got["CREDIT_REWARDS"]; ok {
-		t.Errorf("CREDIT_REWARDS IS exported by the target and must not flag: %+v", got)
+	if _, ok := got["DEFAULT_CONFIG"]; ok {
+		t.Errorf("DEFAULT_CONFIG IS exported by the target and must not flag: %+v", got)
 	}
 }
 

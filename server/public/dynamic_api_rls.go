@@ -14,15 +14,14 @@ import (
 
 // buildAPIRequestContext authenticates the request and assembles the row-level
 // security predicates (owner_column and tenant_column) for an endpoint call.
-// Returns (rc, isProjectKey, ok); when ok is false a response has already been
-// written and the caller must return immediately.
+// When ok is false a response has already been written and the caller must
+// return immediately.
 //
 // This is the security-critical block of the dynamic API: every CRUD path reads
 // rc.OwnerFilter / rc.TenantFilter to AND-append the predicate that keeps user A's or
-// tenant A's rows invisible to a session bound to user B or tenant B. Project API keys
-// bypass the predicate (owner-level access), and the platform_admin tenant role
-// bypasses tenancy.
-func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request, project *models.Project, ep *apiEndpoint) (rc *apiRequestContext, isProjectKey bool, ok bool) {
+// tenant A's rows invisible to a session bound to user B or tenant B. The admin role
+// bypasses the owner predicate and the platform_admin tenant role bypasses tenancy.
+func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request, project *models.Project, ep *apiEndpoint) (rc *apiRequestContext, ok bool) {
 	var authUserID int
 	var authUserRole string
 	var authTenantID int
@@ -30,28 +29,24 @@ func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request,
 
 	if ep.RequiresAuth && !ep.methodAuthExempt(r.Method) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if h.validateProjectToken(project.ID, token) {
-			isProjectKey = true
-		} else {
-			if h.deps.JWTManager == nil {
-				writeError(w, http.StatusUnauthorized, "unauthorized")
-				return nil, false, false
-			}
-			claims, err := h.validateUserClaims(token)
-			if err != nil || claims.ProjectID != project.ID {
-				writeError(w, http.StatusUnauthorized, "invalid or expired token")
-				return nil, false, false
-			}
-			// admin satisfies every role gate, as it bypasses owner scoping below.
-			if ep.RequiredRole != "" && claims.Role != ep.RequiredRole && claims.Role != "admin" {
-				writeError(w, http.StatusForbidden, "insufficient permissions")
-				return nil, false, false
-			}
-			authUserID = claims.UserID
-			authUserRole = claims.Role
-			authTenantID = claims.TenantID
-			authTenantRole = claims.TenantRole
+		if h.deps.JWTManager == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return nil, false
 		}
+		claims, err := h.validateUserClaims(token)
+		if err != nil || claims.ProjectID != project.ID {
+			writeError(w, http.StatusUnauthorized, "invalid or expired token")
+			return nil, false
+		}
+		// admin satisfies every role gate, as it bypasses owner scoping below.
+		if ep.RequiredRole != "" && claims.Role != ep.RequiredRole && claims.Role != "admin" {
+			writeError(w, http.StatusForbidden, "insufficient permissions")
+			return nil, false
+		}
+		authUserID = claims.UserID
+		authUserRole = claims.Role
+		authTenantID = claims.TenantID
+		authTenantRole = claims.TenantRole
 	} else if ep.OwnerColumn != "" || ep.TenantColumn != "" {
 		// Owner- or tenant-scoped endpoints: extract claims from an optional
 		// token for GET with public_read so reads still scope when a token
@@ -68,12 +63,11 @@ func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Tenancy gate: a tenanted endpoint that requires auth must not accept a
-	// user session without an active tenant. Project API keys bypass tenancy
-	// the same way they bypass owner_column.
-	if ep.TenantColumn != "" && ep.RequiresAuth && !isProjectKey && !(r.Method == http.MethodGet && ep.PublicRead) {
+	// user session without an active tenant.
+	if ep.TenantColumn != "" && ep.RequiresAuth && !(r.Method == http.MethodGet && ep.PublicRead) {
 		if authTenantID == 0 && authTenantRole != "platform_admin" {
 			writeError(w, http.StatusForbidden, "no active tenant; call /tenant/switch first")
-			return nil, false, false
+			return nil, false
 		}
 	}
 
@@ -83,20 +77,20 @@ func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request,
 	// false) but NOT marked public_read would otherwise fall through with no
 	// filter and return every owner's/tenant's rows to an anonymous caller.
 	// public_read endpoints intentionally expose unscoped reads (e.g. a public
-	// blog whose writes are owner-scoped), so they are exempt; project API keys
-	// (owner-level access) and the admin / platform_admin roles keep their bypass.
-	if !isProjectKey && !ep.PublicRead {
+	// blog whose writes are owner-scoped), so they are exempt; the admin and
+	// platform_admin roles keep their bypass.
+	if !ep.PublicRead {
 		if ep.OwnerColumn != "" && authUserRole != "admin" && authUserID == 0 {
 			writeError(w, http.StatusUnauthorized, "authentication required")
-			return nil, false, false
+			return nil, false
 		}
 		if ep.TenantColumn != "" && authTenantRole != "platform_admin" && authTenantID == 0 {
 			writeError(w, http.StatusForbidden, "no active tenant")
-			return nil, false, false
+			return nil, false
 		}
 	}
 
-	// Owner filter: admin role and project API keys bypass.
+	// Owner filter: the admin role bypasses.
 	//
 	// authored owner_scope marks the row's author rather than gating who may read it:
 	// the filter scopes writes (a caller updates and deletes only their own rows) and
@@ -107,12 +101,12 @@ func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request,
 	var ownerFilter string
 	var ownerFilterVal any
 	sharedRead := ep.OwnerScope == store.OwnerScopeAuthored && r.Method == http.MethodGet
-	if ep.OwnerColumn != "" && !isProjectKey && authUserRole != "admin" && authUserID > 0 && !sharedRead {
+	if ep.OwnerColumn != "" && authUserRole != "admin" && authUserID > 0 && !sharedRead {
 		clause, err := security.OwnerFilterClause(ep.OwnerColumn)
 		if err != nil {
 			slog.Error("invalid owner_column at request dispatch", "path", ep.Path, "owner_column", ep.OwnerColumn, "error", err)
 			writeError(w, http.StatusInternalServerError, "endpoint misconfigured")
-			return nil, false, false
+			return nil, false
 		}
 		ownerFilter = " AND " + clause
 		ownerFilterVal = authUserID
@@ -121,12 +115,12 @@ func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request,
 	// Tenant filter: stacks on top of the owner filter. platform_admin bypasses.
 	var tenantFilter string
 	var tenantFilterVal any
-	if ep.TenantColumn != "" && !isProjectKey && authTenantRole != "platform_admin" && authTenantID > 0 {
+	if ep.TenantColumn != "" && authTenantRole != "platform_admin" && authTenantID > 0 {
 		clause, err := security.TenantFilterClause(ep.TenantColumn)
 		if err != nil {
 			slog.Error("invalid tenant_column at request dispatch", "path", ep.Path, "tenant_column", ep.TenantColumn, "error", err)
 			writeError(w, http.StatusInternalServerError, "endpoint misconfigured")
-			return nil, false, false
+			return nil, false
 		}
 		tenantFilter = " AND " + clause
 		tenantFilterVal = authTenantID
@@ -139,7 +133,7 @@ func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request,
 		TenantFilter:    tenantFilter,
 		TenantFilterVal: tenantFilterVal,
 		AuthTenantID:    authTenantID,
-	}, isProjectKey, true
+	}, true
 }
 
 // applyCORSHeaders writes the per-endpoint CORS response headers for the actual
@@ -230,4 +224,33 @@ func (h *Handler) lookupEndpointCORS(reader *sql.DB, fullPath, endpointPath, row
 		return endpointCORSSpec{origins: ep.CORSOrigins, methods: methods, headers: headers}, true
 	}
 	return endpointCORSSpec{}, false
+}
+
+// stampScope sets an inserted row's owner and tenant columns from the caller's
+// identity. A body-supplied value is never trusted: with no identity the column
+// is dropped, so the row takes the table default.
+func stampScope(ep *apiEndpoint, rc *apiRequestContext, row map[string]any) {
+	if ep.OwnerColumn != "" {
+		delete(row, ep.OwnerColumn)
+		if rc.AuthUserID > 0 {
+			row[ep.OwnerColumn] = rc.AuthUserID
+		}
+	}
+	if ep.TenantColumn != "" {
+		delete(row, ep.TenantColumn)
+		if rc.AuthTenantID > 0 {
+			row[ep.TenantColumn] = rc.AuthTenantID
+		}
+	}
+}
+
+// stripScope removes the owner and tenant columns from an update body: a row
+// never moves to another owner or tenant through the API.
+func stripScope(ep *apiEndpoint, body map[string]any) {
+	if ep.OwnerColumn != "" {
+		delete(body, ep.OwnerColumn)
+	}
+	if ep.TenantColumn != "" {
+		delete(body, ep.TenantColumn)
+	}
 }

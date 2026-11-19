@@ -239,6 +239,17 @@ func TestPublishVerbatimNeverTranslates(t *testing.T) {
 	}
 }
 
+func TestPublishVerbatimSkipsWhitespaceOnly(t *testing.T) {
+	lines, events := publishedBy(t, "", func(w *Worker) {
+		w.publishVerbatim("")
+		w.publishVerbatim("\n")
+		w.publishVerbatim("  \t\n ")
+	})
+	if len(lines) != 0 || len(events) != 0 {
+		t.Errorf("whitespace-only messages should not be published: lines=%q events=%q", lines, events)
+	}
+}
+
 func TestPublishErrorTranslatesTheLineAndTheEvent(t *testing.T) {
 	cat := msgcat.Catalog("fr")
 	line := "I kept running into trouble during build (3 tries) and paused so nothing breaks. Latest issue: provider timeout. Let me know and we'll sort it together."

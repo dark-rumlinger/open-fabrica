@@ -3,12 +3,11 @@ package billing
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"strconv"
 	"strings"
 	"time"
-
-	"openfabrica/internal/dbh"
 )
 
 // Provider webhook protocol: signature schemes, idempotency keys, and the
@@ -79,12 +78,17 @@ func webhookEventKey(providerType, body string, data map[string]any) string {
 	return providerType + ":" + hex.EncodeToString(sum[:])
 }
 
+// sqlExecer is satisfied by both dbh.Handle and *sql.Tx.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // claimWebhookEvent records key as processed and reports whether this call won
 // the claim (true) or the event was already handled (false). Atomic via INSERT
 // OR IGNORE on the PRIMARY KEY, so concurrent duplicate deliveries can't both
 // win. Call after signature verification so unverified bodies never fill the
 // table.
-func claimWebhookEvent(db dbh.Handle, key string) (bool, error) {
+func claimWebhookEvent(db sqlExecer, key string) (bool, error) {
 	res, err := db.Exec("INSERT OR IGNORE INTO of_processed_webhooks (event_key) VALUES (?)", key)
 	if err != nil {
 		return false, err
@@ -93,10 +97,8 @@ func claimWebhookEvent(db dbh.Handle, key string) (bool, error) {
 	return n > 0, nil
 }
 
-// releaseWebhookEvent removes a claim so a later retry can reprocess. Used only
-// when processing failed after the claim, so the provider's redelivery is not
-// silently swallowed as a duplicate.
-func releaseWebhookEvent(db dbh.Handle, key string) {
+// releaseWebhookEvent removes a claim so a later retry can reprocess.
+func releaseWebhookEvent(db sqlExecer, key string) {
 	_, _ = db.Exec("DELETE FROM of_processed_webhooks WHERE event_key = ?", key)
 }
 

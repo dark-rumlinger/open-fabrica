@@ -7,22 +7,22 @@ import "testing"
 // specifier" that esbuild and the page probe miss. Subpath PREFIX specifiers are honored.
 func TestUnresolvedModuleSpecifiers(t *testing.T) {
 	bodies := map[string]string{
-		"files/game.js":        `import * as THREE from 'three'; import { OrbitControls } from 'three/addons/controls/OrbitControls.js'; import { state } from './game.state.js';`,
-		"files/game.planet.js": `import { createNoise2D } from 'simplex-noise'; import { state } from './game.state.js';`,
-		"files/game.state.js":  `export const state = {};`,
+		"files/app.js":       `import * as THREE from 'three'; import { OrbitControls } from 'three/addons/controls/OrbitControls.js'; import { state } from './app.state.js';`,
+		"files/app.view.js":  `import { createHelper } from 'missing-lib'; import { state } from './app.state.js';`,
+		"files/app.state.js": `export const state = {};`,
 	}
-	// three + its addons prefix are declared; simplex-noise is NOT.
+	// three + its addons prefix are declared; missing-lib is NOT.
 	libSpecs := []string{"three", "three/addons/"}
 
 	got := UnresolvedModuleSpecifiers(bodies, libSpecs)
-	if len(got) != 1 || got[0].File != "files/game.planet.js" || got[0].Spec != "simplex-noise" {
-		t.Fatalf("expected exactly the unresolved `simplex-noise` import, got %+v", got)
+	if len(got) != 1 || got[0].File != "files/app.view.js" || got[0].Spec != "missing-lib" {
+		t.Fatalf("expected exactly the unresolved `missing-lib` import, got %+v", got)
 	}
 
 	// Declaring it (and any other shape) clears the finding: exact match for the
 	// lib, prefix match for the addon, relative imports skipped, project module
 	// specifier covered.
-	if g := UnresolvedModuleSpecifiers(bodies, []string{"three", "three/addons/", "simplex-noise"}); len(g) != 0 {
+	if g := UnresolvedModuleSpecifiers(bodies, []string{"three", "three/addons/", "missing-lib"}); len(g) != 0 {
 		t.Fatalf("a declared specifier must be covered, got %+v", g)
 	}
 

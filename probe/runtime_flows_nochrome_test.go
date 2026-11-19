@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"openfabrica/store"
+	"openfabrica/internal/browser"
 )
 
-func noChrome(context.Context, store.BrowserConfig) (context.Context, context.CancelFunc, error) {
-	return nil, nil, fmt.Errorf("%w: exec: \"chrome\": executable file not found", store.ErrBrowserUnavailable)
+func noChrome(context.Context, browser.BrowserConfig) (context.Context, context.CancelFunc, error) {
+	return nil, nil, fmt.Errorf("%w: exec: \"chrome\": executable file not found", browser.ErrBrowserUnavailable)
 }
 
 // Without Chrome the run is skipped: no issues, no pass/fail verdicts.
@@ -30,7 +30,7 @@ func TestRunFlowTests_NoChromeIsASkip(t *testing.T) {
 // "flow ran out of time" error that would drive a fix-pass.
 func TestRunFlowTests_CancelledRunIsASkip(t *testing.T) {
 	base := flowSite(t)
-	if _, cancel, err := store.LaunchBrowser(context.Background(), store.BrowserConfig{}); err != nil {
+	if _, cancel, err := browser.LaunchBrowser(context.Background(), browser.BrowserConfig{}); err != nil {
 		t.Skipf("headless browser unavailable: %v", err)
 	} else {
 		cancel()

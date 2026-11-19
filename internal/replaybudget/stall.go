@@ -51,6 +51,25 @@ func ResetStalls(s Scope) {
 	stalls.Reset(s.ProjectID)
 }
 
+// CleanGreen reports whether the scope's latest full-suite replay passed and no
+// project or flow-script mutations have been recorded since.
+func CleanGreen(s Scope) bool {
+	if s.durable() {
+		return cleanGreenDurable(s.DB, s.RunID)
+	}
+	return stalls.CleanGreen(s.ProjectID, time.Now())
+}
+
+// MarkDirty records that the project or of_test.js changed, invalidating any
+// cached clean-green state so the next test_flows call runs for real.
+func MarkDirty(s Scope) {
+	if s.durable() {
+		markDirtyDurable(s.DB, s.RunID)
+		return
+	}
+	stalls.MarkDirty(s.ProjectID)
+}
+
 type stallState struct {
 	best      int // fewest failed flows seen in a red full run; -1 before the first
 	bestDepth int // furthest the failing flows got at that count (sum of failing step numbers)
@@ -60,6 +79,7 @@ type stallState struct {
 	partialDepth int
 	count        int
 	red          bool
+	cleanGreen   bool
 	lastAt       time.Time
 }
 
@@ -96,22 +116,24 @@ func (s *Stalls) Observe(key, failed, depth int, full bool, now time.Time) int {
 	st.lastAt = now
 	switch {
 	case failed == 0 && full:
-		delete(s.state, key)
+		st.best, st.bestDepth, st.partialDepth, st.count, st.red, st.cleanGreen = -1, 0, 0, 0, false, true
 		return 0
 	case failed == 0:
 		st.count, st.red = 0, false
 	case !full && depth > st.partialDepth:
-		st.partialDepth, st.count, st.red = depth, 0, true
+		st.partialDepth, st.count, st.red, st.cleanGreen = depth, 0, true, false
 	case !full:
 		st.count++
 		st.red = true
+		st.cleanGreen = false
 	case st.best < 0:
-		st.best, st.bestDepth, st.red, st.partialDepth = failed, depth, true, 0
+		st.best, st.bestDepth, st.red, st.partialDepth, st.cleanGreen = failed, depth, true, 0, false
 	case failed < st.best || (failed == st.best && depth > st.bestDepth):
-		st.best, st.bestDepth, st.count, st.red, st.partialDepth = failed, depth, 0, true, 0
+		st.best, st.bestDepth, st.count, st.red, st.partialDepth, st.cleanGreen = failed, depth, 0, true, 0, false
 	default:
 		st.count++
 		st.red = true
+		st.cleanGreen = false
 	}
 	return st.count
 }
@@ -132,6 +154,24 @@ func (s *Stalls) LastRed(key int, now time.Time) bool {
 	defer s.mu.Unlock()
 	st := s.live(key, now)
 	return st != nil && st.red
+}
+
+// CleanGreen reports whether the project's latest full-suite replay passed
+// and has not been dirtied since.
+func (s *Stalls) CleanGreen(key int, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.live(key, now)
+	return st != nil && st.cleanGreen
+}
+
+// MarkDirty clears cleanGreen for the project.
+func (s *Stalls) MarkDirty(key int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st := s.state[key]; st != nil {
+		st.cleanGreen = false
+	}
 }
 
 // Reset drops the project's state.

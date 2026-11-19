@@ -307,3 +307,34 @@ func TestFlowCorpusIncludesSeededTableText(t *testing.T) {
 		t.Fatalf("a seeded title must not be reported as missing, got %v", got)
 	}
 }
+
+func TestTestFlowsShortCircuitsWhenCleanGreen(t *testing.T) {
+	db := tooltest.ProjectDB(t)
+	ctx := &tools.ToolContext{
+		ProjectID: 77,
+		RunID:     "run_clean_green",
+		DB:        db,
+	}
+	script := `export default { flows: [{ name: "home", steps: [{ goto: "/" }] }] }`
+	if res, err := (&DiagWriteFlows{Source: script}).Run(ctx); err != nil || res == nil || !res.Success {
+		t.Fatalf("write_flows failed: res=%+v err=%v", res, err)
+	}
+	scope := budgetScope(ctx)
+	replaybudget.Observe(scope, 0, 0, true)
+	leftBefore := replaybudget.Left(scope)
+
+	res, err := (&DiagTestFlows{}).Run(ctx)
+	if err != nil {
+		t.Fatalf("test_flows err: %v", err)
+	}
+	if res == nil || !res.Success {
+		t.Fatalf("test_flows must succeed when clean green, got %+v", res)
+	}
+	data, _ := res.Data.(map[string]any)
+	if data["already_passed"] != true {
+		t.Fatalf("expected already_passed=true, got %+v", data)
+	}
+	if got := replaybudget.Left(scope); got != leftBefore {
+		t.Fatalf("short-circuit must not spend replay budget: left=%d, want %d", got, leftBefore)
+	}
+}

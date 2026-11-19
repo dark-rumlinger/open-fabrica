@@ -3,8 +3,12 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
 
 	"openfabrica/db"
 	"openfabrica/events"
@@ -67,17 +71,67 @@ type SendResult struct {
 }
 
 // Send persists the owner's message and hands it to the engine through the bus.
-func (s *Session) Send(_ context.Context, message string) (*SendResult, error) {
-	userMsg := llm.Message{Role: llm.RoleUser, Content: message}
+func (s *Session) Send(ctx context.Context, message string) (*SendResult, error) {
+	return s.SendWithImages(ctx, message, nil)
+}
+
+// SendWithImages persists the owner's message (plus any image attachments saved to
+// disk) and hands the message and images to the engine through the bus.
+func (s *Session) SendWithImages(_ context.Context, message string, images []llm.MessageImage) (*SendResult, error) {
+	savedContent := message
+	if urls := s.saveChatImages(images); len(urls) > 0 {
+		if raw, err := json.Marshal(urls); err == nil {
+			savedContent = message + "\n\n<!--of-user-images:" + string(raw) + "-->"
+		}
+	}
+	userMsg := llm.Message{Role: llm.RoleUser, Content: savedContent}
 	if err := SaveMessage(s.projectDBWriter, s.ID, userMsg); err != nil {
 		return nil, fmt.Errorf("chat: save user message: %w", err)
 	}
 	if s.deps.Bus != nil {
-		s.deps.Bus.Publish(events.NewEvent(events.EventChatMessage, s.ProjectID, map[string]any{
+		payload := map[string]any{
 			"session_id": s.ID,
 			"role":       "user",
 			"content":    message,
-		}))
+		}
+		if len(images) > 0 {
+			payload["images"] = images
+		}
+		s.deps.Bus.Publish(events.NewEvent(events.EventChatMessage, s.ProjectID, payload))
 	}
 	return &SendResult{}, nil
+}
+
+func (s *Session) saveChatImages(images []llm.MessageImage) []string {
+	if len(images) == 0 || s.deps.ProjectDBManager == nil {
+		return nil
+	}
+	dir := filepath.Join(s.deps.ProjectDBManager.ProjectDir(s.ProjectID), "chat_images")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil
+	}
+	ts := time.Now().UnixNano()
+	var urls []string
+	for i, img := range images {
+		ext := imageExt(img.MIMEType)
+		name := fmt.Sprintf("%d-%d.%s", ts, i, ext)
+		if err := os.WriteFile(filepath.Join(dir, name), img.Data, 0644); err != nil {
+			continue
+		}
+		urls = append(urls, fmt.Sprintf("/admin/api/projects/%d/chat-images/%s", s.ProjectID, name))
+	}
+	return urls
+}
+
+func imageExt(mime string) string {
+	switch mime {
+	case "image/png":
+		return "png"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	default:
+		return "jpg"
+	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
+	"openfabrica/internal/browser"
 	"openfabrica/store"
 )
 
@@ -83,8 +84,8 @@ func RunRuntimeValidation(ctx context.Context, db *sql.DB, baseURL, hostHeader s
 		return RuntimeResult{}
 	}
 
-	cfg := store.BrowserConfig{HostResolverMap: hostHeader}
-	allocCtx, cancelAlloc, err := store.LaunchBrowser(ctx, cfg)
+	cfg := browser.BrowserConfig{HostResolverMap: hostHeader}
+	allocCtx, cancelAlloc, err := browser.LaunchBrowser(ctx, cfg)
 	if err != nil {
 		// Chrome missing / sandbox blocked / offline, don't fail the build,
 		// but surface the skip so the user knows runtime errors weren't checked.
@@ -162,7 +163,7 @@ func RunRuntimeValidation(ctx context.Context, db *sql.DB, baseURL, hostHeader s
 		// Chrome. Safe here because the batch has drained.
 		if batchErrored && end < len(pages) {
 			currentCancel()
-			newAlloc, newCancel, relaunchErr := store.LaunchBrowser(ctx, cfg)
+			newAlloc, newCancel, relaunchErr := browser.LaunchBrowser(ctx, cfg)
 			if relaunchErr == nil {
 				newAlloc, newCancel, relaunchErr = startSharedFrom(newAlloc, newCancel)
 			}
@@ -187,7 +188,7 @@ func RunRuntimeValidation(ctx context.Context, db *sql.DB, baseURL, hostHeader s
 // startSharedFrom starts one shared browser on a launched allocator and returns it with a
 // cancel that closes both. On failure the allocator is cancelled too.
 func startSharedFrom(alloc context.Context, cancelAlloc context.CancelFunc) (context.Context, context.CancelFunc, error) {
-	shared, cancelShared, err := store.StartSharedBrowser(alloc)
+	shared, cancelShared, err := browser.StartSharedBrowser(alloc)
 	if err != nil {
 		cancelAlloc()
 		return nil, nil, err
@@ -289,15 +290,15 @@ func hostOf(rawURL string) string {
 }
 
 // loadFailureKind classifies a network load failure. A same-origin functional resource
-// (the project's own script/stylesheet/document/XHR) stays hard ("load_failed");
+// (the project's own script/stylesheet/document/XHR/image) stays hard ("load_failed");
 // everything else is soft ("load_failed_asset", a warning): cosmetic types
-// (image/font/media/other) that headless over-reports, and ANY cross-origin failure.
+// (font/media/other) that headless over-reports, and ANY cross-origin failure.
 func loadFailureKind(resourceType network.ResourceType, sameOrigin bool) string {
 	if !sameOrigin {
 		return "load_failed_asset"
 	}
 	switch resourceType {
-	case network.ResourceTypeImage, network.ResourceTypeFont, network.ResourceTypeMedia, network.ResourceTypeOther:
+	case network.ResourceTypeFont, network.ResourceTypeMedia, network.ResourceTypeOther:
 		return "load_failed_asset"
 	default:
 		return "load_failed"
@@ -308,7 +309,7 @@ func loadFailureKind(resourceType network.ResourceType, sameOrigin bool) string 
 func probeRuntime(parent context.Context, url, pagePath, authToken string) []ValidationIssue {
 	// A tab of the shared Chrome in its own browser context, so no cookie or storage
 	// leaks from one page's probe into the next.
-	tabCtx, cancelTab := store.NewIsolatedTab(parent)
+	tabCtx, cancelTab := browser.NewIsolatedTab(parent)
 	defer cancelTab()
 	probeCtx, cancelProbe := context.WithTimeout(tabCtx, runtimeProbeTimeout)
 	defer cancelProbe()
@@ -324,9 +325,9 @@ func probeRuntime(parent context.Context, url, pagePath, authToken string) []Val
 		network.Enable(),
 		// Register the envelope-field tripwire (and optional seeded auth token) so they run
 		// before js/auth.js and every page script. Must precede Navigate to take effect.
-		store.RuntimeInstrumentationAction(authToken),
+		browser.RuntimeInstrumentationAction(authToken),
 		chromedp.Navigate(url),
-		chromedp.Sleep(store.RuntimeIdleWindow),
+		chromedp.Sleep(browser.RuntimeIdleWindow),
 	); err != nil {
 		// Navigation-level failure (DNS, timeout, probe deadline). Enrich the bare chromedp
 		// error with signals captured before it fired: HTTP status (so 404 reads as 404, not

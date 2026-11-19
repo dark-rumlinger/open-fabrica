@@ -58,3 +58,23 @@ func TestUnmatchedReferencesSkipsEmptyCorpus(t *testing.T) {
 		t.Fatalf("with no files to check against nothing can be said, got %v", got)
 	}
 }
+
+func TestUnmatchedReferencesFlagsPartialTextSelector(t *testing.T) {
+	suite := refSuite(t, `{ click: "text=Place" }`)
+	got := strings.Join(suite.UnmatchedReferences(refCorpus), "\n")
+	if !strings.Contains(got, "exact element label match") || !strings.Contains(got, ":has-text") {
+		t.Fatalf("expected exact-label warning for partial text= selector, got:\n%s", got)
+	}
+}
+
+func TestUnmatchedReferencesAllowsFlowFilledText(t *testing.T) {
+	suite := refSuite(t, `
+		{ fill: "#board", value: "Sunny Sam" },
+		{ expectText: "Sunny Sam" },
+		{ type: ".tile-go", value: "Hello Ada!" },
+		{ expectText: "Hello Ada!" },
+	`)
+	if got := suite.UnmatchedReferences(refCorpus); len(got) != 0 {
+		t.Fatalf("text filled or typed by the same flow must not warn, got: %v", got)
+	}
+}

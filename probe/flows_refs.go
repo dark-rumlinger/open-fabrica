@@ -53,16 +53,41 @@ func (s *FlowSuite) UnmatchedReferences(corpus string) []string {
 			flow, step, st, kind, tok))
 	}
 	for _, f := range s.Flows {
+		// Values filled or typed by the flow itself legitimately appear on screen
+		// even when absent from static project source files.
+		flowText := text
+		var typed strings.Builder
+		for _, st := range f.Steps {
+			if st.Value != nil && *st.Value != "" && (st.Fill != "" || st.Type != "" || st.Select != "") {
+				typed.WriteByte(' ')
+				typed.WriteString(strings.ToLower(strings.Join(strings.Fields(*st.Value), " ")))
+			}
+		}
+		if typed.Len() > 0 {
+			flowText += typed.String()
+		}
 		for i, st := range f.Steps {
 			for _, sel := range stepSelectors(st) {
 				if lit, ok := strings.CutPrefix(sel, "text="); ok {
-					checkText(text, lit, func(tok string) { report(f.Name, i+1, st, "the label", tok) })
+					checkText(flowText, lit, func(tok string) { report(f.Name, i+1, st, "the label", tok) })
+					if !strings.Contains(lit, "{{") {
+						norm := strings.ToLower(strings.Join(strings.Fields(lit), " "))
+						if len(norm) >= minRefTextLen && strings.Contains(flowText, norm) && !hasExactLabelOccurrence(flowText, norm) {
+							key := "exact-label\x00" + lit
+							if !seen[key] && len(out) < maxRefWarnings {
+								seen[key] = true
+								out = append(out, fmt.Sprintf("flow %q step %d %s uses %q, which requires an exact element label match, but %q only appears inside longer text in this project. "+
+									"Copy the full button/link label or use :has-text(%q) for a substring match.",
+									f.Name, i+1, st, sel, lit, lit))
+							}
+						}
+					}
 					continue
 				}
 				checkSelector(corpus, sel, func(kind, tok string) { report(f.Name, i+1, st, kind, tok) })
 			}
 			if st.ExpectText != "" {
-				checkText(text, st.ExpectText, func(tok string) { report(f.Name, i+1, st, "the text", tok) })
+				checkText(flowText, st.ExpectText, func(tok string) { report(f.Name, i+1, st, "the text", tok) })
 			}
 		}
 	}
@@ -107,6 +132,47 @@ func checkText(text, lit string, report func(string)) {
 		return
 	}
 	report(lit)
+}
+
+// hasExactLabelOccurrence reports whether norm appears in text bounded like a
+// standalone UI label (>label<, "label", 'label', or `label`), rather than only
+// as a substring inside a longer phrase.
+func hasExactLabelOccurrence(text, norm string) bool {
+	start := 0
+	for {
+		idx := strings.Index(text[start:], norm)
+		if idx < 0 {
+			return false
+		}
+		abs := start + idx
+		leftOK := abs == 0
+		if !leftOK {
+			i := abs - 1
+			if text[i] == ' ' && i > 0 {
+				i--
+			}
+			switch text[i] {
+			case '>', '"', '\'', '`':
+				leftOK = true
+			}
+		}
+		end := abs + len(norm)
+		rightOK := end == len(text)
+		if !rightOK {
+			i := end
+			if text[i] == ' ' && i+1 < len(text) {
+				i++
+			}
+			switch text[i] {
+			case '<', '"', '\'', '`':
+				rightOK = true
+			}
+		}
+		if leftOK && rightOK {
+			return true
+		}
+		start = abs + 1
+	}
 }
 
 // checkSelector reports each id, class and attribute name in sel that appears nowhere in

@@ -58,6 +58,13 @@ type GuardState struct {
 	// streak handling.
 	lastCode         map[string]string
 	structuralNudged map[string]bool
+	// missingArgStreaks: consecutive missing_arg failures per (tool+action) regardless of
+	// target path. Catches a wedged model that keeps omitting a required schema field
+	// (e.g. body) across different files; cleared on any success or non-missing_arg result.
+	missingArgStreaks map[string]int
+	// fileSliceStreaks: consecutive ranged manage_files get calls per file_path.
+	// Catches models micro-slicing one file across many turns without editing.
+	fileSliceStreaks map[string]int
 }
 
 // NewGuardState returns an empty state for one session segment.
@@ -85,6 +92,13 @@ const (
 	// Lower than the generic nudge because the generic "make ONE targeted edit" advice is,
 	// for a cycle, the move that sustains the loop (relocating one symbol at a time).
 	structuralCycleNudgeThreshold = 3
+	// missingArgStallThreshold: consecutive missing_arg rejections on the same (tool, action)
+	// across any targets before force-stopping (e.g. a model repeatedly omitting `body` on save
+	// across different paths).
+	missingArgStallThreshold = 6
+	// fileSliceNudgeThreshold: consecutive ranged manage_files get calls on one file
+	// before nudging the model to read in full (for small files) or grep/patch.
+	fileSliceNudgeThreshold = 4
 )
 
 // structuralCycleCodes are the import-graph rejects an incremental edit cannot resolve:
@@ -123,6 +137,7 @@ func (RepeatGuard) Before(st *GuardState, _ *SessionSpec, callName string, args 
 	}
 
 	action, _ := args["action"].(string)
+	toolActionKey := callName + "\x00" + action
 	key := resultKey(callName, args)
 	path := CallTargetPath(args)
 	loc := ""
@@ -159,6 +174,43 @@ func (RepeatGuard) Before(st *GuardState, _ *SessionSpec, callName string, args 
 			"success": false,
 			"code":    "cyclic_import_reorient",
 			"error":   structuralCycleDirective,
+		})
+		return &Verdict{Block: true, Reply: string(reply)}
+	}
+
+	// (4) The same call shape over and over means the model itself is wedged, so
+	// force-stop before per-target blocks (which don't set Stop) can mask it.
+	if st.repeatCount >= repeatedCallStallThreshold {
+		reply, _ := json.Marshal(map[string]any{
+			"success": false,
+			"code":    "repeated_call_stall",
+			"error": fmt.Sprintf("%s (action=%s) issued %d times in a row with no change - stopping here. Validation re-surfaces any real breakage as a focused fix, or fix it from chat.",
+				callName, action, st.repeatCount),
+		})
+		return &Verdict{Block: true, Reply: string(reply), Stop: true}
+	}
+
+	// (5) Repeated missing_arg rejections for the same (tool, action) across any targets:
+	// the model is failing to emit a required schema field (e.g. omitting `body` on save).
+	if st.missingArgStreaks[toolActionKey] >= missingArgStallThreshold {
+		reply, _ := json.Marshal(map[string]any{
+			"success": false,
+			"code":    "missing_arg_stall",
+			"error": fmt.Sprintf("%s (action=%s) failed %d times in a row with missing required arguments - stopping here because the model is not supplying the required schema fields.",
+				callName, action, st.missingArgStreaks[toolActionKey]),
+		})
+		return &Verdict{Block: true, Reply: string(reply), Stop: true}
+	}
+
+	// (5b) Repeated line-ranged reads on the same file: nudge once and reset so the
+	// model switches to a full read (for small files), manage_codebase, or patch.
+	if callName == toolFiles && action == "get" && isRangedReadArgs(args) && path != "" && st.fileSliceStreaks[path] >= fileSliceNudgeThreshold {
+		st.fileSliceStreaks[path] = 0
+		reply, _ := json.Marshal(map[string]any{
+			"success": false,
+			"code":    "file_slice_nudge",
+			"error": fmt.Sprintf("You've read %d line-range slices of %s in a row without editing. Omit from_line/to_line to read small files in full in one call, use manage_codebase grep/resolve to jump to a symbol, or apply your edit with patch.",
+				fileSliceNudgeThreshold, path),
 		})
 		return &Verdict{Block: true, Reply: string(reply)}
 	}
@@ -223,17 +275,6 @@ func (RepeatGuard) Before(st *GuardState, _ *SessionSpec, callName string, args 
 		return &Verdict{Block: true, Reply: string(reply)}
 	}
 
-	// (4) The same call shape over and over says nothing about one target - the model
-	// itself is wedged, so stop the session rather than refuse one operation.
-	if st.repeatCount >= repeatedCallStallThreshold {
-		reply, _ := json.Marshal(map[string]any{
-			"success": false,
-			"code":    "repeated_call_stall",
-			"error": fmt.Sprintf("%s (action=%s) issued %d times in a row with no change - stopping here. Validation re-surfaces any real breakage as a focused fix, or fix it from chat.",
-				callName, action, st.repeatCount),
-		})
-		return &Verdict{Block: true, Reply: string(reply), Stop: true}
-	}
 	return nil
 }
 
@@ -241,15 +282,24 @@ func (RepeatGuard) Before(st *GuardState, _ *SessionSpec, callName string, args 
 // (envelope success field AND no Go error).
 func (RepeatGuard) After(st *GuardState, _ *SessionSpec, callName string, args map[string]any, result string, ok bool) {
 	key := resultKey(callName, args)
+	action, _ := args["action"].(string)
+	toolActionKey := callName + "\x00" + action
 	if ok {
+		delete(st.missingArgStreaks, toolActionKey)
 		// Progress clears the failure streaks: a successful call carrying a path clears EVERY
 		// action's streak on that path (so a save clears a stale patch streak), not just this key.
-		st.clearPath(key, CallTargetPath(args))
+		path := CallTargetPath(args)
+		st.clearPath(key, path)
+		if callName == toolFiles && action == "get" && isRangedReadArgs(args) && path != "" {
+			if st.fileSliceStreaks == nil {
+				st.fileSliceStreaks = map[string]int{}
+			}
+			st.fileSliceStreaks[path]++
+		}
 		// A successful state-changing call (not a read-only probe) can change what a probe
 		// observes, so clear stale probe failure streaks. The cycle counter is deliberately
 		// NOT cleared here (counting across these writes is what it measures); only a PASSING
 		// probe retires it, since that is the evidence a fix landed.
-		action, _ := args["action"].(string)
 		if !isReadOnlyProbeAction(callName, action) {
 			clearProbeStreaks(st)
 			return
@@ -279,7 +329,16 @@ func (RepeatGuard) After(st *GuardState, _ *SessionSpec, callName string, args m
 	if st.lastCode == nil {
 		st.lastCode = map[string]string{}
 	}
-	st.lastCode[key] = tools.ResultCode(result)
+	code := tools.ResultCode(result)
+	st.lastCode[key] = code
+	if code == tools.CodeMissingArg {
+		if st.missingArgStreaks == nil {
+			st.missingArgStreaks = map[string]int{}
+		}
+		st.missingArgStreaks[toolActionKey]++
+	} else {
+		delete(st.missingArgStreaks, toolActionKey)
+	}
 	// Cycle counter for probes only: the same reading counted across the writes that clear
 	// everything else. A changed reading is new information and resets it.
 	if action, _ := args["action"].(string); isReadOnlyProbeAction(callName, action) {
@@ -299,6 +358,9 @@ func (RepeatGuard) After(st *GuardState, _ *SessionSpec, callName string, args m
 // clearPath drops every failure/nudge streak for a target (all actions), or just
 // the exact key when the call carried no target. Safe on nil maps.
 func (st *GuardState) clearPath(exactKey, path string) {
+	if path != "" {
+		delete(st.fileSliceStreaks, path)
+	}
 	if path == "" {
 		delete(st.failedResult, exactKey)
 		delete(st.lastResult, exactKey)
@@ -381,6 +443,15 @@ func clearProbeStreaks(st *GuardState) {
 // resultKey fingerprints a tool call by name + `action` + TARGET (not full args), so the
 // identical-result counter groups every attempt at the same operation on the same artifact
 // regardless of the OTHER arguments. The target is last so a success can clear by suffix.
+func isRangedReadArgs(args map[string]any) bool {
+	if args == nil {
+		return false
+	}
+	_, hasFrom := args["from_line"]
+	_, hasTo := args["to_line"]
+	return hasFrom || hasTo
+}
+
 func resultKey(callName string, args map[string]any) string {
 	action, _ := args["action"].(string)
 	return callName + "\x00" + action + "\x00" + CallTargetPath(args)
@@ -392,7 +463,7 @@ func resultKey(callName string, args map[string]any) string {
 // `table_name`, and the endpoint is the artifact it builds. A call naming no
 // target keys per action; a tool with a new target field belongs here.
 func CallTargetPath(args map[string]any) string {
-	for _, k := range []string{"path", "file_path", "page_path", "endpoint_path", "table_name", "task_id", "name"} {
+	for _, k := range []string{"path", "file_path", "page_path", "endpoint_path", "table_name", "task_id", "name", "path_prefix", "path_glob"} {
 		if v, _ := args[k].(string); v != "" {
 			return v
 		}

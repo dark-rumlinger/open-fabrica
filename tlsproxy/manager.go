@@ -475,12 +475,16 @@ func (m *Manager) managedSinceFor(domain string) (time.Time, bool) {
 }
 
 // SubscribeToEvents wires the bus so any project change triggers a Reload.
+// Dispatched asynchronously so Reload (which queries DB and can bind/reload
+// listeners) never blocks the synchronous event bus publisher.
 func (m *Manager) SubscribeToEvents(bus *events.Bus) {
 	handler := func(e events.Event) {
 		m.logger.Debug("project change detected", "event", e.Type, "project_id", e.ProjectID)
-		if err := m.Reload(); err != nil {
-			m.logger.Error("Reload failed after project change", "event", e.Type, "project_id", e.ProjectID, "error", err)
-		}
+		safego.Go("tlsproxy reload", func() {
+			if err := m.Reload(); err != nil {
+				m.logger.Error("Reload failed after project change", "event", e.Type, "project_id", e.ProjectID, "error", err)
+			}
+		})
 	}
 	bus.Subscribe(events.EventProjectCreated, handler)
 	bus.Subscribe(events.EventProjectUpdated, handler)

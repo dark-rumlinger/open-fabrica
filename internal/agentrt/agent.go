@@ -215,7 +215,12 @@ func run(ctx context.Context, cfg Config, input []llm.Message, depth int, state 
 		cfg.Budget.add(resp.Usage.InputTokens + resp.Usage.OutputTokens)
 		state.addTokens(resp.Usage.InputTokens, resp.Usage.OutputTokens)
 
-		msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+		msgs = append(msgs, llm.Message{
+			Role:             llm.RoleAssistant,
+			Content:          resp.Content,
+			ToolCalls:        resp.ToolCalls,
+			ReasoningDetails: resp.ReasoningDetails,
+		})
 
 		if len(resp.ToolCalls) == 0 {
 			res.Text = resp.Content

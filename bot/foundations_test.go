@@ -81,20 +81,6 @@ func TestBotTokenEncryptedAtRest(t *testing.T) {
 	if got := LoadBotToken(svc.deps.DB, enc); got != "123:ABC" {
 		t.Errorf("round trip = %q", got)
 	}
-
-	// Legacy plaintext value is readable and gets upgraded.
-	svc.deps.DB.SetSetting(TokenSettingKey, "999:ZZZ")
-	if got := LoadBotToken(svc.deps.DB, enc); got != "999:ZZZ" {
-		t.Errorf("legacy read = %q", got)
-	}
-	UpgradeBotToken(svc.deps.DB, enc)
-	raw, _ = svc.deps.DB.GetSetting(TokenSettingKey)
-	if !strings.HasPrefix(raw, tokenEncPrefix) {
-		t.Errorf("legacy token not upgraded: %q", raw)
-	}
-	if got := LoadBotToken(svc.deps.DB, enc); got != "999:ZZZ" {
-		t.Errorf("after upgrade = %q", got)
-	}
 }
 
 func TestTelegramReportsWhoIsTalking(t *testing.T) {

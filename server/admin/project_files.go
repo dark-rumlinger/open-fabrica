@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,38 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"openfabrica/db"
 	"openfabrica/internal/httpx"
+	"openfabrica/internal/mediatype"
 	"openfabrica/probe"
 	"openfabrica/store"
 )
 
 // ProjectFilesHandler handles all project files (uploads + engine-authored artifacts).
-// Storage is of_files (kind='file'); history is of_file_history
-// keyed on (kind, path). The list also carries the project's user-flow script
-// (of_test.js), which lives under its own kind='test' so the public server never
-// serves it and no page imports it: the owner sees and edits it here, and a save
-// is validated exactly as manage_testing write_flows validates the builder's.
 type ProjectFilesHandler struct {
 	deps *Deps
-}
-
-type projectFile struct {
-	ID           int       `json:"id"`
-	ProjectID    int       `json:"project_id"`
-	Filename     string    `json:"filename"`
-	ContentType  *string   `json:"content_type"`
-	Size         *int      `json:"size"`
-	Description  *string   `json:"description"`
-	CreatedAt    time.Time `json:"created_at"`
-	VersionCount int       `json:"version_count"`
-	// PlatformManaged marks files Open Fabrica owns and auto-emits when a feature
-	// is enabled. The UI badges them and hides edit/delete/versions; the write
-	// handlers refuse them server-side regardless.
-	PlatformManaged bool `json:"platform_managed"`
-	// Kind is "file", or "test" for the user-flow script: editable here (checked
-	// before it is stored), never deleted or published.
-	Kind string `json:"kind"`
 }
 
 // List returns all files for a project.
@@ -51,42 +30,59 @@ func (h *ProjectFilesHandler) List(w http.ResponseWriter, r *http.Request) {
 	if projectDB == nil {
 		return
 	}
-
-	rows, err := projectDB.Query(
-		`SELECT id, path, content_type, size,
-		        COALESCE(json_extract(metadata, '$.description'), ''),
-		        created_at,
-		        (SELECT COUNT(*) FROM of_file_history h WHERE h.kind = of_files.kind AND h.path = of_files.path) AS version_count,
-		        COALESCE(json_extract(metadata, '$.platform_managed'), 0),
-		        kind
-		 FROM of_files
-		 WHERE is_deleted = 0 AND (kind = 'file' OR (kind = ? AND path = ?))
-		 ORDER BY created_at DESC`,
-		probe.FlowKind, probe.FlowPath,
-	)
-	if err != nil {
-		writeJSON(w, http.StatusOK, []projectFile{})
-		return
-	}
-	files := collectRows(rows, func(rows *sql.Rows) (projectFile, error) {
-		var f projectFile
-		f.ProjectID = projectID
-		var platformManaged int // json_extract yields 1/0 (or NULL -> 0 via COALESCE)
-		if err := rows.Scan(&f.ID, &f.Filename, &f.ContentType, &f.Size, &f.Description, &f.CreatedAt, &f.VersionCount, &platformManaged, &f.Kind); err != nil {
-			return f, err
-		}
-		f.PlatformManaged = platformManaged == 1
-		return f, nil
-	})
-
-	if files == nil {
-		files = []projectFile{}
-	}
-
-	writeJSON(w, http.StatusOK, files)
+	writeJSON(w, http.StatusOK, store.ListProjectFiles(projectDB, projectID, probe.FlowKind, probe.FlowPath))
 }
 
-// textFileRequest is the JSON body for creating a text-based file (JS/CSS/HTML).
+// Preview serves the latest build preview screenshot (preview.png) for a project.
+func (h *ProjectFilesHandler) Preview(w http.ResponseWriter, r *http.Request) {
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+	p := filepath.Join(h.deps.ProjectDBManager.ProjectDir(projectID), "preview.png")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "preview not available")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// ChatImage serves a user-uploaded chat image attachment for a project.
+func (h *ProjectFilesHandler) ChatImage(w http.ResponseWriter, r *http.Request) {
+	projectID, ok := requireProjectID(w, r)
+	if !ok {
+		return
+	}
+	name := filepath.Base(chi.URLParam(r, "name"))
+	if name == "" || name == "." || name == ".." {
+		writeError(w, http.StatusBadRequest, "invalid image name")
+		return
+	}
+	p := filepath.Join(h.deps.ProjectDBManager.ProjectDir(projectID), "chat_images", name)
+	data, err := os.ReadFile(p)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "image not found")
+		return
+	}
+	ct := "image/jpeg"
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png":
+		ct = "image/png"
+	case ".webp":
+		ct = "image/webp"
+	case ".gif":
+		ct = "image/gif"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "private, max-age=31536000")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 type textFileRequest struct {
 	Filename string `json:"filename"`
 	Content  string `json:"content"`
@@ -98,9 +94,7 @@ func (h *ProjectFilesHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
-	contentType := r.Header.Get("Content-Type")
-	if strings.HasPrefix(contentType, "multipart/form-data") {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		h.handleUpload(w, r, projectID)
 	} else {
 		h.handleTextCreate(w, r, projectID)
@@ -117,8 +111,8 @@ func (h *ProjectFilesHandler) handleTextCreate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	filename := filepath.Base(req.Filename)
-	if filename == "." || filename == ".." {
+	filename, ok := cleanProjectFilePath(req.Filename)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid filename")
 		return
 	}
@@ -127,12 +121,12 @@ func (h *ProjectFilesHandler) handleTextCreate(w http.ResponseWriter, r *http.Re
 	}
 
 	dir := filepath.Join(h.deps.ProjectDBManager.ProjectDir(projectID), "files")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	storagePath := filepath.Join(dir, filepath.FromSlash(filename))
+	if err := os.MkdirAll(filepath.Dir(storagePath), 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create directory")
 		return
 	}
 
-	storagePath := filepath.Join(dir, filename)
 	data := []byte(req.Content)
 	if err := os.WriteFile(storagePath, data, 0o644); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to write file")
@@ -140,27 +134,12 @@ func (h *ProjectFilesHandler) handleTextCreate(w http.ResponseWriter, r *http.Re
 	}
 
 	ct := inferContentType(filename)
-
 	projectDB := openProjectDB(w, h.deps.ProjectDBManager, projectID)
 	if projectDB == nil {
 		return
 	}
 
-	_, err := projectDB.ExecWrite(
-		`INSERT INTO of_files (kind, path, storage, content_type, size, disk_path, is_deleted, updated_at)
-		 VALUES ('file', ?, 'disk', ?, ?, ?, 0, CURRENT_TIMESTAMP)
-		 ON CONFLICT(kind, path) DO UPDATE SET
-		   storage = 'disk',
-		   body = '',
-		   content_type = excluded.content_type,
-		   size = excluded.size,
-		   disk_path = excluded.disk_path,
-		   is_deleted = 0,
-		   deleted_at = NULL,
-		   updated_at = CURRENT_TIMESTAMP`,
-		filename, ct, len(data), storagePath,
-	)
-	if err != nil {
+	if err := store.UpsertDiskFile(projectDB, filename, ct, len(data), storagePath, ""); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save file record")
 		return
 	}
@@ -173,8 +152,8 @@ func (h *ProjectFilesHandler) handleTextCreate(w http.ResponseWriter, r *http.Re
 }
 
 func (h *ProjectFilesHandler) handleUpload(w http.ResponseWriter, r *http.Request, projectID int) {
-	const maxUploadSize = 32 << 20   // 32 MB
-	httpx.ExtendIO(w, 5*time.Minute) // a slow link outlives the 30 s read timeout
+	const maxUploadSize = 32 << 20
+	httpx.ExtendIO(w, 5*time.Minute)
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
 		writeError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
@@ -188,22 +167,30 @@ func (h *ProjectFilesHandler) handleUpload(w http.ResponseWriter, r *http.Reques
 	}
 	defer func() { _ = file.Close() }()
 
-	filename := filepath.Base(header.Filename)
-	if filename == "." || filename == ".." {
+	baseName := filepath.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
+	if baseName == "" || baseName == "." || baseName == ".." {
 		writeError(w, http.StatusBadRequest, "invalid filename")
 		return
+	}
+	folder, ok := cleanProjectFolderPath(r.FormValue("folder"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid folder")
+		return
+	}
+	filename := baseName
+	if folder != "" {
+		filename = folder + "/" + baseName
 	}
 	if refuseFlowScriptCopy(w, filename) {
 		return
 	}
 
 	dir := filepath.Join(h.deps.ProjectDBManager.ProjectDir(projectID), "files")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	storagePath := filepath.Join(dir, filepath.FromSlash(filename))
+	if err := os.MkdirAll(filepath.Dir(storagePath), 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create directory")
 		return
 	}
-
-	storagePath := filepath.Join(dir, filename)
 	dst, err := os.Create(storagePath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create file")
@@ -239,22 +226,7 @@ func (h *ProjectFilesHandler) handleUpload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	_, err = projectDB.ExecWrite(
-		`INSERT INTO of_files (kind, path, storage, content_type, size, disk_path, metadata, is_deleted, updated_at)
-		 VALUES ('file', ?, 'disk', ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
-		 ON CONFLICT(kind, path) DO UPDATE SET
-		   storage = 'disk',
-		   body = '',
-		   content_type = excluded.content_type,
-		   size = excluded.size,
-		   disk_path = excluded.disk_path,
-		   metadata = excluded.metadata,
-		   is_deleted = 0,
-		   deleted_at = NULL,
-		   updated_at = CURRENT_TIMESTAMP`,
-		filename, ct, int(written), storagePath, descMeta,
-	)
-	if err != nil {
+	if err := store.UpsertDiskFile(projectDB, filename, ct, int(written), storagePath, descMeta); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save file record")
 		return
 	}
@@ -277,26 +249,19 @@ func (h *ProjectFilesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if kind, _ := fileRowKind(projectDB, fileID); kind == probe.FlowKind {
+	if kind, _ := store.FileRowKind(projectDB, fileID, probe.FlowKind, probe.FlowPath); kind == probe.FlowKind {
 		writeError(w, http.StatusForbidden, probe.FlowPath+" is the project's user flow script. Builds expect one and report a missing script as a flow that did not pass, so it cannot be deleted. Edit it instead.")
 		return
 	}
 
-	var storagePath, filePath string
-	if err := projectDB.QueryRow(
-		"SELECT disk_path, path FROM of_files WHERE kind = 'file' AND id = ?",
-		fileID,
-	).Scan(&storagePath, &filePath); err != nil {
+	loc, err := store.LoadFileLocation(projectDB, "file", fileID)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
 
-	// Platform-managed files are OpenFabrica-owned and loaded by the project's
-	// pages at runtime; deleting one ships a broken app. The model is already
-	// blocked from deleting them; refuse the owner-facing path too. The UI hides
-	// the delete button for these, so this is the backstop for a direct API call.
-	if filePath != "" && store.IsPlatformManagedArtifact(projectDB.Reader(), "file", filePath) {
-		writeError(w, http.StatusForbidden, "This is an OpenFabrica-managed file ("+filePath+") that your project loads at runtime; it cannot be deleted. It is re-created automatically when the relevant feature (auth or end-to-end encryption) is enabled.")
+	if loc.Path != "" && store.IsPlatformManagedArtifact(projectDB.Reader(), "file", loc.Path) {
+		writeError(w, http.StatusForbidden, "This is an OpenFabrica-managed file ("+loc.Path+") that your project loads at runtime; it cannot be deleted. It is re-created automatically when the relevant feature (auth or end-to-end encryption) is enabled.")
 		return
 	}
 
@@ -305,16 +270,14 @@ func (h *ProjectFilesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if storagePath != "" {
-		_ = os.Remove(storagePath) // best-effort disk cleanup; the row is already soft-deleted
+	if loc.DiskPath.String != "" {
+		_ = os.Remove(loc.DiskPath.String)
 	}
 
 	writeStatus(w, "deleted")
 }
 
-// Content serves the raw content of a file. Handles both storage modes:
-// engine-authored text artifacts (CSS, JS, SVG) live in the body column,
-// admin-uploaded binaries live on disk.
+// Content serves the raw content of a file.
 func (h *ProjectFilesHandler) Content(w http.ResponseWriter, r *http.Request) {
 	projectID, projectDB := requireProjectDB(w, r, h.deps.ProjectDBManager)
 	if projectDB == nil {
@@ -326,22 +289,18 @@ func (h *ProjectFilesHandler) Content(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kind, found := fileRowKind(projectDB, fileID)
+	kind, found := store.FileRowKind(projectDB, fileID, probe.FlowKind, probe.FlowPath)
 	if !found {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
-	var storage, body, diskPath sql.NullString
-	err := projectDB.QueryRow(
-		"SELECT storage, body, disk_path FROM of_files WHERE kind = ? AND id = ?",
-		kind, fileID,
-	).Scan(&storage, &body, &diskPath)
+	loc, err := store.LoadFileLocation(projectDB, kind, fileID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
 
-	data, err := store.ReadArtifactBytes(storage, body, diskPath, h.deps.ProjectDBManager.ProjectDir(projectID))
+	data, err := store.ReadArtifactBytes(loc.Storage, loc.Body, loc.DiskPath, h.deps.ProjectDBManager.ProjectDir(projectID))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "file content unavailable")
 		return
@@ -351,9 +310,7 @@ func (h *ProjectFilesHandler) Content(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// UpdateContent updates the content of a text file. Respects the artifact's
-// existing storage mode: writes to the body column for inline artifacts,
-// to disk for disk-stored ones.
+// UpdateContent updates the content of a text file.
 func (h *ProjectFilesHandler) UpdateContent(w http.ResponseWriter, r *http.Request) {
 	_, projectDB := requireProjectDB(w, r, h.deps.ProjectDBManager)
 	if projectDB == nil {
@@ -371,54 +328,42 @@ func (h *ProjectFilesHandler) UpdateContent(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if kind, _ := fileRowKind(projectDB, fileID); kind == probe.FlowKind {
+	if kind, _ := store.FileRowKind(projectDB, fileID, probe.FlowKind, probe.FlowPath); kind == probe.FlowKind {
 		h.updateFlowScript(w, projectDB, fileID, req.Content)
 		return
 	}
 
-	var storage, diskPath sql.NullString
-	var filePath string
-	err := projectDB.QueryRow(
-		"SELECT storage, disk_path, path FROM of_files WHERE kind = 'file' AND id = ?",
-		fileID,
-	).Scan(&storage, &diskPath, &filePath)
+	loc, err := store.LoadFileLocation(projectDB, "file", fileID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
 
-	// Platform-managed files are OpenFabrica-owned and vetted; overwriting one
-	// breaks the guarantee it provides. This admin path writes the row directly
-	// (bypassing the store-level save guard), so it needs its own check. The UI
-	// hides edit for these; this is the API backstop.
-	if store.IsPlatformManagedArtifact(projectDB.Reader(), "file", filePath) {
-		writeError(w, http.StatusForbidden, "This is an OpenFabrica-managed file ("+filePath+") and cannot be edited; the platform owns and re-emits it.")
+	if store.IsPlatformManagedArtifact(projectDB.Reader(), "file", loc.Path) {
+		writeError(w, http.StatusForbidden, "This is an OpenFabrica-managed file ("+loc.Path+") and cannot be edited; the platform owns and re-emits it.")
 		return
 	}
 
-	switch storage.String {
+	switch loc.Storage.String {
 	case "inline", "":
-		if _, err := projectDB.ExecWrite(
-			"UPDATE of_files SET body = ?, size = ?, updated_at = CURRENT_TIMESTAMP WHERE kind = 'file' AND id = ?",
-			req.Content, len(req.Content), fileID,
-		); err != nil {
+		if err := store.UpdateInlineFileBody(projectDB, fileID, req.Content); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update file")
 			return
 		}
 	case "disk":
-		if diskPath.String == "" {
+		if loc.DiskPath.String == "" {
 			writeError(w, http.StatusInternalServerError, "file storage path is missing")
 			return
 		}
-		if err := os.WriteFile(diskPath.String, []byte(req.Content), 0644); err != nil {
+		if err := os.WriteFile(loc.DiskPath.String, []byte(req.Content), 0644); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to write file")
 			return
 		}
-		if _, err := projectDB.ExecWrite("UPDATE of_files SET size = ? WHERE kind = 'file' AND id = ?", len(req.Content), fileID); err != nil {
+		if err := store.UpdateFileSize(projectDB, fileID, len(req.Content)); err != nil {
 			h.deps.Logger.Warn("failed to update artifact size after disk write", "error", err, "id", fileID)
 		}
 	default:
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("unknown storage mode %q", storage.String))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("unknown storage mode %q", loc.Storage.String))
 		return
 	}
 
@@ -431,13 +376,11 @@ func (h *ProjectFilesHandler) ListVersions(w http.ResponseWriter, r *http.Reques
 	if projectDB == nil {
 		return
 	}
-
 	fileID, ok := requireIntParam(w, r, "fileID", "invalid file ID")
 	if !ok {
 		return
 	}
-
-	kind, _ := fileRowKind(projectDB, fileID)
+	kind, _ := store.FileRowKind(projectDB, fileID, probe.FlowKind, probe.FlowPath)
 	respondArtifactVersions(w, projectDB, kind, fileID)
 }
 
@@ -451,61 +394,17 @@ func (h *ProjectFilesHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	kind, _ := fileRowKind(projectDB, fileID)
+	kind, _ := store.FileRowKind(projectDB, fileID, probe.FlowKind, probe.FlowPath)
 	respondArtifactRestore(w, r, projectDB, kind, fileID)
 }
 
 func inferContentType(filename string) string {
-	switch strings.ToLower(filepath.Ext(filename)) {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".svg":
-		return "image/svg+xml"
-	case ".webp":
-		return "image/webp"
-	case ".css":
-		return "text/css"
-	case ".js":
-		return "application/javascript"
-	case ".html", ".htm":
-		return "text/html"
-	case ".json":
-		return "application/json"
-	case ".pdf":
-		return "application/pdf"
-	case ".woff2":
-		return "font/woff2"
-	case ".woff":
-		return "font/woff"
-	case ".ttf":
-		return "font/ttf"
-	default:
-		return "application/octet-stream"
+	if ct := mediatype.ContentTypeByFilename(filename); ct != "" {
+		return ct
 	}
+	return "application/octet-stream"
 }
 
-// fileRowKind returns the kind of the Files-view row with this id: "file", or
-// probe.FlowKind for the user-flow script. found is false for any other row, so
-// the Files routes never reach a page, a layout or another kind by id. An unknown
-// id reads as "file", which keeps the existing not-found answers.
-func fileRowKind(projectDB *db.ProjectDB, id int) (kind string, found bool) {
-	err := projectDB.QueryRow(
-		`SELECT kind FROM of_files WHERE id = ? AND (kind = 'file' OR (kind = ? AND path = ?))`,
-		id, probe.FlowKind, probe.FlowPath,
-	).Scan(&kind)
-	if err != nil {
-		return "file", false
-	}
-	return kind, true
-}
-
-// refuseFlowScriptCopy answers 400 for a new file named of_test.js: it would be a
-// separate, public copy that the flow runner never reads (it reads the kind='test'
-// script listed alongside the files).
 func refuseFlowScriptCopy(w http.ResponseWriter, filename string) bool {
 	if !strings.EqualFold(filename, probe.FlowPath) {
 		return false
@@ -514,10 +413,6 @@ func refuseFlowScriptCopy(w http.ResponseWriter, filename string) bool {
 	return true
 }
 
-// updateFlowScript saves an owner's edit of the user-flow script. It goes through
-// the same parse and checks as manage_testing write_flows, so a script that would
-// fail to load never replaces a working one; the error names what to change.
-// Unlike write_flows it does not replay: the next test_flows or build does.
 func (h *ProjectFilesHandler) updateFlowScript(w http.ResponseWriter, projectDB *db.ProjectDB, fileID int, content string) {
 	suite, err := probe.ParseFlowSource(content)
 	if err != nil {
@@ -540,4 +435,31 @@ func (h *ProjectFilesHandler) updateFlowScript(w http.ResponseWriter, projectDB 
 		resp["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// cleanProjectFilePath normalizes a relative file path (allowing subfolders)
+// and rejects traversal or empty segments.
+func cleanProjectFilePath(raw string) (string, bool) {
+	norm := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	norm = strings.TrimLeft(norm, "/")
+	if norm == "" {
+		return "", false
+	}
+	parts := strings.Split(norm, "/")
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return "", false
+		}
+	}
+	return strings.Join(parts, "/"), true
+}
+
+// cleanProjectFolderPath normalizes an optional folder path; empty means root.
+func cleanProjectFolderPath(raw string) (string, bool) {
+	norm := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	norm = strings.Trim(norm, "/")
+	if norm == "" {
+		return "", true
+	}
+	return cleanProjectFilePath(norm)
 }

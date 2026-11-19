@@ -4,15 +4,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"openfabrica/db"
 	"openfabrica/events"
+	"openfabrica/internal/safego"
 )
+
+const auditQueueCapacity = 256
 
 // AuditLogger subscribes to key events and logs them to of_activity_log.
 type AuditLogger struct {
 	projectDBMgr *db.ProjectDBManager
 	logger       *slog.Logger
+	queue        chan events.Event
+	mu           sync.RWMutex
+	closed       bool
+	stopOnce     sync.Once
+	done         chan struct{}
 }
 
 // NewAuditLogger creates an audit logger and subscribes to relevant events.
@@ -20,7 +29,11 @@ func NewAuditLogger(projectDBMgr *db.ProjectDBManager, bus *events.Bus) *AuditLo
 	al := &AuditLogger{
 		projectDBMgr: projectDBMgr,
 		logger:       slog.With("component", "audit_logger"),
+		queue:        make(chan events.Event, auditQueueCapacity),
+		done:         make(chan struct{}),
 	}
+
+	safego.Go("audit-logger", al.run)
 
 	// Subscribe to security and data-relevant events.
 	for _, et := range []events.EventType{
@@ -46,21 +59,47 @@ func (al *AuditLogger) handleEvent(event events.Event) {
 	if event.ProjectID == 0 {
 		return
 	}
-
-	projectDB := al.projectDBMgr.Get(event.ProjectID)
-	if projectDB == nil {
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	if al.closed {
 		return
 	}
+	select {
+	case al.queue <- event:
+	default:
+		al.logger.Debug("audit log queue full, dropping event", "event", event.Type, "project_id", event.ProjectID)
+	}
+}
 
-	summary := buildAuditSummary(event)
-	details, _ := json.Marshal(event.Payload)
+// Stop closes the audit queue and waits for buffered events to drain.
+func (al *AuditLogger) Stop() {
+	al.stopOnce.Do(func() {
+		al.mu.Lock()
+		al.closed = true
+		close(al.queue)
+		al.mu.Unlock()
+		<-al.done
+	})
+}
 
-	_, err := projectDB.ExecWrite(
-		"INSERT INTO of_activity_log (event_type, summary, details) VALUES (?, ?, ?)",
-		string(event.Type), summary, string(details),
-	)
-	if err != nil {
-		al.logger.Debug("audit log write failed", "event", event.Type, "error", err)
+func (al *AuditLogger) run() {
+	defer close(al.done)
+	for event := range al.queue {
+		projectDB := al.projectDBMgr.Get(event.ProjectID)
+		if projectDB == nil {
+			continue
+		}
+
+		summary := buildAuditSummary(event)
+		details, _ := json.Marshal(event.Payload)
+
+		_, err := projectDB.ExecWrite(
+			"INSERT INTO of_activity_log (event_type, summary, details) VALUES (?, ?, ?)",
+			string(event.Type), summary, string(details),
+		)
+		if err != nil {
+			al.logger.Debug("audit log write failed", "event", event.Type, "error", err)
+		}
 	}
 }
 

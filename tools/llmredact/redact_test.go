@@ -7,6 +7,8 @@ import (
 
 	"openfabrica/db"
 	"openfabrica/providers/llm"
+	"openfabrica/tools"
+	_ "openfabrica/tools/all"
 	"openfabrica/tools/llmredact"
 
 	_ "modernc.org/sqlite"
@@ -37,7 +39,7 @@ func newUsersProjectDB(t *testing.T) *db.ProjectDB {
 // the persisted request_messages, response_tool_calls and response_content.
 func logEntry(t *testing.T, pdb *db.ProjectDB, e llm.LLMLogEntry) (reqMsgs, respTC, respContent string) {
 	t.Helper()
-	logger := llm.NewDBLLMLogger(pdb.Writer(), llm.WithRedactor(llmredact.New(pdb.Reader())))
+	logger := llm.NewDBLLMLogger(pdb.Writer(), llm.WithRedactor(llmredact.New(pdb.Reader(), tools.DefaultRegistry().SensitiveArgs)))
 	logger.LogLLMCall(e)
 	logger.Close() // drains the buffer, so the row is written before we read
 
@@ -178,4 +180,23 @@ func TestOrdinaryCallUnchanged(t *testing.T) {
 		t.Errorf("response_content altered: %q", respContent)
 	}
 	_ = reqMsgs
+}
+
+// A credential arg is redacted because its tool declares it sensitive, with no
+// per-tool rule in the redactor.
+func TestRedactsDeclaredSensitiveArgs(t *testing.T) {
+	pdb := newUsersProjectDB(t)
+	_, respTC, _ := logEntry(t, pdb, llm.LLMLogEntry{
+		RunID: "run_oauth",
+		ResponseToolCalls: mustJSON(t, []llm.ToolCall{{
+			ID: "c1", Name: "manage_oauth",
+			Arguments: `{"action":"create","provider_name":"acme","client_id":"abc","client_secret":"s3cr3t-oauth-value"}`,
+		}}),
+	})
+	if strings.Contains(respTC, "s3cr3t-oauth-value") {
+		t.Errorf("client_secret reached the log: %s", respTC)
+	}
+	if !strings.Contains(respTC, "abc") || !strings.Contains(respTC, "[redacted]") {
+		t.Errorf("a non-sensitive arg was lost: %s", respTC)
+	}
 }

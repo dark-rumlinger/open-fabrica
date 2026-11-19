@@ -2,12 +2,10 @@ package public
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"strings"
 
 	"openfabrica/db"
-	"openfabrica/security"
+	"openfabrica/store"
 )
 
 // Durable persistence for relay endpoints (write_to_table) plus the two cleanup
@@ -45,10 +43,7 @@ func wsWriteToTable(projectDB *db.ProjectDB, ws *wsEndpointConfig, msgMap map[st
 	if len(ws.tableColumns) == 0 {
 		// Target table isn't in of_dynamic_tables, write the raw JSON to a `data` column.
 		raw, _ := json.Marshal(msgMap)
-		if _, err := projectDB.ExecWrite(
-			fmt.Sprintf("INSERT INTO %s (data, created_at) VALUES (?, datetime('now'))", security.QuoteIdent(ws.WriteToTable)),
-			string(raw),
-		); err != nil {
+		if err := store.InsertWSRawJSON(projectDB, ws.WriteToTable, string(raw)); err != nil {
 			slog.Warn("ws write_to_table insert failed", "table", ws.WriteToTable, "error", err)
 		}
 		return
@@ -56,7 +51,6 @@ func wsWriteToTable(projectDB *db.ProjectDB, ws *wsEndpointConfig, msgMap map[st
 
 	// Map incoming JSON fields to table columns.
 	var cols []string
-	var placeholders []string
 	var vals []any
 	_, hasUserIDCol := ws.tableColumns["user_id"]
 	hasTenantCol := false
@@ -80,17 +74,14 @@ func wsWriteToTable(projectDB *db.ProjectDB, ws *wsEndpointConfig, msgMap map[st
 			continue
 		}
 		cols = append(cols, colName)
-		placeholders = append(placeholders, "?")
 		vals = append(vals, val)
 	}
 	if hasUserIDCol && userID > 0 {
 		cols = append(cols, "user_id")
-		placeholders = append(placeholders, "?")
 		vals = append(vals, userID)
 	}
 	if hasTenantCol && tenantID > 0 {
 		cols = append(cols, ws.TenantColumn)
-		placeholders = append(placeholders, "?")
 		vals = append(vals, tenantID)
 	}
 
@@ -118,16 +109,7 @@ func wsWriteToTable(projectDB *db.ProjectDB, ws *wsEndpointConfig, msgMap map[st
 		}
 	}
 
-	// Always include created_at.
-	cols = append(cols, "created_at")
-	placeholders = append(placeholders, "datetime('now')")
-
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		security.QuoteIdent(ws.WriteToTable),
-		strings.Join(cols, ", "),
-		strings.Join(placeholders, ", "),
-	)
-	if _, err := projectDB.ExecWrite(query, vals...); err != nil {
+	if err := store.InsertWSRow(projectDB, ws.WriteToTable, cols, vals); err != nil {
 		slog.Warn("ws write_to_table insert failed", "table", ws.WriteToTable, "error", err)
 	}
 }
@@ -156,16 +138,13 @@ func pruneEphemeralRoom(projectDB *db.ProjectDB, ws *wsEndpointConfig, roomName 
 			return
 		}
 	}
-	query := fmt.Sprintf("DELETE FROM %s WHERE %s = ?",
-		security.QuoteIdent(ws.WriteToTable), security.QuoteIdent(ws.RoomColumn))
-	args := []any{roomName}
+	tenantCol := ""
 	if ws.TenantColumn != "" && tenantID > 0 && validTableName.MatchString(ws.TenantColumn) {
 		if _, ok := ws.tableColumns[ws.TenantColumn]; ok {
-			query += fmt.Sprintf(" AND %s = ?", security.QuoteIdent(ws.TenantColumn))
-			args = append(args, tenantID)
+			tenantCol = ws.TenantColumn
 		}
 	}
-	if _, err := projectDB.ExecWrite(query, args...); err != nil {
+	if err := store.DeleteWSEphemeralRoom(projectDB, ws.WriteToTable, ws.RoomColumn, roomName, tenantCol, tenantID); err != nil {
 		slog.Warn("ws ephemeral room prune failed", "table", ws.WriteToTable, "room", roomName, "error", err)
 	}
 }
@@ -188,20 +167,15 @@ func pruneExpiredMessages(projectDB *db.ProjectDB, ws *wsEndpointConfig, tenantI
 			return
 		}
 	}
-	// MessageTTLSeconds is a validated int (never user text), so embedding it in
-	// the datetime modifier is injection-safe.
-	query := fmt.Sprintf("DELETE FROM %s WHERE created_at < datetime('now', '-%d seconds')",
-		security.QuoteIdent(ws.WriteToTable), ws.MessageTTLSeconds)
-	var args []any
 	// Scope to the tenant when the endpoint is tenanted so one tenant's sweep
 	// never reaches another's rows (age applies per tenant either way).
+	tenantCol := ""
 	if ws.TenantColumn != "" && tenantID > 0 && validTableName.MatchString(ws.TenantColumn) {
 		if _, ok := ws.tableColumns[ws.TenantColumn]; ok {
-			query += fmt.Sprintf(" AND %s = ?", security.QuoteIdent(ws.TenantColumn))
-			args = append(args, tenantID)
+			tenantCol = ws.TenantColumn
 		}
 	}
-	if _, err := projectDB.ExecWrite(query, args...); err != nil {
+	if err := store.DeleteWSExpiredMessages(projectDB, ws.WriteToTable, ws.MessageTTLSeconds, tenantCol, tenantID); err != nil {
 		slog.Warn("ws expired-message prune failed", "table", ws.WriteToTable, "error", err)
 	}
 }

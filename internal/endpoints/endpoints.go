@@ -65,7 +65,7 @@ func AuthModel(requiresAuth, publicRead bool, requiredRole, ownerColumn, ownerSc
 // page route, so link checks must not resolve it against the page table. The public
 // server's route table is held to this list by a test, so a new namespace cannot be
 // mounted without being named here.
-var PlatformRoutePrefixes = []string{"/api/", "/files/", "/feed/", "/webhooks/", "/payments/", "/__of/"}
+var PlatformRoutePrefixes = []string{"/api/", "/files/", "/feed/", "/webhooks/", "/payments/", "/__of/", "/mqtt"}
 
 // IsPlatformRoute reports whether path lies under a platform-owned namespace.
 func IsPlatformRoute(path string) bool {

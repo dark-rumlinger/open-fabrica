@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -58,13 +59,18 @@ func (w *Worker) maybeGenerateTitle(ctx context.Context) {
 
 	taken, _ := models.ListProjectNames(w.deps.DB.DB)
 	var title string
+	sawCandidates := false
 	for attempt := 0; attempt < maxTitleAttempts; attempt++ {
 		candidates, err := w.titleCompletion(ctx, titleSystemPrompt, titleUserMsg(desc, taken), 48, titleGenTimeout)
 		if err != nil {
 			w.logger.Warn("title generation failed, keeping auto-minted name", "error", err)
 			return
 		}
-		for _, candidate := range parseTitleCandidates(candidates) {
+		parsed := parseTitleCandidates(candidates)
+		if len(parsed) > 0 {
+			sawCandidates = true
+		}
+		for _, candidate := range parsed {
 			if strings.EqualFold(candidate, project.Name) {
 				continue
 			}
@@ -80,6 +86,10 @@ func (w *Worker) maybeGenerateTitle(ctx context.Context) {
 		}
 	}
 	if title == "" {
+		if !sawCandidates {
+			w.logger.Warn("title generation produced no usable candidates, keeping auto-minted name")
+			return
+		}
 		// Every attempt collided. Keep the minted name but clear the flag so
 		// we don't retry on every rebuild.
 		w.logger.Info("all generated titles already in use, keeping current name")
@@ -162,6 +172,9 @@ func (w *Worker) titleCompletion(ctx context.Context, system, userMsg string, ma
 	})
 	if err != nil {
 		return "", err
+	}
+	if strings.TrimSpace(resp.Content) == "" {
+		return "", fmt.Errorf("empty completion (stop_reason=%s, output_tokens=%d)", resp.StopReason, resp.Usage.OutputTokens)
 	}
 	return resp.Content, nil
 }

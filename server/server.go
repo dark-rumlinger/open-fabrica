@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"openfabrica/events"
+	"openfabrica/internal/mqtt"
 	"openfabrica/internal/msgcat"
 	"openfabrica/server/admin"
 	"openfabrica/server/deps"
@@ -38,6 +39,10 @@ type Server struct {
 	publicRouter chi.Router
 	deps         *ServerDeps
 	wsHub        events.WSBroadcaster
+	mqttHub      *mqtt.Hub
+	busSubID     uint64
+	mqttSubID    uint64
+	publicStop   func()
 }
 
 // WSBroadcaster returns the WebSocket broadcaster, allowing external components
@@ -136,7 +141,7 @@ func New(deps *ServerDeps) *Server {
 	hub := public.NewWSHub()
 	s.wsHub = hub
 	if deps.Bus != nil {
-		deps.Bus.Subscribe(events.EventWSReducerChanged, func(e events.Event) {
+		s.busSubID = deps.Bus.Subscribe(events.EventWSReducerChanged, func(e events.Event) {
 			if path, _ := e.Payload["endpoint_path"].(string); path != "" {
 				hub.ReloadEndpointReducer(e.ProjectID, path)
 			}
@@ -159,7 +164,15 @@ func New(deps *ServerDeps) *Server {
 	if deps.Engine != nil {
 		publicDeps.CallLLM = deps.Engine.CallLLM
 	}
-	public.RegisterRoutes(s.publicRouter, publicDeps)
+	mqttHub := public.NewMQTTHub(publicDeps)
+	publicDeps.MQTTHub = mqttHub
+	s.mqttHub = mqttHub
+	if deps.Bus != nil {
+		s.mqttSubID = deps.Bus.Subscribe(events.EventMQTTConfigChanged, func(e events.Event) {
+			mqttHub.Reload(e.ProjectID)
+		})
+	}
+	s.publicStop = public.RegisterRoutes(s.publicRouter, publicDeps)
 
 	return s
 }
@@ -265,10 +278,28 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
+	if s.deps.Config.MQTTPort > 0 && s.mqttHub != nil {
+		mqttAddr := fmt.Sprintf("0.0.0.0:%d", s.deps.Config.MQTTPort)
+		mqttListener, merr := lc.Listen(ctx, "tcp", mqttAddr)
+		if merr != nil {
+			_ = adminListener.Close()
+			_ = publicListener.Close()
+			return fmt.Errorf("listen mqtt %s: %w", mqttAddr, merr)
+		}
+		go func() {
+			s.deps.Logger.Info("mqtt tcp broker listening", "addr", mqttAddr)
+			if err := mqtt.ServeTCP(ctx, mqttListener, s.mqttHub.HandleTCPConn); err != nil {
+				errCh <- fmt.Errorf("mqtt server: %w", err)
+			}
+		}()
+	}
+
 	// Wait for context cancellation, OS signal, or server error.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
+	var serveErr error
 	select {
 	case <-ctx.Done():
 		s.deps.Logger.Info("context cancelled, shutting down servers")
@@ -276,7 +307,20 @@ func (s *Server) Start(ctx context.Context) error {
 		s.deps.Logger.Info("received signal, shutting down servers", "signal", sig)
 	case err := <-errCh:
 		s.deps.Logger.Error("server error, shutting down", "error", err)
-		return err
+		serveErr = err
+	}
+
+	if s.busSubID != 0 && s.deps.Bus != nil {
+		s.deps.Bus.Unsubscribe(s.busSubID)
+	}
+	if s.mqttSubID != 0 && s.deps.Bus != nil {
+		s.deps.Bus.Unsubscribe(s.mqttSubID)
+	}
+	if s.mqttHub != nil {
+		s.mqttHub.CloseAll()
+	}
+	if s.publicStop != nil {
+		s.publicStop()
 	}
 
 	// Graceful shutdown with a shared deadline; run admin + public in parallel
@@ -307,5 +351,8 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.deps.Logger.Info("servers stopped")
+	if serveErr != nil {
+		return serveErr
+	}
 	return shutdownErr
 }

@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"openfabrica/engine/snapshotbuild"
 )
@@ -187,6 +190,9 @@ func (w *Worker) completeBuild(ctx context.Context, knownIssues bool, issueReaso
 	// Append the structured go-live card payload. The chat UI renders it as a
 	// card and falls back to the markdown above if it can't parse it.
 	payload := buildGoLivePayload(snap, demo, previewURL, settingsURL, knownIssues, flowUnverified, flows)
+	if w.saveBuildPreview(ctx) {
+		payload.PreviewImage = fmt.Sprintf("/admin/api/projects/%d/preview.png?v=%d", w.projectID, time.Now().Unix())
+	}
 	if knownIssues {
 		payload.IssueReasons = issueReasons
 	}
@@ -197,4 +203,35 @@ func (w *Worker) completeBuild(ctx context.Context, knownIssues bool, issueReaso
 	w.publishVerbatim(b.String())
 
 	w.goLive()
+}
+
+// saveBuildPreview persists the desktop '/' screenshot as preview.png in the
+// project directory so Admin Chat and Telegram can display it. Returns true when a
+// non-empty PNG was written.
+func (w *Worker) saveBuildPreview(ctx context.Context) bool {
+	if w.deps.ProjectDBManager == nil {
+		return false
+	}
+	png := w.bs().previewPNG
+	if len(png) == 0 {
+		baseURL, hostHeader := w.probeTarget()
+		if baseURL != "" {
+			if shots, err := captureScreenshotsFn(w.validationContext(ctx), w.pdb.Reader(), baseURL, hostHeader, 1); err == nil {
+				for _, s := range shots {
+					if s.Viewport == "desktop" && len(s.PNG) > 0 {
+						png = s.PNG
+						break
+					}
+				}
+			}
+		}
+	}
+	if len(png) == 0 {
+		return false
+	}
+	dir := w.deps.ProjectDBManager.ProjectDir(w.projectID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return false
+	}
+	return os.WriteFile(filepath.Join(dir, "preview.png"), png, 0644) == nil
 }

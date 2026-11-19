@@ -12,6 +12,7 @@
 package funcsandbox
 
 import (
+	"container/list"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +62,7 @@ const (
 	MaxFetches       = 8          // ctx.fetch calls per invocation
 	MaxLLMCalls      = 4          // ctx.llm calls per invocation (each is a real, billable completion)
 	MaxCheckouts     = 3          // ctx.checkout calls per invocation (each opens a real provider session)
+	MaxMQTTPublishes = 16         // ctx.mqtt.publish calls per invocation
 )
 
 // Write is a durable DB write the handler declared via ctx.insert/update/upsert. Like
@@ -122,6 +124,9 @@ type Deps struct {
 	// description?, currency?, metadata?}) and returns {checkout_url, payment_id, ...}.
 	// Nil when no payments implementation is linked (ctx.checkout then throws).
 	Checkout func(args map[string]any) (map[string]any, error)
+	// MQTTPublish publishes a message to the project's MQTT broker.
+	// Nil when MQTT is not wired (ctx.mqtt.publish then throws).
+	MQTTPublish func(topic, payload string, qos int, retain bool) error
 	// NowMS is the clock ctx.now() returns (Unix milliseconds).
 	NowMS int64
 	// Budget overrides the wall-clock cap for this invocation (0 = package default),
@@ -150,14 +155,20 @@ type cachedProg struct {
 }
 
 // maxCachedPrograms bounds the program cache. Handler sources change as the model edits
-// functions, so keying on source would otherwise grow without limit. When the cap is
-// hit we drop the whole cache; entries recompile lazily. 512 covers a project's live
-// endpoints plus recent edits.
+// functions, so keying on source would otherwise grow without limit. Evicts the
+// least-recently-used entry when full so active handlers stay warm. 512 covers a
+// project's live endpoints plus recent edits.
 const maxCachedPrograms = 512
 
+type progEntry struct {
+	key  string
+	prog cachedProg
+}
+
 var (
-	progMu    sync.RWMutex
-	progCache = map[string]cachedProg{}
+	progMu    sync.Mutex
+	progCache = map[string]*list.Element{}
+	progOrder = list.New()
 )
 
 // errNoHandlerFunc is returned when source parses but defines no handler. A sentinel
@@ -168,12 +179,14 @@ var errNoHandlerFunc = errors.New("must define a function handler(req, ctx)")
 // memoizing both keyed on the source. The parse and the async-detection run at
 // most once per distinct handler; every later request reuses the result.
 func getProgram(code string) (cachedProg, error) {
-	progMu.RLock()
-	cp, ok := progCache[code]
-	progMu.RUnlock()
-	if ok {
+	progMu.Lock()
+	if elem, ok := progCache[code]; ok {
+		progOrder.MoveToFront(elem)
+		cp := elem.Value.(*progEntry).prog
+		progMu.Unlock()
 		return cp, nil
 	}
+	progMu.Unlock()
 
 	prog, err := goja.Compile("handler", code, false)
 	if err != nil {
@@ -212,10 +225,19 @@ func getProgram(code string) (cachedProg, error) {
 	entry := cachedProg{prog: prog, async: async}
 
 	progMu.Lock()
-	if len(progCache) >= maxCachedPrograms {
-		progCache = map[string]cachedProg{}
+	if elem, ok := progCache[code]; ok {
+		progOrder.MoveToFront(elem)
+		elem.Value.(*progEntry).prog = entry
+	} else {
+		if len(progCache) >= maxCachedPrograms {
+			if tail := progOrder.Back(); tail != nil {
+				progOrder.Remove(tail)
+				delete(progCache, tail.Value.(*progEntry).key)
+			}
+		}
+		elem := progOrder.PushFront(&progEntry{key: code, prog: entry})
+		progCache[code] = elem
 	}
-	progCache[code] = entry
 	progMu.Unlock()
 	return entry, nil
 }
@@ -295,6 +317,53 @@ func (h *Handler) Run(req map[string]any, deps Deps) (resp *Response, writes []W
 	// is also available - a function needs no determinism, unlike the reducer).
 	_ = ctx.Set("now", func() int64 { return deps.NowMS })
 	_ = ctx.Set("random", func() float64 { return rand.Float64() })
+
+	var mqttPubs int
+	mqttObj := h.vm.NewObject()
+	_ = mqttObj.Set("publish", func(call goja.FunctionCall) goja.Value {
+		if deps.MQTTPublish == nil {
+			panic(h.vm.NewGoError(errors.New("ctx.mqtt.publish is not available")))
+		}
+		mqttPubs++
+		if mqttPubs > MaxMQTTPublishes {
+			panic(h.vm.NewGoError(fmt.Errorf("ctx.mqtt.publish limit (%d) exceeded", MaxMQTTPublishes)))
+		}
+		if len(call.Arguments) < 2 {
+			panic(h.vm.NewGoError(errors.New("ctx.mqtt.publish(topic, payload, opts?) requires topic and payload")))
+		}
+		topic := call.Arguments[0].String()
+		var payload string
+		rawPayload := call.Arguments[1].Export()
+		switch v := rawPayload.(type) {
+		case string:
+			payload = v
+		default:
+			b, jerr := json.Marshal(v)
+			if jerr != nil {
+				panic(h.vm.NewGoError(fmt.Errorf("ctx.mqtt.publish payload: %w", jerr)))
+			}
+			payload = string(b)
+		}
+		var qos int
+		var retain bool
+		if len(call.Arguments) >= 3 && !goja.IsUndefined(call.Arguments[2]) && !goja.IsNull(call.Arguments[2]) {
+			if opts, ok := call.Arguments[2].Export().(map[string]any); ok {
+				if q, ok := opts["qos"].(int64); ok {
+					qos = int(q)
+				} else if qf, ok := opts["qos"].(float64); ok {
+					qos = int(qf)
+				}
+				if r, ok := opts["retain"].(bool); ok {
+					retain = r
+				}
+			}
+		}
+		if err := deps.MQTTPublish(topic, payload, qos, retain); err != nil {
+			panic(h.vm.NewGoError(err))
+		}
+		return goja.Undefined()
+	})
+	_ = ctx.Set("mqtt", mqttObj)
 
 	// ctx.query(sql, params?) -> rows. Synchronous read; the injected closure owns
 	// the SELECT-only guard and row cap. Returning an error makes goja throw it,

@@ -190,7 +190,7 @@ func TestPlanGuideBlockInjectsBodies(t *testing.T) {
 	// Opt-in: a plan that declares guides:["voxel_worlds"] DOES get the blocky-world
 	// recipe (chunk meshing, the camera look-direction break/place snippet).
 	voxelPlan := &Plan{
-		Goal:              "A Minecraft-style block world",
+		Goal:              "A blocky 3D sandbox world",
 		ExternalLibraries: []LibrarySpec{{Name: "three.js", Kind: "module", ModuleName: "three"}},
 		Guides:            []string{"voxel_worlds"},
 	}
