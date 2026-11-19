@@ -14,15 +14,17 @@ var ErrBuildNotFound = errors.New("build not found")
 
 // BuildSummary holds summary metrics for a single engine run.
 type BuildSummary struct {
-	ID                string  `json:"id"`
-	StartedAt         string  `json:"started_at"`
-	CompletedAt       *string `json:"completed_at,omitempty"`
-	Status            string  `json:"status"`
-	FinalStage        *string `json:"final_stage,omitempty"`
-	TotalInputTokens  int     `json:"total_input_tokens"`
-	TotalOutputTokens int     `json:"total_output_tokens"`
-	EngineVersion     string  `json:"engine_version,omitempty"`
-	EngineBuiltAt     string  `json:"engine_built_at,omitempty"`
+	ID                    string  `json:"id"`
+	StartedAt             string  `json:"started_at"`
+	CompletedAt           *string `json:"completed_at,omitempty"`
+	Status                string  `json:"status"`
+	FinalStage            *string `json:"final_stage,omitempty"`
+	TotalInputTokens      int     `json:"total_input_tokens"`
+	TotalOutputTokens     int     `json:"total_output_tokens"`
+	TotalCacheReadTokens  int     `json:"total_cache_read_tokens"`
+	TotalCacheWriteTokens int     `json:"total_cache_write_tokens"`
+	EngineVersion         string  `json:"engine_version,omitempty"`
+	EngineBuiltAt         string  `json:"engine_built_at,omitempty"`
 }
 
 // BuildTimelineRow represents one chronological entry in a build timeline.
@@ -55,9 +57,10 @@ func LoadBuildSummary(reader *sql.DB, runID string) (*BuildSummary, error) {
 		return nil, err
 	}
 	if err := reader.QueryRow(
-		`SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+		`SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+		        COALESCE(SUM(cache_read_input_tokens), 0), COALESCE(SUM(cache_creation_input_tokens), 0)
 		 FROM of_llm_calls WHERE run_id = ? AND source = 'engine'`, runID,
-	).Scan(&b.TotalInputTokens, &b.TotalOutputTokens); err != nil {
+	).Scan(&b.TotalInputTokens, &b.TotalOutputTokens, &b.TotalCacheReadTokens, &b.TotalCacheWriteTokens); err != nil {
 		return nil, err
 	}
 	if completedAt.Valid {
@@ -79,12 +82,15 @@ func ListBuilds(pdb *db.ProjectDB, limit int) (builds []BuildSummary, total int,
 
 	rows, err := reader.Query(
 		`SELECT r.id, r.started_at, r.completed_at, r.status, r.stage,
-		 COALESCE(c.in_tokens, 0), COALESCE(c.out_tokens, 0)
+		 COALESCE(c.in_tokens, 0), COALESCE(c.out_tokens, 0),
+		 COALESCE(c.cache_read_tokens, 0), COALESCE(c.cache_write_tokens, 0)
 		 FROM of_runs r
 		 LEFT JOIN (
 		   SELECT run_id,
-		          SUM(input_tokens)  AS in_tokens,
-		          SUM(output_tokens) AS out_tokens
+		          SUM(input_tokens)                AS in_tokens,
+		          SUM(output_tokens)               AS out_tokens,
+		          SUM(cache_read_input_tokens)     AS cache_read_tokens,
+		          SUM(cache_creation_input_tokens) AS cache_write_tokens
 		     FROM of_llm_calls WHERE source = 'engine' GROUP BY run_id
 		 ) c ON c.run_id = r.id
 		 ORDER BY r.started_at DESC, r.id DESC LIMIT ?`,
@@ -101,7 +107,8 @@ func ListBuilds(pdb *db.ProjectDB, limit int) (builds []BuildSummary, total int,
 		var completedAt sql.NullString
 		var stage string
 		if rows.Scan(&b.ID, &b.StartedAt, &completedAt, &b.Status, &stage,
-			&b.TotalInputTokens, &b.TotalOutputTokens) != nil {
+			&b.TotalInputTokens, &b.TotalOutputTokens,
+			&b.TotalCacheReadTokens, &b.TotalCacheWriteTokens) != nil {
 			continue
 		}
 		if completedAt.Valid {

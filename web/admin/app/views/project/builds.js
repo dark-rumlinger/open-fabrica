@@ -107,7 +107,12 @@ function renderBuildPill(b) {
     title: b.status,
     style: { background: statusDotColor(b.status) },
   });
-  const tokens = (b.total_input_tokens || 0) + (b.total_output_tokens || 0);
+  // Billed tokens = uncached input + cache-read + cache-write + output,
+  // matching the Cost Panel and the global Usage page.
+  const tokens = (b.total_input_tokens || 0)
+    + (b.total_cache_read_tokens || 0)
+    + (b.total_cache_write_tokens || 0)
+    + (b.total_output_tokens || 0);
   return h('button', { className: 'build-pill', type: 'button', 'aria-pressed': false }, [
     dot,
     h('span', { title: formatDateTime(b.started_at) }, formatRelative(b.started_at)),

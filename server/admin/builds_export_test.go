@@ -24,7 +24,8 @@ CREATE TABLE of_runs (
 );
 CREATE TABLE of_llm_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, source TEXT,
-  input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0
+  input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+  cache_read_input_tokens INTEGER DEFAULT 0, cache_creation_input_tokens INTEGER DEFAULT 0
 );
 CREATE TABLE of_chat_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
