@@ -268,6 +268,7 @@ func exchangeOAuthCode(op *oauthProviderConfig, code, redirectURI, clientSecret 
 	}
 
 	client := oauthHTTPClient(op.TokenURL)
+	// #nosec G704 -- routed through netguard.SSRFSafeClientAllowingHost
 	req, err := http.NewRequest(http.MethodPost, op.TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
@@ -275,6 +276,7 @@ func exchangeOAuthCode(op *oauthProviderConfig, code, redirectURI, clientSecret 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
+	// #nosec G704 -- routed through netguard.SSRFSafeClientAllowingHost
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -306,6 +308,7 @@ func exchangeOAuthCode(op *oauthProviderConfig, code, redirectURI, clientSecret 
 
 func fetchOAuthUserInfo(op *oauthProviderConfig, accessToken string) (map[string]any, error) {
 	client := oauthHTTPClient(op.UserinfoURL)
+	// #nosec G704 -- routed through netguard.SSRFSafeClientAllowingHost
 	req, err := http.NewRequest(http.MethodGet, op.UserinfoURL, nil)
 	if err != nil {
 		return nil, err
@@ -313,6 +316,7 @@ func fetchOAuthUserInfo(op *oauthProviderConfig, accessToken string) (map[string
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
 
+	// #nosec G704 -- routed through netguard.SSRFSafeClientAllowingHost
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
