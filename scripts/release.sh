@@ -102,6 +102,7 @@ fi
 echo "  windows/amd64"
 go generate ./cmd/openfabrica
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o "$STAGING/$BINARY.exe" ./cmd/openfabrica
+rm -f cmd/openfabrica/resource.syso
 for f in $WIN_EXTRAS; do
   [ -f "$SCRIPTS_DIR/$f" ] && cp "$SCRIPTS_DIR/$f" "$STAGING/"
 done
@@ -109,6 +110,16 @@ if command -v zip >/dev/null 2>&1; then
   (cd release/staging && zip -qr "../OpenFabrica_${VERSION}_windows_amd64.zip" OpenFabrica)
 else
   powershell -NoProfile -Command "Compress-Archive -Path 'release/staging/OpenFabrica' -DestinationPath 'release/OpenFabrica_${VERSION}_windows_amd64.zip'"
+fi
+rm "$STAGING/$BINARY.exe"
+
+# Windows ARM64 (.zip, Windows on ARM)
+echo "  windows/arm64"
+GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" -o "$STAGING/$BINARY.exe" ./cmd/openfabrica
+if command -v zip >/dev/null 2>&1; then
+  (cd release/staging && zip -qr "../OpenFabrica_${VERSION}_windows_arm64.zip" OpenFabrica)
+else
+  powershell -NoProfile -Command "Compress-Archive -Path 'release/staging/OpenFabrica' -DestinationPath 'release/OpenFabrica_${VERSION}_windows_arm64.zip'"
 fi
 rm "$STAGING/$BINARY.exe"
 for f in $WIN_EXTRAS; do rm -f "$STAGING/$f"; done
@@ -124,10 +135,16 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o "$STAGING/$BIN
 tar -czf "$OUTDIR/OpenFabrica_${VERSION}_linux_amd64.tar.gz" -C release/staging OpenFabrica/
 rm "$STAGING/$BINARY"
 
-# Linux ARM64
+# Linux ARM64 (64-bit Raspberry Pi / ARM servers)
 echo "  linux/arm64"
 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" -o "$STAGING/$BINARY" ./cmd/openfabrica
 tar -czf "$OUTDIR/OpenFabrica_${VERSION}_linux_arm64.tar.gz" -C release/staging OpenFabrica/
+rm "$STAGING/$BINARY"
+
+# Linux ARMv7 (32-bit Raspberry Pi OS)
+echo "  linux/armv7"
+GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags "$LDFLAGS" -o "$STAGING/$BINARY" ./cmd/openfabrica
+tar -czf "$OUTDIR/OpenFabrica_${VERSION}_linux_armv7.tar.gz" -C release/staging OpenFabrica/
 rm "$STAGING/$BINARY"
 
 # macOS AMD64
