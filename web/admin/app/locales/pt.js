@@ -2078,7 +2078,7 @@ export default {
   "examples.7.label": "PWA instalável",
   "examples.7.text": "Um rastreador de hábitos simples como PWA instalável, com suporte offline e ícone na tela inicial. Check-ins diários e uma visão de sequência semanal.",
   "examples.8.label": "Estufa inteligente (MQTT)",
-  "examples.8.text": "Um monitor de estufa inteligente via MQTT. Sensores publicam temperatura, umidade e umidade do solo em SQLite com medidores ao vivo, gráfico de 24 h, alertas de solo seco e botões para ligar o ventilador e a bomba d'água, além de um botão Simular sensor para testar sem hardware.",
+  "examples.8.text": "Um monitor de estufa inteligente via MQTT. Sensores publicam temperatura, umidade e umidade do solo, com medidores ao vivo, gráfico de 24 h, alertas de solo seco e botões para ligar o ventilador e a bomba d'água, além de um botão Simular sensor para testar sem hardware.",
   "chat.stopped": "Interrompido.",
   "chat.sendFailed": "Mensagem não enviada: {reason}. Seu texto voltou para a caixa, pressione Enter para tentar de novo.",
   "tabs.mqtt": "MQTT",

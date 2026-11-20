@@ -139,7 +139,7 @@ func RegisterRoutes(r chi.Router, deps *Deps) func() {
 
 	// Tear down live real-time connections, MQTT brokers, and caches whenever a
 	// project is deleted (whether from the admin UI or the Telegram bot).
-	var delSubID uint64
+	var delSubID, mqttSubID, watchSubID uint64
 	if deps.Bus != nil {
 		delSubID = deps.Bus.Subscribe(events.EventProjectDeleted, func(e events.Event) {
 			h.InvalidateProject(e.ProjectID)
@@ -150,11 +150,27 @@ func RegisterRoutes(r chi.Router, deps *Deps) func() {
 				deps.MQTTHub.CloseProject(e.ProjectID)
 			}
 		})
+		mqttSubID = deps.Bus.Subscribe(events.EventMQTTPublish, func(e events.Event) {
+			if h.apiCache != nil {
+				h.apiCache.invalidateProject(e.ProjectID)
+			}
+		})
+		watchSubID = deps.Bus.Subscribe(events.EventFolderFileDropped, func(e events.Event) {
+			if h.apiCache != nil {
+				h.apiCache.invalidateProject(e.ProjectID)
+			}
+		})
 	}
 
 	return func() {
 		if delSubID != 0 && deps.Bus != nil {
 			deps.Bus.Unsubscribe(delSubID)
+		}
+		if mqttSubID != 0 && deps.Bus != nil {
+			deps.Bus.Unsubscribe(mqttSubID)
+		}
+		if watchSubID != 0 && deps.Bus != nil {
+			deps.Bus.Unsubscribe(watchSubID)
 		}
 		h.apiCache.Close()
 	}

@@ -576,6 +576,100 @@ func TestSessionRolloverKeysOnTotalContext(t *testing.T) {
 	}
 }
 
+// TestSessionRolloverCarriesRejectionsAndTurnEndInject: when a turn crosses the rollover
+// threshold, its tool calls and OnTurnEnd hook still run before the next iteration checks
+// st.lastContextTokens >= st.rolloverAt. Any rejected tool call or OnTurnEnd injection
+// from that final turn must be carried into the reseeded segment rather than discarded
+// with the expiring segment's transcript.
+func TestSessionRolloverCarriesRejectionsAndTurnEndInject(t *testing.T) {
+	small := func(st enginetest.Step) enginetest.Step {
+		st.Resp.Usage = llm.Usage{InputTokens: 2, OutputTokens: 1}
+		return st
+	}
+	p := &enginetest.Provider{Steps: []enginetest.Step{
+		// Segment 1 turn 0: in=10 > threshold 5, calls an invalid action so the call fails.
+		enginetest.Calls(llm.ToolCall{ID: "bad1", Name: "test_probe_tool", Arguments: `{"action":"no_such_action"}`}),
+		// Segment 2 turn 0: acts on the carried rejection/injection, then turn 1 finishes.
+		small(enginetest.Calls(echoCall("c2", "fixed"))),
+		small(enginetest.Text("fixed after rollover")),
+	}}
+	s := testSession(t, p)
+
+	spec := buildSpecForTest()
+	spec.RolloverInputTokens = 5
+	spec.OnTurnEnd = func(iter int, _ []llm.ToolCall, _ int) (string, *ending) {
+		if iter == 0 {
+			return "Owner message received mid-build: please use dark mode.", nil
+		}
+		return "", nil
+	}
+	spec.Reseed = func() ([]llm.Message, error) {
+		return []llm.Message{{Role: llm.RoleUser, Content: "recap: continue the task"}}, nil
+	}
+
+	res, err := s.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Segments != 2 || len(p.Requests) != 3 {
+		t.Fatalf("segments=%d requests=%d, want 2/3", res.Segments, len(p.Requests))
+	}
+	var sawRejection, sawInject bool
+	for _, m := range p.Requests[1].Messages {
+		if strings.Contains(m.Content, "test_probe_tool") && strings.Contains(m.Content, "rejected on the turn right before context rollover") {
+			sawRejection = true
+		}
+		if strings.Contains(m.Content, "Owner message received mid-build: please use dark mode.") {
+			sawInject = true
+		}
+	}
+	if !sawRejection {
+		t.Fatalf("reseeded segment did not carry the rejected tool result from the rollover turn: %+v", p.Requests[1].Messages)
+	}
+	if !sawInject {
+		t.Fatalf("reseeded segment did not carry the OnTurnEnd injection from the rollover turn: %+v", p.Requests[1].Messages)
+	}
+}
+
+// TestSessionRolloverDoesNotReplayPriorSegmentCache: when a segment rolls over without
+// changing the reseeded prompt (e.g. it only patched internal file bodies and rolled over
+// before completing a checklist item), segment 2's opening request has the exact same hash
+// as segment 1's. It must reach the provider rather than replaying segment 1's cached turn
+// from of_llm_cache in a loop.
+func TestSessionRolloverDoesNotReplayPriorSegmentCache(t *testing.T) {
+	small := func(st enginetest.Step) enginetest.Step {
+		st.Resp.Usage = llm.Usage{InputTokens: 2, OutputTokens: 1}
+		return st
+	}
+	p := &enginetest.Provider{Steps: []enginetest.Step{
+		enginetest.Calls(echoCall("c1", "segment 1 turn")),        // in=10 > threshold 5, cached under seed hash
+		small(enginetest.Calls(echoCall("c2", "segment 2 turn"))), // must be called on provider, not replayed from cache
+		small(enginetest.Text("segment 2 fresh answer")),
+	}}
+	s := testSession(t, p)
+
+	spec := buildSpecForTest()
+	spec.RolloverInputTokens = 5
+	// Reseed returns the exact same seed as segment 1 so RequestHash is identical.
+	spec.Reseed = func() ([]llm.Message, error) {
+		return append([]llm.Message(nil), spec.Seed...), nil
+	}
+
+	res, err := s.Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Segments != 2 {
+		t.Fatalf("segments=%d, want 2", res.Segments)
+	}
+	if p.CallCount() != 3 {
+		t.Fatalf("provider calls=%d, want 3 (segment 2 must not replay segment 1's cached response)", p.CallCount())
+	}
+	if res.Content != "segment 2 fresh answer" {
+		t.Fatalf("content=%q, want segment 2 fresh answer", res.Content)
+	}
+}
+
 // TestSessionPauseOnOwnerQuestion: a RequestsPause tool pauses the session.
 func TestSessionPauseOnOwnerQuestion(t *testing.T) {
 	p := &enginetest.Provider{Steps: []enginetest.Step{

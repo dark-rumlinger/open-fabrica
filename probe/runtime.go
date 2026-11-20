@@ -519,6 +519,14 @@ var environmentalNoisePatterns = []string{
 	"the connection used to load resources from ws://", // dev-mode websocket warnings
 }
 
+// FilterEnvironmentalNoise returns the subset of errs that is NOT headless-only
+// environmental noise (case-insensitive substring match against environmentalNoisePatterns).
+// Exported so in-build page probes (test_page) and the authoritative gate filter
+// headless-only warnings identically.
+func FilterEnvironmentalNoise(errs []string) []string {
+	return filterEnvironmentalNoise(errs)
+}
+
 // filterEnvironmentalNoise returns the subset of errs that is NOT headless-only
 // environmental noise (case-insensitive substring match against environmentalNoisePatterns).
 func filterEnvironmentalNoise(errs []string) []string {

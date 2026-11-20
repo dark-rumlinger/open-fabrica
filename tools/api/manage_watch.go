@@ -54,7 +54,7 @@ type WatchAdd struct {
 	Name         string `arg:"name,required" desc:"Unique watcher name (e.g. receipts_inbox, csv_imports)."`
 	Folder       string `arg:"folder" desc:"Optional local folder path to watch. Leave blank to auto-create the project's drop-zone folder (<project>/watch/<name>)."`
 	Glob         string `arg:"glob" desc:"Comma-separated filename patterns to match (default '*', e.g. '*.csv,*.json,*.txt')."`
-	FunctionPath string `arg:"function_path" desc:"Optional manage_function endpoint path invoked with {method:'WATCH', watcher, name, ext, size_bytes, mime_type, is_text, content}."`
+	FunctionPath string `arg:"function_path" desc:"Optional manage_function endpoint path invoked per file change with req = {method:'WATCH', watcher, folder, event:'created'|'modified'|'deleted', kind:'created'|'changed'|'deleted', path, rel_path, name, ext, size_bytes, size, mtime, mime_type, is_text, content, body:{...}}."`
 	PollSec      int    `arg:"poll_sec" max:"3600" desc:"Polling interval in seconds (default 5, min 2, max 3600)."`
 }
 
@@ -109,6 +109,7 @@ func (a *WatchAdd) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 		"glob":          w.Glob,
 		"function_path": w.FunctionPath,
 		"poll_sec":      w.PollSec,
+		"usage":         "The platform polls " + w.Folder + " every " + strconv.Itoa(w.PollSec) + "s (including subfolders), deduplicates seen files in SQLite, and invokes function_path per created/modified/deleted file with req.event ('created'|'modified'|'deleted'), req.kind ('created'|'changed'|'deleted'), req.path (relative path), req.name, req.size_bytes, req.mtime, req.mime_type, req.is_text, and req.content (also on req.body). Any server function can also call ctx.watch.list('" + w.Name + "') to read the live directory inventory {ok, available, folder, files:[{path, name, ext, size_bytes, mtime, is_dir}]}.",
 	}), nil
 }
 

@@ -30,8 +30,9 @@ tools; the platform wires them.
 - **Endpoints** - REST CRUD / view reads (`manage_api` create), custom server
   functions (`manage_function` create), auth (`manage_auth` / `manage_oauth` create),
   realtime WebSocket (a realtime tool's create; the `realtime_signaling` guide owns the
-  model choice), SSE (`manage_sse` create), LLM proxy (`manage_llm_proxy` create),
-  uploads, exports, feeds, and more.
+  model choice), SSE (`manage_sse` create), embedded MQTT broker & rules (`manage_mqtt`),
+  local drop-zone folder watchers (`manage_watch`), LAN discovery/Wake-on-LAN (`manage_lan`),
+  LLM proxy (`manage_llm_proxy` create), uploads, exports, feeds, and more.
 - **Scheduled tasks** - cron / native actions / (rarely) prompt schedules.
 
 ## Platform-managed helper modules (you do NOT author these)

@@ -75,3 +75,60 @@ setTimeout(function () {
 		t.Fatalf("expected a bootFailure from the /files/ console.error, got none")
 	}
 }
+
+// Headless-only environmental noise (like an autoplay NotAllowedError or a
+// ResizeObserver loop warning) must not false-fail verifyPageRender, while unwired
+// interactive controls are surfaced in deadControls so test_page warns before the
+// end-of-build gate.
+func TestVerifyPageRender_FiltersEnvironmentalNoiseAndSurfacesDeadControls(t *testing.T) {
+	if testing.Short() {
+		t.Skip("browser integration test; skipped under -short")
+	}
+
+	const appJS = `
+document.getElementById('live').addEventListener('click', function () {});
+// Simulate headless autoplay NotAllowedError logged from /files/app.js.
+console.error(new Error("NotAllowedError: play() failed because the user didn't interact with the document first."));
+`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/app.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript")
+		_, _ = w.Write([]byte(appJS))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!doctype html><html><body>
+<h1>Ready</h1>
+<button id="live">Live</button>
+<button id="dead">Unwired Save</button>
+<script type="module" src="/files/app.js"></script>
+</body></html>`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("test server port: %v", err)
+	}
+
+	ctx := &tools.ToolContext{Ctx: context.Background()}
+	report, rerr := verifyPageRender(ctx, "", port, "/", "")
+	if rerr != nil {
+		if errors.Is(rerr, browser.ErrBrowserUnavailable) {
+			t.Skip("headless browser unavailable")
+		}
+		t.Fatalf("verifyPageRender: %v", rerr)
+	}
+	if reason, failed := report.failureReason(); failed {
+		t.Fatalf("headless environmental noise must not hard-fail render: %s", reason)
+	}
+	if len(report.deadControls) == 0 {
+		t.Fatalf("expected deadControls to flag the unwired button, got none")
+	}
+}
+

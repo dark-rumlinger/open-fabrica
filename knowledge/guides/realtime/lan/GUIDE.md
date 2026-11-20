@@ -29,9 +29,31 @@ Inside any `manage_function` handler:
 - `ctx.lan.wake(mac, { broadcast?, port? })` → `{ ok, mac, broadcast, port }` — sends a Wake-on-LAN magic packet when a user clicks "Wake PC" in the app UI.
 - `ctx.lan.ping(host, port, timeoutMs?)` → `{ reachable, latency_ms, host, port }` — checks whether a NAS, server, printer, or broker on the LAN is online (max 2000ms timeout, private LAN / `.local` hosts only).
 
-## Local Folder Drop-Zone Watcher (`manage_watch`)
+## Local Folder Drop-Zone Watcher (`manage_watch` & `ctx.watch`)
 
-1. **Register a drop-zone:** `manage_watch add { name: "csv_imports", glob: "*.csv,*.json", function_path: "on-file-drop", poll_sec: 5 }`.
-   - Leave `folder` blank to auto-create the project's drop-zone directory (`<project>/watch/<name>`) and display its path to the user.
-   - When a matching file is dropped or updated, Open Fabrica deduplicates it via SQLite, emits a `folder.file_dropped` event (usable with `manage_triggers`), and invokes `function_path` with `req = { method: "WATCH", watcher, folder, name, ext, size_bytes, mime_type, is_text, content }` (UTF-8 text up to 256 KiB).
-2. **Inspect or remove:** `manage_watch list` / `manage_watch delete { name: "csv_imports" }`.
+1. **Register a watched folder:** `manage_watch add { name: "dropwatch", glob: "*", function_path: "watch/events", poll_sec: 2 }`.
+   - Leave `folder` blank to auto-create the project's drop-zone directory (`<project>/watch/<name>`) and surface its path in the tool response.
+   - Open Fabrica runs the watcher loop in Go (including subfolders), deduplicates file versions in SQLite, emits a `folder.file_dropped` event (usable with `manage_triggers`), and invokes `function_path` **once per created, modified, or deleted file** with:
+     `req = { method: "WATCH", watcher, folder, event: "created"|"modified"|"deleted", kind: "created"|"changed"|"deleted", path, rel_path, name, ext, size_bytes, size, mtime, mime_type, is_text, content, body: { ...same fields... } }` (`content` carries UTF-8 text up to 256 KiB when `is_text` is true).
+2. **Read live folder inventory inside any server function (`ctx.watch.list`):**
+   - `ctx.watch.list(watcherName?)` → `{ ok, available, watcher, folder, path, count, files: [{ path, name, ext, size_bytes, size, mtime, mtime_ms, is_dir }] }`.
+   - Use `ctx.watch.list()` in a `GET` state endpoint (or startup sync) to read the current baseline directory contents without needing a scheduled polling task.
+3. **Example `function_path` handler (`watch/events`):**
+   ```js
+   function handler(req, ctx) {
+     const ev = req.body || req;
+     if (!ev || !ev.name) return { ok: false };
+     const path = ev.path || ev.rel_path || ev.name;
+     const kind = ev.kind || (ev.event === 'modified' ? 'changed' : (ev.event || 'created'));
+     const nowIso = ev.mtime || new Date(ctx.now()).toISOString();
+     ctx.insert('watch_events', { kind, name: ev.name, path, size: ev.size_bytes || 0, mtime: nowIso, ts: nowIso });
+     if (kind === 'deleted') {
+       ctx.delete('watch_files', { path });
+     } else {
+       ctx.upsert('watch_files', { path, name: ev.name, size: ev.size_bytes || 0, mtime: nowIso, is_dir: 0 }, ['path']);
+     }
+     return { ok: true, kind, path };
+   }
+   ```
+   - When `watch_events` is backed by a `manage_api` endpoint and a `manage_sse` stream, `ctx.insert('watch_events', ...)` automatically broadcasts a `data.insert` SSE event to connected browsers!
+4. **Inspect or remove:** `manage_watch list` / `manage_watch delete { name: "dropwatch" }`.

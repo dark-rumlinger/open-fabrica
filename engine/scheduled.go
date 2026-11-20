@@ -275,7 +275,11 @@ func runNativeActionSync(deps *Deps, cdeps actionexec.CompleteDeps, pdb *db.Proj
 			actionErr = fmt.Errorf("run_function requires endpoint_path")
 			break
 		}
-		result, actionErr = runScheduledFunction(cdeps, pdb, projectID, action.EndpointPath, taskID)
+		var bus *events.Bus
+		if deps != nil {
+			bus = deps.Bus
+		}
+		result, actionErr = runScheduledFunction(cdeps, bus, pdb, projectID, action.EndpointPath, taskID)
 
 	default:
 		actionErr = fmt.Errorf("unknown native action type: %s", action.Type)
@@ -290,7 +294,7 @@ func runNativeActionSync(deps *Deps, cdeps actionexec.CompleteDeps, pdb *db.Proj
 // policy the HTTP endpoint and run_function trigger use - so cron-driven function logic
 // can't drift from the other two call paths. Scheduler-flavoured: req.body carries the
 // source + task id, no HTTP caller.
-func runScheduledFunction(cdeps actionexec.CompleteDeps, pdb *db.ProjectDB, projectID int, endpointPath string, taskID int) (string, error) {
+func runScheduledFunction(cdeps actionexec.CompleteDeps, bus *events.Bus, pdb *db.ProjectDB, projectID int, endpointPath string, taskID int) (string, error) {
 	var code, secrets string
 	var timeoutMS int
 	err := pdb.Reader().QueryRow(
@@ -317,6 +321,7 @@ func runScheduledFunction(cdeps actionexec.CompleteDeps, pdb *db.ProjectDB, proj
 		"user":    nil,
 	}
 	rt := funcexec.NewRuntime(projectID, pdb.Reader(), pdb.Writer(), cdeps)
+	rt.Bus = bus
 	resp, err := funcexec.Execute(rt, spec, req)
 	if err != nil {
 		return "", err

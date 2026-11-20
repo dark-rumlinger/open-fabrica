@@ -2173,7 +2173,7 @@ export default {
   'examples.7.label': 'Installable PWA',
   'examples.7.text': 'A simple habit tracker as an installable PWA, with offline support and a home-screen icon. Daily check-ins and a weekly streak view.',
   "examples.8.label": "Smart greenhouse (MQTT)",
-  "examples.8.text": "A smart greenhouse monitor over MQTT. Sensors publish temperature, humidity, and soil moisture, stored in SQLite with live gauges, a 24h chart, low-moisture alerts, and buttons to toggle the fan and water pump, plus a Simulate Sensor button so it can be tested without hardware.",
+  "examples.8.text": "A smart greenhouse monitor over MQTT. Sensors publish temperature, humidity, and soil moisture, with live gauges, a 24h chart, low-moisture alerts, and buttons to toggle the fan and water pump, plus a Simulate Sensor button so it can be tested without hardware.",
   'chat.stopped': 'Stopped.',
   'chat.sendFailed': 'Message not sent: {reason}. Your text is back in the box, press Enter to retry.',
   "tabs.mqtt": "MQTT",

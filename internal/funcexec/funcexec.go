@@ -15,7 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"openfabrica/events"
 	"openfabrica/internal/actionexec"
+	"openfabrica/internal/folderwatch"
 	"openfabrica/internal/funcsandbox"
 	"openfabrica/internal/lan"
 	"openfabrica/internal/netguard"
@@ -58,6 +60,7 @@ type Runtime struct {
 	// payment provider (a project or global connector) and checks for a user-flow replay.
 	ProjectID int
 	GlobalDB  *sql.DB
+	Bus       *events.Bus
 }
 
 // CheckoutFunc opens a hosted checkout for a handler's ctx.checkout call and returns
@@ -141,10 +144,86 @@ func ExecuteContext(parent context.Context, rt Runtime, spec Spec, req map[strin
 	if err != nil {
 		return nil, err
 	}
-	if err := applyWrites(rt.Reader, rt.Writer, writes); err != nil {
+	if err := applyWrites(rt, writes); err != nil {
 		return nil, err
 	}
 	return resp, nil
+}
+
+func runWatchList(reader *sql.DB, target string) (map[string]any, error) {
+	if reader == nil {
+		return map[string]any{"ok": false, "available": false, "error": "project database is unavailable"}, nil
+	}
+	watchers, err := store.ListFolderWatchers(reader)
+	if err != nil || len(watchers) == 0 {
+		return map[string]any{"ok": false, "available": false, "error": "no folder watcher is configured"}, nil
+	}
+	t := strings.TrimSpace(target)
+	var chosen *store.FolderWatcher
+	for i := range watchers {
+		w := &watchers[i]
+		if !w.Enabled {
+			continue
+		}
+		if t == "" || strings.EqualFold(w.Name, t) || strings.EqualFold(w.Folder, t) {
+			chosen = w
+			break
+		}
+	}
+	if chosen == nil {
+		// Fall back to the first enabled watcher so callers passing a config key or relative path still resolve safely to the project's registered watch folder.
+		for i := range watchers {
+			if watchers[i].Enabled {
+				chosen = &watchers[i]
+				break
+			}
+		}
+	}
+	if chosen == nil {
+		return map[string]any{"ok": false, "available": false, "error": "no enabled folder watcher found"}, nil
+	}
+	entries, available, lerr := folderwatch.ListWatchDir(chosen.Folder, chosen.Glob)
+	if lerr != nil || !available {
+		errMsg := "Watching is unavailable - the directory could not be read"
+		if lerr != nil {
+			errMsg = lerr.Error()
+		}
+		return map[string]any{
+			"ok":        false,
+			"available": false,
+			"watcher":   chosen.Name,
+			"folder":    chosen.Folder,
+			"path":      chosen.Folder,
+			"error":     errMsg,
+			"files":     []any{},
+			"entries":   []any{},
+		}, nil
+	}
+	items := make([]map[string]any, len(entries))
+	for i, e := range entries {
+		items[i] = map[string]any{
+			"path":       e.Path,
+			"name":       e.Name,
+			"ext":        e.Ext,
+			"size_bytes": e.SizeBytes,
+			"size":       e.Size,
+			"mtime_ms":   e.ModTimeMS,
+			"mtime":      e.ModTime,
+			"is_dir":     e.IsDir,
+		}
+	}
+	return map[string]any{
+		"ok":        true,
+		"available": true,
+		"watcher":   chosen.Name,
+		"folder":    chosen.Folder,
+		"path":      chosen.Folder,
+		"glob":      chosen.Glob,
+		"poll_sec":  chosen.PollSec,
+		"count":     len(items),
+		"files":     items,
+		"entries":   items,
+	}, nil
 }
 
 // deps builds the injected ctx capabilities for one invocation.
@@ -206,6 +285,9 @@ func deps(runCtx context.Context, rt Runtime, spec Spec) funcsandbox.Deps {
 				timeoutMS = 2000
 			}
 			return lan.TCPPing(runCtx, host, port, time.Duration(timeoutMS)*time.Millisecond)
+		},
+		WatchList: func(target string) (map[string]any, error) {
+			return runWatchList(rt.Reader, target)
 		},
 
 		Query: func(query string, params []any) ([]map[string]any, error) {
@@ -458,10 +540,11 @@ func runFetch(parent context.Context, url string, opts funcsandbox.FetchOptions)
 // of_* system tables, PASSWORD/ENCRYPTED columns, and any table whose
 // secure-column projection cannot be read. Fail-closed twice over: an unreadable
 // projection refuses rather than assumes, and one refused write fails the whole batch.
-func applyWrites(reader, writer *sql.DB, writes []funcsandbox.Write) error {
+func applyWrites(rt Runtime, writes []funcsandbox.Write) error {
 	if len(writes) == 0 {
 		return nil
 	}
+	reader, writer := rt.Reader, rt.Writer
 	for _, w := range writes {
 		if _, err := store.SanitizedTableName(w.Table); err != nil {
 			return fmt.Errorf("write to %q rejected: %w", w.Table, err)
@@ -481,15 +564,28 @@ func applyWrites(reader, writer *sql.DB, writes []funcsandbox.Write) error {
 	if err != nil {
 		return err
 	}
+	type insertedEvent struct {
+		table string
+		id    int64
+		row   map[string]any
+	}
+	var inserts []insertedEvent
 	for _, w := range writes {
+		var res sql.Result
 		var e error
 		switch w.Op {
 		case "insert":
-			_, e = projectwrite.Insert(tx, w.Table, w.Row)
+			res, e = projectwrite.Insert(tx, w.Table, w.Row)
+			if e == nil && res != nil {
+				id, _ := res.LastInsertId()
+				inserts = append(inserts, insertedEvent{table: w.Table, id: id, row: w.Row})
+			}
 		case "update":
 			_, e = projectwrite.Update(tx, w.Table, w.Row, w.Where)
 		case "upsert":
 			_, e = projectwrite.Upsert(tx, w.Table, w.Row, w.Conflict)
+		case "delete":
+			_, e = projectwrite.Delete(tx, w.Table, w.Where)
 		default:
 			e = fmt.Errorf("unknown write op %q", w.Op)
 		}
@@ -498,7 +594,51 @@ func applyWrites(reader, writer *sql.DB, writes []funcsandbox.Write) error {
 			return e
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if rt.Bus != nil && rt.ProjectID > 0 && len(inserts) > 0 {
+		for _, ins := range inserts {
+			publishDeclaredInsert(rt, ins.table, ins.id, ins.row)
+		}
+	}
+	return nil
+}
+
+// publishDeclaredInsert emits a data.insert event after a server function's
+// ctx.insert commits, resolving the physical table's primary REST endpoint (when
+// one exists) so SSE streams over that table (manage_sse) receive the new row live.
+func publishDeclaredInsert(rt Runtime, table string, id int64, row map[string]any) {
+	physTable, err := store.SanitizedTableName(table)
+	if err != nil {
+		return
+	}
+	payload := make(map[string]any, len(row)+3)
+	for k, v := range row {
+		payload[k] = v
+	}
+	if reader := rt.Reader; reader != nil && id > 0 {
+		if rows, rerr := store.GetDynamicRow(context.Background(), reader, store.DynamicRowLookup{
+			Table:      physTable,
+			QuotedCols: "*",
+			LookupCol:  "id",
+			LookupVal:  id,
+		}); rerr == nil && len(rows) > 0 {
+			for k, v := range rows[0] {
+				payload[k] = v
+			}
+		}
+		var epPath string
+		_ = reader.QueryRow(`SELECT path FROM of_api_endpoints WHERE LOWER(table_name) = LOWER(?) ORDER BY id LIMIT 1`, physTable).Scan(&epPath)
+		if epPath != "" {
+			payload["endpoint"] = epPath
+		}
+	}
+	payload["table"] = physTable
+	if id > 0 {
+		payload["id"] = id
+	}
+	rt.Bus.Publish(events.NewEvent(events.EventDataInsert, rt.ProjectID, payload))
 }
 
 // secretAllowed reports whether name is on the JSON allowlist. Empty = none.

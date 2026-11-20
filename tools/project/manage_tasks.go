@@ -461,6 +461,13 @@ var artifactStoreQueries = []string{
 	// Scheduled tasks are deliverables too ("purge expired links nightly"): a task that owns
 	// one by name completes once the schedule exists.
 	`SELECT name FROM of_scheduled_tasks`,
+	// MQTT broker capability (owned as "mqtt" or "/mqtt"), plus MQTT ingest rules,
+	// devices, bridges, and folder watchers owned by name.
+	`SELECT 'mqtt' FROM of_mqtt_config WHERE enabled = 1`,
+	`SELECT name FROM of_mqtt_rules`,
+	`SELECT name FROM of_mqtt_devices`,
+	`SELECT name FROM of_mqtt_bridges`,
+	`SELECT name FROM of_folder_watchers`,
 }
 
 // tasksAnyPathBuilt reports whether any of the task's declared paths already exists as a

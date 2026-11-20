@@ -94,6 +94,7 @@ func (h *Handler) apiFunction(w http.ResponseWriter, r *http.Request, project *m
 		spec.Timeout = time.Duration(ep.TimeoutMS) * time.Millisecond
 	}
 	rt := funcexec.NewRuntime(project.ID, projectDB.Reader(), projectDB.Writer(), h.deps.completeDeps())
+	rt.Bus = h.deps.Bus
 	resp, err := funcexec.ExecuteContext(r.Context(), rt, spec, reqObj)
 	if err != nil {
 		var to *funcsandbox.Timeout
@@ -110,6 +111,9 @@ func (h *Handler) apiFunction(w http.ResponseWriter, r *http.Request, project *m
 		db.RecordRuntimeError(projectDB.ToolHandle(r.Context()), db.RuntimeErrorFunction, ep.Path, err.Error())
 		writeError(w, http.StatusInternalServerError, "function error")
 		return
+	}
+	if h.apiCache != nil {
+		h.apiCache.invalidateProject(project.ID)
 	}
 
 	writeFunctionResponse(w, resp)

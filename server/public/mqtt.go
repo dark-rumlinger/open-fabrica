@@ -603,6 +603,19 @@ func insertMQTTTableRow(reader, writer *sql.DB, enc *security.Encryptor, table s
 			}
 		}
 	}
+	// If the table has a NOT NULL timestamp column with no DEFAULT (e.g. recorded_at TEXT NOT NULL)
+	// and the payload did not include one, auto-fill the current UTC timestamp so the rule insert
+	// succeeds instead of silently failing a NOT NULL constraint.
+	if reqCols, err := store.RequiredColumns(reader, table); err == nil {
+		nowISO := time.Now().UTC().Format(time.RFC3339)
+		for _, tsCol := range []string{"recorded_at", "created_at", "timestamp", "ts"} {
+			if canon, exists := canonCols[tsCol]; exists && reqCols[canon] {
+				if _, set := row[tsCol]; !set {
+					row[tsCol] = nowISO
+				}
+			}
+		}
+	}
 
 	secureCols, err := store.LoadSecureColumns(reader, table)
 	if err != nil {
@@ -637,19 +650,33 @@ func runMQTTFunction(deps *Deps, projectID int, pdb *db.ProjectDB, fnPath string
 		return
 	}
 	rt := funcexec.NewRuntime(projectID, pdb.Reader(), pdb.Writer(), deps.completeDeps())
+	rt.Bus = deps.Bus
 	params := map[string]any{}
 	for k, v := range topicVars {
 		params[k] = v
+	}
+	payloadStr := string(ev.Payload)
+	body := map[string]any{
+		"topic":     ev.Topic,
+		"payload":   payloadStr,
+		"json":      parsed,
+		"params":    params,
+		"client_id": ev.ClientID,
+		"device":    ev.DeviceName,
 	}
 	req := map[string]any{
 		"method":    "MQTT",
 		"path":      fnPath,
 		"topic":     ev.Topic,
-		"payload":   string(ev.Payload),
+		"payload":   payloadStr,
 		"json":      parsed,
 		"params":    params,
 		"client_id": ev.ClientID,
 		"device":    ev.DeviceName,
+		"body":      body,
+		"query":     params,
+		"headers":   map[string]any{},
+		"user":      nil,
 	}
 	timeout := mqttDefaultFnBudget
 	if ep.TimeoutMS > 0 {
@@ -662,7 +689,9 @@ func runMQTTFunction(deps *Deps, projectID int, pdb *db.ProjectDB, fnPath string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	_, _ = funcexec.ExecuteContext(ctx, rt, spec, req)
+	if _, err := funcexec.ExecuteContext(ctx, rt, spec, req); err != nil {
+		db.RecordRuntimeError(pdb.ToolHandle(ctx), db.RuntimeErrorFunction, ep.Path, err.Error())
+	}
 }
 
 // ServeMQTTRollups handles GET /api/__mqtt/rollups for querying streaming

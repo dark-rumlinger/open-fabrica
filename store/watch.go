@@ -80,6 +80,42 @@ func DeleteFolderWatcher(writer dbh.Handle, name string) (bool, error) {
 	return n > 0, nil
 }
 
+// SeenWatchFile records the size and mtime of a previously processed file in a watched folder.
+type SeenWatchFile struct {
+	SizeBytes int64
+	ModTimeNs int64
+}
+
+// ListWatchSeen loads all seen files for watcherName keyed by rel_path.
+func ListWatchSeen(reader dbh.Handle, watcherName string) (map[string]SeenWatchFile, error) {
+	rows, err := reader.Query(
+		`SELECT rel_path, size_bytes, mod_time_ns FROM of_folder_watch_seen WHERE watcher_name = ?`,
+		watcherName,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]SeenWatchFile)
+	for rows.Next() {
+		var relPath string
+		var sf SeenWatchFile
+		if err := rows.Scan(&relPath, &sf.SizeBytes, &sf.ModTimeNs); err != nil {
+			return nil, err
+		}
+		out[relPath] = sf
+	}
+	return out, rows.Err()
+}
+
+// DeleteWatchFileSeen removes a deleted file's seen record so a future drop with the same name is treated as created.
+func DeleteWatchFileSeen(writer dbh.Handle, watcherName, relPath string) {
+	bestEffortExec(writer, "watch delete seen",
+		`DELETE FROM of_folder_watch_seen WHERE watcher_name = ? AND rel_path = ?`,
+		watcherName, relPath,
+	)
+}
+
 // IsWatchFileSeen reports whether (watcherName, relPath) was already processed
 // at the exact same size and modTimeNs.
 func IsWatchFileSeen(reader dbh.Handle, watcherName, relPath string, size, modTimeNs int64) bool {

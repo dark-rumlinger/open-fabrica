@@ -191,6 +191,10 @@ type SessionResult struct {
 	// load. A warm continuation preloads it, so the tools its carried transcript
 	// called are still callable.
 	Tools []string
+	// rolloverCarry holds any unanswered tool-rejection summary or OnTurnEnd/OnModelDone
+	// injection from the turn that crossed the rollover threshold, so session.Run can
+	// append it to the reseeded segment instead of dropping it on the segment boundary.
+	rolloverCarry string
 }
 
 // Ending is HOW the loop stopped, in the four terms a caller can act on. Every terminator
@@ -261,9 +265,9 @@ const (
 	// (uncached + cache-read + cache-creation, see session.go's lastContextTokens) exceeds it
 	// and the spec allows reseeding. Against total, not the uncached portion, so a cache
 	// eviction cannot spuriously trip it. Sized to bound quadratic per-turn token growth on
-	// large-window (e.g. 1M-context) models while keeping prompt-cached segments long enough
-	// to amortize reseed cost.
-	defaultRolloverInputTokens = 75_000
+	// large-window (e.g. 1M-context) models while leaving ~75k-85k tokens of working headroom
+	// above BUILD's ~25k-35k seed+snapshot baseline so most builds finish in a single segment.
+	defaultRolloverInputTokens = 110_000
 	// minUsableWindow is the smallest context window the rollover will size itself
 	// from. Below it the build prompt alone does not fit, so a lower trigger would only
 	// roll over on every call; the default stays and the model's own limit applies.

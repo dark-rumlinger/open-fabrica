@@ -25,6 +25,8 @@ const (
 	minPollSec          = 2
 	maxPollSec          = 3600
 	defaultPollSec      = 5
+	maxScanDepth        = 8
+	maxScanEntries      = 2000
 )
 
 // WatchSpec defines one active folder watcher for a project.
@@ -36,11 +38,19 @@ type WatchSpec struct {
 	PollSec      int
 }
 
-// FileEvent describes a newly dropped or modified file in a watched folder.
+// SeenFile holds the previously processed size and mtime of a relative path.
+type SeenFile struct {
+	SizeBytes int64
+	ModTimeNs int64
+}
+
+// FileEvent describes a newly dropped, modified, or deleted file in a watched folder.
 type FileEvent struct {
 	WatcherName  string
 	FunctionPath string
 	Folder       string
+	Event        string // "created", "modified", or "deleted"
+	Kind         string // "created", "changed", or "deleted" (alias for UI/feed schemas)
 	RelPath      string
 	Name         string
 	Ext          string
@@ -51,12 +61,26 @@ type FileEvent struct {
 	Content      string // populated when IsText && SizeBytes <= maxTextPreviewBytes
 }
 
+// DirEntry describes one file or directory inside a watched folder (returned by ListWatchDir).
+type DirEntry struct {
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Ext       string `json:"ext"`
+	SizeBytes int64  `json:"size_bytes"`
+	Size      int64  `json:"size"`
+	ModTimeMS int64  `json:"mtime_ms"`
+	ModTime   string `json:"mtime"`
+	IsDir     bool   `json:"is_dir"`
+}
+
 // ProjectHooks wires folderwatch.Hub to persistence and event/function dispatch
 // without creating package import cycles.
 type ProjectHooks struct {
 	LoadWatchers func(projectID int) ([]WatchSpec, error)
 	IsSeen       func(projectID int, watcherName, relPath string, size, modTimeNs int64) bool
 	MarkSeen     func(projectID int, watcherName, relPath string, size, modTimeNs int64)
+	ListSeen     func(projectID int, watcherName string) (map[string]SeenFile, error)
+	DeleteSeen   func(projectID int, watcherName, relPath string)
 	OnFile       func(projectID int, ev FileEvent)
 }
 
@@ -284,43 +308,185 @@ func (h *Hub) scanSpecs(ctx context.Context, projectID int, specs []WatchSpec, l
 }
 
 func (h *Hub) scanOne(ctx context.Context, projectID int, sp WatchSpec) {
-	entries, err := os.ReadDir(sp.Folder)
-	if err != nil {
-		return
+	var prevSeen map[string]SeenFile
+	if h.hooks.ListSeen != nil {
+		prevSeen, _ = h.hooks.ListSeen(projectID, sp.Name)
 	}
-	for _, ent := range entries {
-		if ctx.Err() != nil {
-			return
-		}
-		if ent.IsDir() || ent.Type()&os.ModeSymlink != 0 {
-			continue
-		}
-		name := ent.Name()
-		if strings.HasPrefix(name, ".") || !MatchGlobCSV(sp.Glob, name) {
-			continue
-		}
-		fullPath := filepath.Join(sp.Folder, name)
-		fi, err := os.Lstat(fullPath)
-		if err != nil || fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		size := fi.Size()
-		modNs := fi.ModTime().UnixNano()
-		if h.hooks.IsSeen != nil && h.hooks.IsSeen(projectID, sp.Name, name, size, modNs) {
-			continue
-		}
+	present := make(map[string]bool)
+	scanned := 0
 
-		ev := readDroppedFile(sp, fullPath, name, size, modNs)
-		if h.hooks.MarkSeen != nil {
-			h.hooks.MarkSeen(projectID, sp.Name, name, size, modNs)
+	var walk func(relDir string, depth int) bool
+	walk = func(relDir string, depth int) bool {
+		if ctx.Err() != nil || depth > maxScanDepth || scanned >= maxScanEntries {
+			return false
 		}
-		if h.hooks.OnFile != nil {
-			h.hooks.OnFile(projectID, ev)
+		absDir := sp.Folder
+		if relDir != "" {
+			absDir = filepath.Join(sp.Folder, filepath.FromSlash(relDir))
+		}
+		entries, err := os.ReadDir(absDir)
+		if err != nil {
+			return relDir != "" // top-level read error aborts deletion sweep
+		}
+		for _, ent := range entries {
+			if ctx.Err() != nil || scanned >= maxScanEntries {
+				return false
+			}
+			if ent.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			name := ent.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			relPath := name
+			if relDir != "" {
+				relPath = relDir + "/" + name
+			}
+			fullPath := filepath.Join(absDir, name)
+			fi, err := os.Lstat(fullPath)
+			if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			if fi.IsDir() {
+				walk(relPath, depth+1)
+				continue
+			}
+			if !MatchGlobCSV(sp.Glob, name) && !MatchGlobCSV(sp.Glob, relPath) {
+				continue
+			}
+			scanned++
+			present[relPath] = true
+			size := fi.Size()
+			modNs := fi.ModTime().UnixNano()
+
+			eventKind := "created"
+			uiKind := "created"
+			if prevSeen != nil {
+				if prev, existed := prevSeen[relPath]; existed {
+					if prev.SizeBytes == size && prev.ModTimeNs == modNs {
+						continue
+					}
+					eventKind = "modified"
+					uiKind = "changed"
+				}
+			} else if h.hooks.IsSeen != nil && h.hooks.IsSeen(projectID, sp.Name, relPath, size, modNs) {
+				continue
+			}
+
+			ev := readDroppedFile(sp, fullPath, relPath, name, size, modNs, eventKind, uiKind)
+			if h.hooks.MarkSeen != nil {
+				h.hooks.MarkSeen(projectID, sp.Name, relPath, size, modNs)
+			}
+			if h.hooks.OnFile != nil {
+				h.hooks.OnFile(projectID, ev)
+			}
+		}
+		return true
+	}
+
+	completed := walk("", 0)
+	if completed && prevSeen != nil {
+		nowNs := time.Now().UnixNano()
+		for relPath, prev := range prevSeen {
+			if present[relPath] {
+				continue
+			}
+			if h.hooks.DeleteSeen != nil {
+				h.hooks.DeleteSeen(projectID, sp.Name, relPath)
+			}
+			if h.hooks.OnFile != nil {
+				base := filepath.Base(filepath.FromSlash(relPath))
+				ext := strings.ToLower(filepath.Ext(base))
+				h.hooks.OnFile(projectID, FileEvent{
+					WatcherName:  sp.Name,
+					FunctionPath: sp.FunctionPath,
+					Folder:       sp.Folder,
+					Event:        "deleted",
+					Kind:         "deleted",
+					RelPath:      relPath,
+					Name:         base,
+					Ext:          ext,
+					SizeBytes:    prev.SizeBytes,
+					ModTimeNs:    nowNs,
+				})
+			}
 		}
 	}
 }
 
-func readDroppedFile(sp WatchSpec, fullPath, name string, size, modNs int64) FileEvent {
+// ListWatchDir returns the current directory and file inventory of a validated watch folder,
+// honouring glob (for files) and skipping hidden files and symlinks.
+func ListWatchDir(folder, glob string) ([]DirEntry, bool, error) {
+	if isBlockedWatchPath(folder) {
+		return nil, false, fmt.Errorf("folder %q points to a protected path", folder)
+	}
+	fi, err := os.Stat(folder)
+	if err != nil || !fi.IsDir() {
+		return nil, false, err
+	}
+	var out []DirEntry
+	var walk func(relDir string, depth int)
+	walk = func(relDir string, depth int) {
+		if depth > maxScanDepth || len(out) >= maxScanEntries {
+			return
+		}
+		absDir := folder
+		if relDir != "" {
+			absDir = filepath.Join(folder, filepath.FromSlash(relDir))
+		}
+		entries, err := os.ReadDir(absDir)
+		if err != nil {
+			return
+		}
+		for _, ent := range entries {
+			if len(out) >= maxScanEntries {
+				return
+			}
+			if ent.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			name := ent.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			relPath := name
+			if relDir != "" {
+				relPath = relDir + "/" + name
+			}
+			fullPath := filepath.Join(absDir, name)
+			info, err := os.Lstat(fullPath)
+			if err != nil || info.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			isDir := info.IsDir()
+			if !isDir && !MatchGlobCSV(glob, name) && !MatchGlobCSV(glob, relPath) {
+				continue
+			}
+			mtime := info.ModTime().UTC()
+			out = append(out, DirEntry{
+				Path:      relPath,
+				Name:      name,
+				Ext:       strings.ToLower(filepath.Ext(name)),
+				SizeBytes: info.Size(),
+				Size:      info.Size(),
+				ModTimeMS: mtime.UnixMilli(),
+				ModTime:   mtime.Format(time.RFC3339),
+				IsDir:     isDir,
+			})
+			if isDir {
+				walk(relPath, depth+1)
+			}
+		}
+	}
+	walk("", 0)
+	if out == nil {
+		out = []DirEntry{}
+	}
+	return out, true, nil
+}
+
+func readDroppedFile(sp WatchSpec, fullPath, relPath, name string, size, modNs int64, eventKind, uiKind string) FileEvent {
 	ext := strings.ToLower(filepath.Ext(name))
 	mimeType := mime.TypeByExtension(ext)
 	var content string
@@ -348,7 +514,9 @@ func readDroppedFile(sp WatchSpec, fullPath, name string, size, modNs int64) Fil
 		WatcherName:  sp.Name,
 		FunctionPath: sp.FunctionPath,
 		Folder:       sp.Folder,
-		RelPath:      name,
+		Event:        eventKind,
+		Kind:         uiKind,
+		RelPath:      relPath,
 		Name:         name,
 		Ext:          ext,
 		SizeBytes:    size,

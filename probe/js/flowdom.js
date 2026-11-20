@@ -38,11 +38,22 @@ function (op, sel, value, scope, info) {
     if (root.shadowRoot) out = out.concat(Array.prototype.slice.call(root.shadowRoot.querySelectorAll(css)));
     return out.filter(function (el, i) { return out.indexOf(el) === i; });
   };
+  // canvasText returns any 2D fillText/strokeText strings recorded on a canvas.
+  var canvasText = function (el) {
+    return el && el.__ofText && el.__ofText.length ? el.__ofText.join(' ') : '';
+  };
   // textOf is what an element shows, including the text inside open shadow roots
-  // below it (innerText stops at a shadow host).
+  // below it (innerText stops at a shadow host) and any 2D canvas text drawn inside it.
   var textOf = function (el) {
     var t = el.innerText || '';
-    var hosts = allEls(el).filter(function (h) { return h.shadowRoot; });
+    var ct = canvasText(el);
+    if (ct) t += ' ' + ct;
+    var sub = allEls(el);
+    sub.forEach(function (n) {
+      var nct = canvasText(n);
+      if (nct) t += ' ' + nct;
+    });
+    var hosts = sub.filter(function (h) { return h.shadowRoot; });
     if (el.shadowRoot) hosts.unshift(el);
     hosts.forEach(function (h) {
       Array.prototype.forEach.call(h.shadowRoot.children, function (c) {
@@ -316,7 +327,7 @@ function (op, sel, value, scope, info) {
     };
     // snip names an element and quotes what it shows.
     var snip = function (el) {
-      var bs = best(el), t = norm(el.innerText || el.value || el.textContent || '');
+      var bs = best(el), t = norm(el.innerText || canvasText(el) || el.value || el.textContent || '');
       if (bs.indexOf('text=') === 0) return bs;
       return bs + (t ? ' "' + clip(t, 160) + '"' : ' (empty)');
     };
@@ -348,7 +359,7 @@ function (op, sel, value, scope, info) {
     }
     if (want && (verb === 'expectText' || verb === 'expectNoText')) {
       var els = document.body ? allEls(document.body) : [];
-      var holders = innermost(els.filter(function (el) { return visible(el) && fold(el.innerText).indexOf(want) >= 0; }));
+      var holders = innermost(els.filter(function (el) { return visible(el) && fold(el.innerText || canvasText(el)).indexOf(want) >= 0; }));
       if (verb === 'expectNoText' && roots) {
         holders = holders.filter(function (h) { return roots.some(function (r) { return r === h || r.contains(h); }); });
       }
@@ -357,7 +368,7 @@ function (op, sel, value, scope, info) {
       }
       out.foundIn = holders.slice(0, 3).map(snip);
       if (!holders.length && verb === 'expectText') {
-        var hid = innermost(els.filter(function (el) { return fold(el.textContent).indexOf(want) >= 0; }));
+        var hid = innermost(els.filter(function (el) { return fold(el.textContent || canvasText(el)).indexOf(want) >= 0; }));
         if (hid.length) out.hiddenIn = best(hid[0]);
         // The longest start of the wanted text that the page does show: catches a
         // name the app shortened, a count that differs, a label reworded at the end.
@@ -365,7 +376,7 @@ function (op, sel, value, scope, info) {
         for (var n = want.length - 1; !hid.length && n >= Math.max(4, Math.ceil(want.length * 0.6)); n--) {
           var pre = want.slice(0, n);
           if (text.indexOf(pre) < 0) continue;
-          var near = innermost(els.filter(function (el) { return visible(el) && fold(el.innerText).indexOf(pre) >= 0; }));
+          var near = innermost(els.filter(function (el) { return visible(el) && fold(el.innerText || canvasText(el)).indexOf(pre) >= 0; }));
           if (near.length) out.near = snip(near[0]);
           break;
         }
@@ -441,7 +452,7 @@ function (op, sel, value, scope, info) {
     var v;
     if (value) v = el.getAttribute(value);
     else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') v = el.value;
-    else v = el.innerText;
+    else v = el.innerText || canvasText(el);
     v = String(v == null ? '' : v).trim();
     if (!v) return { ok: false, kind: 'not_found', detail: JSON.stringify(sel) + (value ? ' has no ' + value + ' attribute value' : ' is empty') + ' - nothing to remember yet' };
     return { ok: true, value: v };

@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
 
@@ -263,16 +265,52 @@ func StartSharedBrowser(alloc context.Context) (context.Context, context.CancelF
 	return shared, cancel, nil
 }
 
-// NewIsolatedTab opens a tab on a shared browser. Cancel closes the tab.
+// NewIsolatedTab opens a tab on a shared browser in its own isolated browser
+// context (separate cookies, localStorage, and session state). Cancel closes the
+// tab and disposes the browser context.
 //
-// On a context with no running browser yet (a bare allocator) the tab launches a
-// browser of its own on first use, which is the old dedicated-process behavior.
+// Headless Chrome refuses to open a tab in a fresh browser context unless asked
+// for a new window (WithNewWindow(true)), which chromedp's WithNewBrowserContext
+// does not set; creating the context and target explicitly via CDP gives every
+// tab true storage isolation on a shared process.
 //
-// A tab does not get its own browser context: a headless Chrome refuses to open a tab
-// in a fresh browser context ("no browser is open"), so tabs of one shared browser share
-// cookies and storage. Every caller probes one project's origin and seeds its own
-// session state per page, so the sharing is bounded to that project.
+// On a context with no running browser yet (a bare allocator), or if creating the
+// browser context fails, it falls back to chromedp.NewContext(shared).
 func NewIsolatedTab(shared context.Context) (context.Context, context.CancelFunc) {
+	if c := chromedp.FromContext(shared); c != nil && c.Browser != nil {
+		var (
+			bctx cdp.BrowserContextID
+			tid  target.ID
+		)
+		err := chromedp.Run(shared, chromedp.ActionFunc(func(ctx context.Context) error {
+			exec := cdp.WithExecutor(ctx, chromedp.FromContext(ctx).Browser)
+			var err error
+			if bctx, err = target.CreateBrowserContext().WithDisposeOnDetach(true).Do(exec); err != nil {
+				return err
+			}
+			tid, err = target.CreateTarget("about:blank").WithBrowserContextID(bctx).WithNewWindow(true).Do(exec)
+			if err != nil {
+				_ = target.DisposeBrowserContext(bctx).Do(exec)
+				return err
+			}
+			return nil
+		}))
+		if err == nil && tid != "" {
+			tabCtx, cancelTab := chromedp.NewContext(shared, chromedp.WithTargetID(tid))
+			var once sync.Once
+			cancel := func() {
+				once.Do(func() {
+					cancelTab()
+					_ = chromedp.Run(shared, chromedp.ActionFunc(func(ctx context.Context) error {
+						exec := cdp.WithExecutor(ctx, chromedp.FromContext(ctx).Browser)
+						_ = target.CloseTarget(tid).Do(exec)
+						return target.DisposeBrowserContext(bctx).Do(exec)
+					}))
+				})
+			}
+			return tabCtx, cancel
+		}
+	}
 	return chromedp.NewContext(shared)
 }
 

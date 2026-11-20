@@ -307,7 +307,10 @@ func leftOut(dropped, drop []string) []string {
 }
 
 // droppedFlows names the saved flows that next no longer has. Empty when there is no
-// saved script, it does not parse, or next keeps them all.
+// saved script, it does not parse, or next keeps them all. A saved flow that was
+// renamed in place (e.g. "Add, rename, reorder and archive a habit" -> "Add, rename
+// and archive a habit") counts as kept when an unmatched new flow in next shares a
+// substantial word overlap with it (>=50% of the saved flow's words, at least 2 words).
 func droppedFlows(saved string, next *probe.FlowSuite) []string {
 	if saved == "" {
 		return nil
@@ -320,13 +323,72 @@ func droppedFlows(saved string, next *probe.FlowSuite) []string {
 	for _, f := range next.Flows {
 		kept[f.Name] = true
 	}
-	var dropped []string
+	prevSet := map[string]bool{}
 	for _, f := range prev.Flows {
-		if !kept[f.Name] {
-			dropped = append(dropped, f.Name)
+		prevSet[f.Name] = true
+	}
+	var newNames []string
+	for _, f := range next.Flows {
+		if !prevSet[f.Name] {
+			newNames = append(newNames, f.Name)
 		}
 	}
+	usedNew := map[int]bool{}
+	var dropped []string
+	for _, f := range prev.Flows {
+		if kept[f.Name] {
+			continue
+		}
+		if idx := matchRenamedFlow(f.Name, newNames, usedNew); idx >= 0 {
+			usedNew[idx] = true
+			continue
+		}
+		dropped = append(dropped, f.Name)
+	}
 	return dropped
+}
+
+// matchRenamedFlow returns the index in newNames of an unused flow name that is a
+// close rewording of oldName (>=2 shared words covering at least half of the words in
+// the shorter name), or -1 when none matches.
+func matchRenamedFlow(oldName string, newNames []string, used map[int]bool) int {
+	oldWords := flowNameWords(oldName)
+	if len(oldWords) < 2 {
+		return -1
+	}
+	bestIdx, bestShared := -1, 0
+	for i, cand := range newNames {
+		if used[i] {
+			continue
+		}
+		candWords := flowNameWords(cand)
+		if len(candWords) < 2 {
+			continue
+		}
+		shared := 0
+		for w := range oldWords {
+			if candWords[w] {
+				shared++
+			}
+		}
+		minLen := min(len(oldWords), len(candWords))
+		if shared >= 2 && shared*2 >= minLen && shared > bestShared {
+			bestIdx, bestShared = i, shared
+		}
+	}
+	return bestIdx
+}
+
+func flowNameWords(name string) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	}) {
+		if len(w) >= 2 && w != "and" && w != "the" && w != "for" && w != "with" {
+			out[w] = true
+		}
+	}
+	return out
 }
 
 // Row text from the project's own tables joins the corpus, because pages routinely render

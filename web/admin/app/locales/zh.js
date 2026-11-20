@@ -2156,7 +2156,7 @@ export default {
   'examples.7.label': '可安装的 PWA',
   'examples.7.text': '一个简单的习惯追踪器，做成可安装的 PWA，支持离线使用并带有主屏幕图标。每日打卡和每周连续记录视图。',
   "examples.8.label": "智能温室 (MQTT)",
-  "examples.8.text": "基于 MQTT 的智能温室监控器。传感器上报温度、湿度和土壤水分，存入 SQLite，展示实时仪表盘、24 小时曲线、低湿度告警以及风扇和水泵开关按钮，并附带无需硬件即可测试的模拟传感器按钮。",
+  "examples.8.text": "基于 MQTT 的智能温室监控器。传感器上报温度、湿度和土壤水分，展示实时仪表盘、24 小时曲线、低湿度告警以及风扇和水泵开关按钮，并附带无需硬件即可测试的模拟传感器按钮。",
   'chat.stopped': '已停止。',
   'chat.sendFailed': '消息未发送：{reason}。你的文字已回到输入框，按 Enter 重试。',
   "tabs.mqtt": "MQTT",

@@ -2171,7 +2171,7 @@ export default {
   'examples.7.label': 'PWA instalable',
   'examples.7.text': 'Un sencillo seguidor de hábitos como PWA instalable, con soporte sin conexión e icono en la pantalla de inicio. Registros diarios y una vista de racha semanal.',
   "examples.8.label": "Invernadero inteligente (MQTT)",
-  "examples.8.text": "Un monitor de invernadero inteligente por MQTT. Los sensores publican temperatura, humedad y humedad del suelo en SQLite con medidores en vivo, un gráfico de 24 h, alertas de baja humedad y botones para activar el ventilador y la bomba de agua, más un botón de Simular sensor para probarlo sin hardware.",
+  "examples.8.text": "Un monitor de invernadero inteligente por MQTT. Los sensores publican temperatura, humedad y humedad del suelo, con medidores en vivo, un gráfico de 24 h, alertas de baja humedad y botones para activar el ventilador y la bomba de agua, más un botón de Simular sensor para probarlo sin hardware.",
   'chat.stopped': 'Detenido.',
   'chat.sendFailed': 'Mensaje no enviado: {reason}. Tu texto volvió al cuadro, pulsa Enter para reintentar.',
   "tabs.mqtt": "MQTT",

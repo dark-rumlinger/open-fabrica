@@ -164,6 +164,31 @@ type segState struct {
 	// asksThisTurn counts the extra pause-requesting calls let through after the
 	// turn's first question. Reset at the start of each turn.
 	asksThisTurn int
+
+	// turnFailedTools and turnEndInject record tool rejections and OnTurnEnd/OnModelDone
+	// injections from the most recent turn. Cleared once a subsequent model call seals
+	// them into its prompt; if the segment rolls over before that next call runs (or
+	// when that call overflows), rolloverCarryNote forwards them into the reseeded
+	// segment so rejection errors, one-shot nudges, and drained owner-inbox messages
+	// are not dropped on the rollover boundary.
+	turnFailedTools []string
+	turnEndInject   string
+}
+
+func (st *segState) clearRolloverCarry() {
+	st.turnFailedTools = st.turnFailedTools[:0]
+	st.turnEndInject = ""
+}
+
+func (st *segState) rolloverCarryNote() string {
+	var parts []string
+	if len(st.turnFailedTools) > 0 {
+		parts = append(parts, "Tool call(s) rejected on the turn right before context rollover (those changes did not apply):\n"+strings.Join(st.turnFailedTools, "\n"))
+	}
+	if st.turnEndInject != "" {
+		parts = append(parts, st.turnEndInject)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // stopWith records why this segment is ending. The first reason wins (it is the one that
@@ -313,9 +338,12 @@ func (s *session) executeToolCalls(ctx context.Context, spec *SessionSpec, st *s
 		payload := s.truncateToolResult(tc.Name, result)
 		display := result
 		if !ok {
-			if stub, stubbed := dedupeRepeatRejection(seenRejects, tc.ID, tc.Name, payload); stubbed {
+			stub, stubbed := dedupeRepeatRejection(seenRejects, tc.ID, tc.Name, payload)
+			if stubbed {
 				payload = stub
 				display = stub
+			} else {
+				st.turnFailedTools = append(st.turnFailedTools, fmt.Sprintf("- %s: %s", tc.Name, payload))
 			}
 		}
 		st.tr.Append(llm.Message{Role: llm.RoleTool, Content: payload, ToolCallID: tc.ID})

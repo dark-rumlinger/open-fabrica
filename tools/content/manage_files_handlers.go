@@ -116,6 +116,18 @@ func canonicalizeFilePath(kind, path string) (string, string) {
 	if kind == "file" {
 		return "file", store.CanonicalFilePath(path)
 	}
+	// Layouts and components are always stored by bare name (e.g. "default", "sidebar",
+	// "card.html"): strip any stray "/files/" or leading "/" directory prefix so
+	// "/default" or "/files/week.html" resolves cleanly to its bare name.
+	if kind == "layout" || kind == "component" {
+		p := store.CanonicalFilePath(path)
+		if idx := strings.LastIndex(p, "/"); idx >= 0 {
+			p = p[idx+1:]
+		}
+		if p != "" {
+			return kind, p
+		}
+	}
 	// Infer the kind only when the caller left it blank: a "/files/" prefix is the
 	// file-serving route, so a bare-kind reference to it is a file. An explicit
 	// non-file kind is respected as given, never overridden by the path shape.
@@ -151,6 +163,18 @@ func resolveKindPath(ctx *tools.ToolContext, kind, path string) (string, string,
 			}
 			if len(kinds) > 0 {
 				path = canon
+			}
+		}
+	}
+	// Bare-name retry for layouts and components: a kind-less get of "/default" or
+	// "/sidebar" misses because layouts/components are stored without a leading slash.
+	// If stripping a leading "/" matches a layout or component (and no page exists at
+	// "/<name>"), resolve to it instead of failing with "Did you mean: default?".
+	if len(kinds) == 0 && strings.HasPrefix(path, "/") && !strings.Contains(path[1:], "/") && !pathLooksLikeArtifact(path) {
+		bare := path[1:]
+		if bare != "" {
+			if bkinds, berr := store.ArtifactKindsForPath(ctx.DB, bare); berr == nil && len(bkinds) == 1 && (bkinds[0] == "layout" || bkinds[0] == "component") {
+				return bkinds[0], bare, nil
 			}
 		}
 	}

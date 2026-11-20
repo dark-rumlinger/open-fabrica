@@ -2078,7 +2078,7 @@ export default {
   "examples.7.label": "Installierbare PWA",
   "examples.7.text": "Ein einfacher Gewohnheitstracker als installierbare PWA, mit Offline-Unterstützung und Symbol auf dem Startbildschirm. Tägliche Check-ins und eine Wochenserien-Ansicht.",
   "examples.8.label": "Smartes Gewächshaus (MQTT)",
-  "examples.8.text": "Ein smarter Gewächshaus-Monitor über MQTT. Sensoren senden Temperatur, Luftfeuchtigkeit und Bodenfeuchte, gespeichert in SQLite mit Live-Anzeigen, einem 24h-Diagramm, Warnungen bei Trockenheit und Schaltern für Lüfter und Wasserpumpe sowie einem Button zum Simulieren ohne Hardware.",
+  "examples.8.text": "Ein smarter Gewächshaus-Monitor über MQTT. Sensoren senden Temperatur, Luftfeuchtigkeit und Bodenfeuchte, mit Live-Anzeigen, einem 24h-Diagramm, Warnungen bei Trockenheit und Schaltern für Lüfter und Wasserpumpe sowie einem Button zum Simulieren ohne Hardware.",
   "chat.stopped": "Gestoppt.",
   "chat.sendFailed": "Nachricht nicht gesendet: {reason}. Dein Text steht wieder im Eingabefeld, drücke Enter zum erneuten Senden.",
   "tabs.mqtt": "MQTT",

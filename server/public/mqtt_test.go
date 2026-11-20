@@ -23,6 +23,7 @@ func openTestMQTTDB(t *testing.T) *sql.DB {
 	stmts := []string{
 		`CREATE TABLE of_dynamic_tables (table_name TEXT PRIMARY KEY, secure_columns TEXT)`,
 		`CREATE TABLE readings (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, device TEXT, zone TEXT, c REAL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE strict_readings (id INTEGER PRIMARY KEY AUTOINCREMENT, metric TEXT NOT NULL, value REAL NOT NULL, recorded_at TEXT NOT NULL)`,
 		`CREATE TABLE scalar_readings (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, device TEXT, payload TEXT, value REAL)`,
 		`CREATE TABLE of_mqtt_rollups (
 			rule_name TEXT NOT NULL, bucket TEXT NOT NULL, interval TEXT NOT NULL,
@@ -89,6 +90,25 @@ func TestInsertMQTTTableRow_JSONAndScalarMetadata(t *testing.T) {
 	}
 	if topic != "sensors/freezer/temp" || device != "freezer_esp32" || rawPayload != "23.75" || val != 23.75 {
 		t.Fatalf("unexpected scalar row: topic=%q device=%q payload=%q value=%v", topic, device, rawPayload, val)
+	}
+
+	// 3. NOT NULL timestamp column (recorded_at TEXT NOT NULL) omitted by payload -> auto-filled with ISO timestamp.
+	strictPayload := []byte(`{"value": 19.5}`)
+	var parsedStrict any
+	_ = json.Unmarshal(strictPayload, &parsedStrict)
+	ev3 := mqtt.PublishEvent{
+		ClientID: "server",
+		Topic:    "greenhouse/sensors/temperature",
+		Payload:  strictPayload,
+	}
+	insertMQTTTableRow(d, d, nil, "strict_readings", ev3, parsedStrict.(map[string]any), parsedStrict, map[string]string{"metric": "temperature"})
+
+	var metric, recAt string
+	if err := d.QueryRow(`SELECT metric, value, recorded_at FROM strict_readings`).Scan(&metric, &val, &recAt); err != nil {
+		t.Fatalf("expected row in strict_readings: %v", err)
+	}
+	if metric != "temperature" || val != 19.5 || recAt == "" {
+		t.Fatalf("unexpected strict_readings row: metric=%q val=%v recorded_at=%q", metric, val, recAt)
 	}
 }
 

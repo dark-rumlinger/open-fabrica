@@ -85,6 +85,11 @@ type session struct {
 	// is correct, which is the whole reason Accept exists.
 	requestHashes []string
 
+	// served tracks replay-cache keys already served (or executed prior to a rollover)
+	// during the current Run so a rolled-over segment never replays the preceding
+	// segment's turns out of of_llm_cache when a reseed produces the same request hash.
+	served map[string]bool
+
 	// stopFn, when set, reports an owner stop request. The loop consults it
 	// BETWEEN turns only: cancelling mid-call would abandon a paid response and
 	// could land inside a half-run tool; a turn boundary leaves the transcript
@@ -130,6 +135,7 @@ func (s *session) Run(ctx context.Context, spec SessionSpec) (SessionResult, err
 	// for several Run calls, and a late failure must not evict earlier, usable
 	// responses.
 	s.requestHashes = s.requestHashes[:0]
+	s.served = map[string]bool{}
 
 	res := SessionResult{}
 	seed := spec.Seed
@@ -157,6 +163,12 @@ func (s *session) Run(ctx context.Context, spec SessionSpec) (SessionResult, err
 			s.enforceAccept(&spec, res.Content)
 			return res, nil
 		}
+		// Prevent the reseeded segment from replaying any request hash this Run already
+		// executed in an earlier segment (e.g. when a segment only patched file bodies and
+		// rolled over before completing a task, leaving the reseeded prompt byte-identical).
+		for _, h := range s.requestHashes {
+			s.served[h] = true
+		}
 		// Rollover: reseed deterministically from DB state and go again.
 		s.logger.Info("session rollover: reseeding fresh segment", "segment", segment+1)
 		seed, err = spec.Reseed()
@@ -165,6 +177,9 @@ func (s *session) Run(ctx context.Context, spec SessionSpec) (SessionResult, err
 		}
 		if note := s.loadedToolNotes(&spec, spec.PreloadTools[preloaded:]); note != "" {
 			seed = append(seed, llm.Message{Role: llm.RoleUser, Content: note})
+		}
+		if segRes.rolloverCarry != "" {
+			seed = append(seed, llm.Message{Role: llm.RoleUser, Content: segRes.rolloverCarry})
 		}
 	}
 	res.Ending = endSegmentsExhausted.outcome
@@ -266,6 +281,7 @@ func (s *session) runSegment(ctx context.Context, spec *SessionSpec, seed []llm.
 		// call's total context is what the next one would exceed.
 		if spec.Reseed != nil && st.lastContextTokens >= st.rolloverAt {
 			s.logger.Info("context rollover", "context_tokens", st.lastContextTokens, "threshold", st.rolloverAt, "iteration", i)
+			res.rolloverCarry = st.rolloverCarryNote()
 			st.addEditCounters(total)
 			s.recordSegmentEnd(sessionID, endRolloverDetail, i)
 			return res, true, nil
@@ -276,6 +292,7 @@ func (s *session) runSegment(ctx context.Context, spec *SessionSpec, seed []llm.
 		resp, cacheHit, callErr := s.callModel(ctx, spec, st, req)
 		if callErr != nil {
 			if s.overflowRollsOver(spec, st, callErr) {
+				res.rolloverCarry = st.rolloverCarryNote()
 				st.addEditCounters(total)
 				s.recordSegmentEnd(sessionID, endRolloverDetail, i)
 				return res, true, nil
@@ -285,6 +302,7 @@ func (s *session) runSegment(ctx context.Context, spec *SessionSpec, seed []llm.
 		}
 
 		st.tr.Seal() // everything sent is now immutable
+		st.clearRolloverCarry()
 		st.accountUsage(&res, total, resp, cacheHit, req.TotalRequestBytes)
 		s.logger.Info("llm iteration",
 			"stage", spec.Stage, "iter", i, "segment", segment,
@@ -350,6 +368,10 @@ func (s *session) runSegment(ctx context.Context, spec *SessionSpec, seed []llm.
 // newSegState builds one segment's loop state: a fresh transcript over seed, the
 // segment's tool set, and the per-segment call parameters that stay fixed for it.
 func (s *session) newSegState(spec *SessionSpec, seed []llm.Message, segment int, sessionID string, rp resolvedProvider) *segState {
+	served := s.served
+	if served == nil {
+		served = map[string]bool{}
+	}
 	st := &segState{
 		tr:     NewTranscript(seed...),
 		guards: NewGuardState(),
@@ -359,7 +381,7 @@ func (s *session) newSegState(spec *SessionSpec, seed []llm.Message, segment int
 		// segment, repeat reads still dedup.
 		reads:     tools.NewReadTracker(),
 		snapshot:  sessionSnapshot{mode: spec.Snapshot},
-		served:    map[string]bool{},
+		served:    served,
 		sessionID: sessionID,
 		segment:   segment,
 		rp:        rp,
@@ -571,6 +593,7 @@ func (s *session) runToolTurn(ctx context.Context, spec *SessionSpec, st *segSta
 		// or both. Honor stop even when inject is empty.
 		if inject, done := spec.OnTurnEnd(st.iteration, resp.ToolCalls, st.writeRejects); inject != "" || done != nil {
 			if inject != "" {
+				st.turnEndInject = inject
 				st.tr.Append(llm.Message{Role: llm.RoleUser, Content: inject})
 			}
 			if done != nil {
@@ -726,6 +749,7 @@ func (s *session) handleNoToolCalls(spec *SessionSpec, st *segState, resp *llm.C
 	if spec.OnModelDone != nil {
 		if inject := spec.OnModelDone(); inject != "" {
 			s.logger.Info("model stopped early, stage asked it to continue", "stage", spec.Stage, "iteration", st.iteration)
+			st.turnEndInject = inject
 			st.tr.Append(assistantMsg, llm.Message{Role: llm.RoleUser, Content: inject})
 			return nil
 		}

@@ -451,6 +451,32 @@ func (a *DiagTestAuthFlow) Example() any {
 	return &DiagTestAuthFlow{EndpointPath: "auth"}
 }
 func (a *DiagTestAuthFlow) Run(ctx *tools.ToolContext) (*tools.Result, error) {
+	// Like write test_endpoint / test_url probes, test_auth_flow registers a synthetic
+	// probe user in the users table; wrap in a snapshot when available so the probe
+	// user is rolled back while the returned JWT remains valid for follow-up probes.
+	var res *tools.Result
+	var err error
+	ran := false
+	_, restoreErr := flowsnap.Around(ctx.Context(), func() {
+		ran = true
+		res, err = a.run(ctx)
+	})
+	if !ran {
+		return a.run(ctx)
+	}
+	if res != nil {
+		if data, ok := res.Data.(map[string]any); ok {
+			if restoreErr != nil {
+				data["rollback_error"] = "the probe user this check registered could not be rolled back: " + restoreErr.Error()
+			} else {
+				data["rolled_back"] = "the synthetic probe user was rolled back after login + /me succeeded"
+			}
+		}
+	}
+	return res, err
+}
+
+func (a *DiagTestAuthFlow) run(ctx *tools.ToolContext) (*tools.Result, error) {
 	path := a.EndpointPath
 	if path == "" {
 		path = "auth"
@@ -838,6 +864,14 @@ func (a *DiagTestPage) probe(ctx *tools.ToolContext, path string) (*tools.Result
 			result["warning"] = existing + " " + stuck
 		} else {
 			result["warning"] = stuck
+		}
+	}
+	if dead := render.deadControlWarning(); dead != "" {
+		result["dead_controls"] = render.deadControls
+		if existing, _ := result["warning"].(string); existing != "" {
+			result["warning"] = existing + " " + dead
+		} else {
+			result["warning"] = dead
 		}
 	}
 	return tools.Ok(result), nil

@@ -19,6 +19,9 @@ func TestUpdateBuildInstructionCarriesChangeRequest(t *testing.T) {
 	if !strings.Contains(fresh, "Build the whole project") {
 		t.Errorf("fresh build lost its directive:\n%s", fresh)
 	}
+	if !strings.Contains(fresh, "your first action is the create or save that starts its first item") {
+		t.Errorf("cold fresh build lost its segment-1 opener:\n%s", fresh)
+	}
 
 	update := freshBuildInstruction(&Plan{}, "", "make the header navy and add a newsletter signup", pdb.Reader())
 	for _, want := range []string{
@@ -29,6 +32,17 @@ func TestUpdateBuildInstructionCarriesChangeRequest(t *testing.T) {
 		if !strings.Contains(update, want) {
 			t.Errorf("update build instruction missing %q:\n%s", want, update)
 		}
+	}
+
+	// Once deliverables exist (a rollover reseed or mid-build resume), the opener frames
+	// the segment as an in-progress continuation so the model does not call manage_tasks
+	// list or re-read every file from segment 1.
+	if _, err := pdb.ExecWrite(`INSERT INTO of_files (kind, path, body, scope) VALUES ('page', '/', '<h1>hi</h1>', 'page')`); err != nil {
+		t.Fatalf("insert deliverable: %v", err)
+	}
+	cont := freshBuildInstruction(&Plan{}, "", "", pdb.Reader())
+	if !strings.Contains(cont, "continuation of an in-progress build") {
+		t.Errorf("rollover/resumed build instruction missing continuation directive:\n%s", cont)
 	}
 }
 

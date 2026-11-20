@@ -863,7 +863,11 @@ func (b *Broker) dispatchPublish(ev PublishEvent, fireHook bool) {
 	}
 
 	if fireHook && hook != nil {
-		go hook(ev)
+		if ev.ClientID == "server" {
+			hook(ev)
+		} else {
+			go hook(ev)
+		}
 	}
 }
 

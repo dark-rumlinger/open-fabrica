@@ -3,9 +3,13 @@ package browser
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/chromedp/chromedp"
 )
 
 func TestProbeTimeoutTracker_PlatformDefaults(t *testing.T) {
@@ -143,3 +147,56 @@ func TestLaunchBrowser_OverrideDisablesRetryAndDrift(t *testing.T) {
 		t.Fatalf("pinned timeout = %v, want 7s", got)
 	}
 }
+
+// Two tabs opened via NewIsolatedTab on the same shared browser must have separate
+// browser contexts: cookies and localStorage written by one tab never leak to the other.
+func TestNewIsolatedTab_SeparatesCookiesAndStorage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("browser integration test; skipped under -short")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!doctype html><html><body>ok</body></html>`))
+	}))
+	defer srv.Close()
+
+	alloc, cancelAlloc, err := LaunchBrowser(context.Background(), BrowserConfig{})
+	if err != nil {
+		if errors.Is(err, ErrBrowserUnavailable) {
+			t.Skip("headless browser unavailable")
+		}
+		t.Fatalf("LaunchBrowser: %v", err)
+	}
+	defer cancelAlloc()
+
+	shared, cancelShared, err := StartSharedBrowser(alloc)
+	if err != nil {
+		t.Fatalf("StartSharedBrowser: %v", err)
+	}
+	defer cancelShared()
+
+	tabA, cancelA := NewIsolatedTab(shared)
+	defer cancelA()
+	tabB, cancelB := NewIsolatedTab(shared)
+	defer cancelB()
+
+	if err := chromedp.Run(tabA,
+		chromedp.Navigate(srv.URL),
+		chromedp.Evaluate(`localStorage.setItem('auth_token', 'secret-a'); document.cookie = 'sid=alpha; path=/';`, nil),
+	); err != nil {
+		t.Fatalf("tabA: %v", err)
+	}
+
+	var tokenB, cookieB string
+	if err := chromedp.Run(tabB,
+		chromedp.Navigate(srv.URL),
+		chromedp.Evaluate(`localStorage.getItem('auth_token') || ''`, &tokenB),
+		chromedp.Evaluate(`document.cookie || ''`, &cookieB),
+	); err != nil {
+		t.Fatalf("tabB: %v", err)
+	}
+	if tokenB != "" || cookieB != "" {
+		t.Fatalf("tabB inherited state from tabA: localStorage=%q cookie=%q", tokenB, cookieB)
+	}
+}
+

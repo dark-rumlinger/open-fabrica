@@ -10,12 +10,15 @@ import (
 // AuthKind values for EndpointRef.AuthKind: the kind of endpoint a snapshot row
 // describes. Named so the assignment and comparison sites can't drift on a typo.
 const (
-	authKindAPI    = "api"
-	authKindAuth   = "auth"
-	authKindWS     = "ws"
-	authKindStream = "stream"
-	authKindLLM    = "llm"
-	authKindUpload = "upload"
+	authKindAPI      = "api"
+	authKindAuth     = "auth"
+	authKindWS       = "ws"
+	authKindStream   = "stream"
+	authKindLLM      = "llm"
+	authKindUpload   = "upload"
+	authKindFunction = "function"
+	authKindWatch    = "watch"
+	authKindMQTT     = "mqtt"
 )
 
 // WSMode values for EndpointRef.WSMode: the delivery model behind a "WS" row. Transport is
@@ -147,6 +150,59 @@ func loadEndpoints(ctx context.Context, db *sql.DB) []EndpointRef {
 		`SELECT path, COALESCE(requires_auth,0) FROM of_llm_endpoints ORDER BY path`, "POST", authKindLLM)
 	out = collectSimpleEndpoints(ctx, db, out,
 		`SELECT path, COALESCE(requires_auth,0) FROM of_upload_endpoints ORDER BY path`, "POST", authKindUpload)
+
+	if rows, err := db.QueryContext(ctx,
+		`SELECT path, COALESCE(methods,'POST'), COALESCE(requires_auth,0) FROM of_function_endpoints ORDER BY path`); err == nil {
+		for rows.Next() {
+			var p, methods string
+			var auth bool
+			if err := rows.Scan(&p, &methods, &auth); err == nil {
+				out = append(out, EndpointRef{Path: p, Methods: cleanMethods(methods), Auth: auth, AuthKind: authKindFunction})
+			}
+		}
+		_ = rows.Err()
+		rows.Close()
+	}
+
+	if rows, err := db.QueryContext(ctx,
+		`SELECT name, COALESCE(glob,'*'), COALESCE(function_path,'') FROM of_folder_watchers WHERE COALESCE(enabled,1) = 1 ORDER BY id`); err == nil {
+		for rows.Next() {
+			var name, glob, fn string
+			if err := rows.Scan(&name, &glob, &fn); err == nil {
+				target := name + " (" + glob + ")"
+				if fn != "" {
+					target += " -> /api/" + strings.Trim(fn, "/")
+				}
+				out = append(out, EndpointRef{Path: target, Methods: "WATCH", AuthKind: authKindWatch})
+			}
+		}
+		_ = rows.Err()
+		rows.Close()
+	}
+
+	var mqttEnabled int
+	var mqttAnon bool
+	if db.QueryRowContext(ctx, `SELECT COALESCE(enabled,0), COALESCE(allow_anonymous,0) FROM of_mqtt_config WHERE id = 1`).Scan(&mqttEnabled, &mqttAnon) == nil && mqttEnabled != 0 {
+		out = append(out, EndpointRef{Path: "/mqtt", Methods: "WS", Auth: !mqttAnon, AuthKind: authKindMQTT})
+	}
+	if rows, err := db.QueryContext(ctx,
+		`SELECT name, topic_filter, COALESCE(target_table,''), COALESCE(function_path,'') FROM of_mqtt_rules WHERE COALESCE(enabled,1) = 1 ORDER BY id`); err == nil {
+		for rows.Next() {
+			var name, filter, tbl, fn string
+			if err := rows.Scan(&name, &filter, &tbl, &fn); err == nil {
+				desc := name + " (" + filter + ")"
+				if tbl != "" {
+					desc += " -> table:" + tbl
+				}
+				if fn != "" {
+					desc += " -> /api/" + strings.Trim(fn, "/")
+				}
+				out = append(out, EndpointRef{Path: desc, Methods: "MQTT", AuthKind: authKindMQTT})
+			}
+		}
+		_ = rows.Err()
+		rows.Close()
+	}
 
 	return out
 }

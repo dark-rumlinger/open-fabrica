@@ -172,6 +172,29 @@ func Upsert(exec Execer, table string, data map[string]any, conflictCols []strin
 	return exec.Exec(query, vals...)
 }
 
+// Delete validates the table and every where-column name, then deletes rows
+// matching where with all values bound as parameters. A non-empty where map is
+// required so a caller cannot accidentally truncate an entire table.
+func Delete(exec Execer, table string, where map[string]any) (sql.Result, error) {
+	if table == "" || len(where) == 0 {
+		return nil, fmt.Errorf("delete: 'table' and a non-empty where are required (got table=%q, where keys=%d)", table, len(where))
+	}
+	if !validIdentifier.MatchString(table) {
+		return nil, fmt.Errorf("delete: invalid table name: %s", table)
+	}
+	whereClauses := make([]string, 0, len(where))
+	vals := make([]any, 0, len(where))
+	for col, val := range where {
+		if !validIdentifier.MatchString(col) {
+			return nil, fmt.Errorf("delete: invalid column name in where: %s", col)
+		}
+		whereClauses = append(whereClauses, col+" = ?")
+		vals = append(vals, val)
+	}
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s", table, strings.Join(whereClauses, " AND "))
+	return exec.Exec(query, vals...)
+}
+
 // counterDelta reports whether val is a {"$increment": n} / {"$decrement": n} counter
 // and, if so, the signed delta to write (a decrement is stored as -n).
 func counterDelta(col string, val any) (any, bool, error) {

@@ -63,6 +63,7 @@ func (r *Runner) executeRunFunction(projectDB *sql.DB, event events.Event, confi
 		}
 	}
 	rt := funcexec.NewRuntime(event.ProjectID, reader, projectDB, r.completeDeps())
+	rt.Bus = r.bus
 	_, err = funcexec.ExecuteContext(r.lifecycle(), rt, spec, req)
 	return err
 }

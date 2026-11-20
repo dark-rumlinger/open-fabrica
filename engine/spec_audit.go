@@ -561,7 +561,57 @@ func platformConfigSources(d *sql.DB, robots string) []sourceFile {
 		out = append(out, sourceFile{path: "LLM/agent endpoint prompts", kind: platformConfigKind,
 			body: "The system prompt each hosted LLM/agent endpoint runs with (stored in config, not a file):\n" + prompts})
 	}
+	if watchers := folderWatcherConfig(d); watchers != "" {
+		out = append(out, sourceFile{path: "folder watchers (manage_watch)", kind: platformConfigKind,
+			body: "The platform runs these server-side folder watcher loops in Go (stored in of_folder_watchers, not a JS file). Each watcher automatically polls its folder on disk (including subdirectories), deduplicates seen files in SQLite, detects created/modified/deleted files, publishes folder.file_dropped events, and invokes function_path with req = {method:'WATCH', watcher, folder, event:'created'|'modified'|'deleted', kind:'created'|'changed'|'deleted', path, rel_path, name, ext, size_bytes, size, mtime, mime_type, is_text, content, body:{...}}. Server functions can also call ctx.watch.list(name?) to read the live directory inventory:\n" + watchers})
+	}
+	if mqttCfg := mqttPlatformConfig(d); mqttCfg != "" {
+		out = append(out, sourceFile{path: "MQTT broker & rules (manage_mqtt)", kind: platformConfigKind,
+			body: "The platform runs an embedded MQTT v3.1.1 broker in Go (WebSocket at /mqtt, rollups at GET /api/__mqtt/rollups) configured via manage_mqtt (stored in of_mqtt_*, not a JS file). Ingest rules automatically match incoming topics, insert into target_table, compute time-series rollups, and/or invoke function_path with req = {method:'MQTT', topic, payload, json, params, client_id, device, body:{...}}:\n" + mqttCfg})
+	}
 	return out
+}
+
+func folderWatcherConfig(d *sql.DB) string {
+	rows, err := store.ListFolderWatchers(d)
+	if err != nil || len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, w := range rows {
+		fmt.Fprintf(&b, "- watcher %q: folder=%q glob=%q poll_sec=%d enabled=%v", w.Name, w.Folder, w.Glob, w.PollSec, w.Enabled)
+		if w.FunctionPath != "" {
+			fmt.Fprintf(&b, " -> invokes /api/%s", strings.Trim(w.FunctionPath, "/"))
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func mqttPlatformConfig(d *sql.DB) string {
+	cfg, err := store.LoadMQTTConfig(d)
+	rules, _ := store.ListMQTTRules(d)
+	devices, _ := store.ListMQTTDevices(d)
+	bridges, _ := store.ListMQTTBridges(d)
+	if (err != nil || !cfg.Enabled) && len(rules) == 0 && len(devices) == 0 && len(bridges) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "broker: enabled=%v allow_anonymous=%v max_clients=%d user_allow_pub=%q user_allow_sub=%q\n",
+		cfg.Enabled, cfg.AllowAnonymous, cfg.MaxClients, cfg.UserAllowPub, cfg.UserAllowSub)
+	for _, r := range rules {
+		fmt.Fprintf(&b, "- rule %q: topic_filter=%q target_table=%q function_path=%q rollup_interval=%q min_interval_sec=%d retention_days=%d enabled=%v\n",
+			r.Name, r.TopicFilter, r.TargetTable, r.FunctionPath, r.RollupInterval, r.MinIntervalSec, r.RetentionDays, r.Enabled)
+	}
+	for _, dev := range devices {
+		fmt.Fprintf(&b, "- device %q: username=%q allow_pub=%q allow_sub=%q heartbeat_sec=%d enabled=%v\n",
+			dev.Name, dev.Username, dev.AllowPub, dev.AllowSub, dev.HeartbeatSec, dev.Enabled)
+	}
+	for _, br := range bridges {
+		fmt.Fprintf(&b, "- bridge %q: broker_url=%q remote_sub=%q local_prefix=%q local_pub=%q remote_prefix=%q enabled=%v\n",
+			br.Name, br.BrokerURL, br.RemoteSub, br.LocalPrefix, br.LocalPub, br.RemotePrefix, br.Enabled)
+	}
+	return b.String()
 }
 
 // endpointPrompts lists the system prompt of every hosted LLM and agent endpoint, each

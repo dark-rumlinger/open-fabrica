@@ -135,6 +135,26 @@ func TestArtifactGetInfersKind(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("explicit kind should resolve dup, got %q", res.Error)
 	}
+
+	// Unique basename fallback for files: asking for "/files/js/main.js" or "main.js"
+	// resolves to "js/main.js" when "main.js" is unique in the project.
+	res, _ = artifactActionGet(ctx, "", "/files/main.js", 0, 0)
+	if !res.Success {
+		t.Fatalf("unique basename fallback should resolve /files/main.js to js/main.js, got %q", res.Error)
+	}
+	if data, ok := res.Data.(map[string]any); !ok || data["file_path"] != "js/main.js" {
+		t.Fatalf("expected file_path=js/main.js, got %+v", res.Data)
+	}
+
+	// Bare-name fallback for layout/component when queried with a leading slash ("/default").
+	insertArtifactRow(t, db, "layout", "default", "<html>{{content}}</html>", "2026-06-01T14:00:00Z")
+	res, _ = artifactActionGet(ctx, "", "/default", 0, 0)
+	if !res.Success {
+		t.Fatalf("expected /default to resolve to layout 'default', got %q", res.Error)
+	}
+	if data, ok := res.Data.(map[string]any); !ok || data["kind"] != "layout" || data["file_path"] != "default" {
+		t.Fatalf("expected kind=layout file_path=default, got %+v", res.Data)
+	}
 }
 
 // TestArtifactGetOutlineFirstForLargeFile pins the outline-first default: a bare
@@ -298,6 +318,9 @@ func TestCanonicalizeFilePath(t *testing.T) {
 		{"", "/about", "", "/about"},
 		// An explicit non-file kind is never overridden by a /files/-shaped path.
 		{"page", "/files/weird", "page", "/files/weird"},
+		// Layout and component paths normalize away stray "/files/" and leading "/".
+		{"component", "/files/week.html", "component", "week.html"},
+		{"layout", "/default", "layout", "default"},
 	}
 	for _, c := range cases {
 		gotKind, gotPath := canonicalizeFilePath(c.inKind, c.inPath)

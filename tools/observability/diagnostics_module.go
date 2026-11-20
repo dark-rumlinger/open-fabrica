@@ -25,6 +25,7 @@ import (
 	"openfabrica/analysis"
 	"openfabrica/internal/browser"
 	"openfabrica/internal/stringutil"
+	"openfabrica/probe"
 
 	"openfabrica/store"
 
@@ -386,6 +387,7 @@ type pageRenderReport struct {
 	canvasDominant bool     // that canvas covers a large share of the viewport (a canvas-app page)
 	canvasSized    bool     // the canvas has a non-zero backing store (width>0 && height>0)
 	rafFrames      int      // requestAnimationFrame calls counted during the observation window (render-loop liveness)
+	deadControls   []string // dead_control / inert_page / hidden_ui findings from the CDP control census
 }
 
 // failureReason returns a single actionable reason the render is a HARD failure, or
@@ -465,6 +467,17 @@ func (r *pageRenderReport) stuckBootWarning() string {
 		"not-yet-connected socket, or an init step gated on a connection that never completed). visible_chars here counts "+
 		"only the loading/HUD overlay and is NOT a health signal for this page. Confirm the page actually enters its "+
 		"running state (the loop advances, the loading overlay clears), then re-run test_page - do not ship a canvas that never draws a frame.", r.rafFrames)
+}
+
+// deadControlWarning returns an advisory when the CDP dead-control / hidden-UI census
+// found unwired interactive controls or an unreachable entry overlay on the page.
+// Surfacing this in test_page lets the agent wire dead buttons or unhide the entry UI
+// during the build instead of first hearing about it from the end-of-build gate.
+func (r *pageRenderReport) deadControlWarning() string {
+	if len(r.deadControls) == 0 {
+		return ""
+	}
+	return strings.Join(r.deadControls, " ")
 }
 
 // consoleFromProjectCode reports whether a console call originated in generated
@@ -669,27 +682,42 @@ func verifyPageRender(ctx *tools.ToolContext, domain string, port int, path, aut
 	_ = chromedp.Run(runCtx, chromedp.Evaluate(canvasLivenessProbeJS, &live))
 
 	mu.Lock()
-	defer mu.Unlock()
-	boot := append([]string(nil), bootFailures...)
+	excs := probe.FilterEnvironmentalNoise(append([]string(nil), exceptions...))
+	cons := probe.FilterEnvironmentalNoise(append([]string(nil), consoleErrors...))
+	boot := probe.FilterEnvironmentalNoise(append([]string(nil), bootFailures...))
+	failedCopy := append([]string(nil), failed...)
+	failedURLsCopy := append([]string(nil), failedURLs...)
+	prjFrame := firstPrjFrame
+	mu.Unlock()
+	if len(excs) == 0 {
+		prjFrame = ""
+	}
 	for _, v := range probeViolations {
 		boot = append(boot, "envelope misuse: "+v)
+	}
+	var deadControls []string
+	if len(excs) == 0 && len(boot) == 0 && len(failedCopy) == 0 {
+		for _, is := range probe.ProbeDeadControls(runCtx, path) {
+			deadControls = append(deadControls, is.Message)
+		}
 	}
 	return &pageRenderReport{
 		visibleChars:   vc.VisibleChars,
 		mediaCount:     vc.MediaCount,
 		hiddenChars:    vc.HiddenChars,
 		hiddenReason:   vc.HiddenReason,
-		exceptions:     append([]string(nil), exceptions...),
-		firstPrjFrame:  firstPrjFrame,
-		failedAssets:   append([]string(nil), failed...),
-		failedURLs:     append([]string(nil), failedURLs...),
-		consoleErrors:  append([]string(nil), consoleErrors...),
+		exceptions:     excs,
+		firstPrjFrame:  prjFrame,
+		failedAssets:   failedCopy,
+		failedURLs:     failedURLsCopy,
+		consoleErrors:  cons,
 		bootFailures:   boot,
 		junkText:       append([]string(nil), vc.JunkText...),
 		canvasPresent:  live.CanvasPresent,
 		canvasDominant: live.CanvasDominant,
 		canvasSized:    live.CanvasSized,
 		rafFrames:      live.RAFFrames,
+		deadControls:   deadControls,
 	}, nil
 }
 

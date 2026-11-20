@@ -53,6 +53,9 @@ func init() {
 
 // normalizeMethods validates a comma-separated method list and returns it
 // uppercased and de-duplicated, or an error message. Empty defaults to POST.
+// Non-HTTP internal invocation tags ("MQTT", "WATCH", "EVENT") are silently
+// stripped: MQTT rules, folder watchers, and event triggers invoke function_path
+// directly in-process regardless of the HTTP methods list.
 func normalizeMethods(raw string) (string, string) {
 	if strings.TrimSpace(raw) == "" {
 		return "POST", ""
@@ -61,7 +64,7 @@ func normalizeMethods(raw string) (string, string) {
 	out := make([]string, 0, 5)
 	for _, m := range strings.Split(raw, ",") {
 		m = strings.ToUpper(strings.TrimSpace(m))
-		if m == "" {
+		if m == "" || m == "MQTT" || m == "WATCH" || m == "EVENT" {
 			continue
 		}
 		if !functionMethods[m] {
@@ -304,6 +307,20 @@ func (a *FunctionUpdate) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	}
 	if len(sets) == 0 {
 		return tools.Fail("no fields to update"), nil
+	}
+
+	var curCode string
+	var curExists bool
+	if err := ctx.DB.QueryRow("SELECT code FROM of_function_endpoints WHERE path = ?", path).Scan(&curCode); err == nil {
+		curExists = true
+	}
+	if a.Code != "" && len(sets) == 1 && curExists && curCode == a.Code {
+		return tools.Ok(map[string]any{
+			"endpoint_path": path,
+			"updated":       false,
+			"no_change":     true,
+			"hint":          "The code you sent is byte-identical to the saved function at /api/" + path + ". Do not call update again with the same code.",
+		}), nil
 	}
 
 	// A methods change moves the routes this endpoint answers, so re-claim the

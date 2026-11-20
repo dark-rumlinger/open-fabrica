@@ -140,10 +140,10 @@ func (r *flowRun) adoptPopup(s *flowSession) {
 		return
 	}
 	ctx, cancel := chromedp.NewContext(r.browserCtx, chromedp.WithTargetID(tab))
-	prev := s.tab
-	s.tab = tab
+	prev, prevClock := s.tab, s.clockScript
+	s.tab, s.clockScript = tab, ""
 	if err := r.setupTab(s, ctx); err != nil {
-		s.tab = prev
+		s.tab, s.clockScript = prev, prevClock
 		cancel()
 		return
 	}

@@ -29,11 +29,13 @@ function handler(req, ctx) {
 
 **`ctx` API (synchronous, bounded):**
 - `ctx.query(sql, params)` — read-only single `SELECT` with `?` params (refuses `of_*` tables and PASSWORD/hash columns).
-- `ctx.insert(table, row)` / `ctx.update(table, patch, where)` / `ctx.upsert(table, row, [keyCol])` — queued and applied in one transaction *after* `handler` returns (so a subsequent `ctx.query` won't see the new row). **`where` and `row`/`patch` are plain objects** (`{ id: 7 }`, never SQL strings); `patch` supports `{"$increment": n}` / `{"$decrement": n}`; `upsert` requires a `UNIQUE` index on `keyCol`.
+- `ctx.insert(table, row)` / `ctx.update(table, patch, where)` / `ctx.upsert(table, row, [keyCol])` / `ctx.delete(table, where)` — queued and applied in one transaction *after* `handler` returns (so a subsequent `ctx.query` won't see the new row). **`where` and `row`/`patch` are plain objects** (`{ id: 7 }`, never SQL strings); `patch` supports `{"$increment": n}` / `{"$decrement": n}`; `upsert` requires a `UNIQUE` index on `keyCol`.
 - `ctx.fetch(url, { method, headers, body })` — SSRF-guarded outbound HTTP (`headers`/`body` must be strings).
 - `ctx.secret(name)` — reads a secret on this endpoint's `secrets` allowlist.
 - `ctx.llm(prompt, { system, max_tokens })` — completion on the project's configured LLM provider.
 - `ctx.checkout({ amount, success_url, cancel_url, description, metadata })` — opens hosted checkout (`plan_id` for subscriptions; see `payments`).
+- `ctx.mqtt.publish(topic, payload, { qos?, retain? })` — publishes to the project's MQTT broker (see `mqtt`).
+- `ctx.lan.wake(mac, { broadcast?, port? })` / `ctx.lan.ping(host, port, timeoutMs?)` / `ctx.watch.list(watcherName?)` — local network & watched folder helpers (see `lan`).
 - `ctx.now()` (ms) and `ctx.random()`.
 
 **Auth:** with `requires_auth: true`, `req.user` is `{ id, role }`; scope per-user writes/queries to `req.user.id`. Handlers are validated at save time (`get` before `update`).

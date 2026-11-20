@@ -2,9 +2,13 @@
  * Project MQTT Inspector: broker toggle, live SSE topic monitor, test
  * publisher, device credentials/watchdogs, outbound LAN bridges, ingest
  * rules, and retained topics.
+ *
+ * Built on the shared page scaffold (pageHeader + context-panel body, section
+ * headers, card() item lists, createFormModal) so it matches the other project
+ * tabs. Behaviour and API calls are unchanged.
  */
 
-import { h, render, clear } from '../../core/dom.js';
+import { h, clear } from '../../core/dom.js';
 import { t } from '../../core/i18n.js';
 import { createScope } from '../../core/lifecycle.js';
 import { get, post, put, del } from '../../core/http.js';
@@ -12,6 +16,11 @@ import * as state from '../../core/state.js';
 import * as toast from '../../ui/toast.js';
 import * as modal from '../../ui/modal.js';
 import { humanizeError } from '../../ui/errors.js';
+import { pageHeader, card } from '../../ui/card.js';
+import { createFormModal } from '../../ui/form-modal.js';
+import { formGroup, emptyState, showLoadError, listSkeleton } from '../../ui/helpers.js';
+import { icon } from '../../ui/icon.js';
+import { formatDateTime } from '../../core/datetime.js';
 
 const MAX_LIVE_EVENTS = 100;
 
@@ -21,9 +30,8 @@ export function renderProjectMQTT(container, projectId) {
   let paused = false;
   let data = null;
 
-  const root = h('div', { className: 'page-stack' });
-  render(container, root);
-
+  // The live-event list persists across repaints; it is re-parented into a
+  // fresh card each paint while the SSE handler keeps updating it in place.
   const liveListEl = h('div', {
     className: 'font-mono text-sm',
     style: { maxHeight: '260px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' },
@@ -46,7 +54,8 @@ export function renderProjectMQTT(container, projectId) {
         ? `${ev.payload.topic || ''} -> ${String(ev.payload.payload || '').slice(0, 160)}`
         : `${ev.payload.device || ev.payload.client_id || ''} ${ev.payload.heartbeat_sec ? `(${ev.payload.heartbeat_sec}s)` : ''}`.trim();
       liveListEl.appendChild(h('div', {
-        style: { display: 'flex', gap: '8px', alignItems: 'baseline', padding: '4px 6px', borderBottom: '1px solid var(--border-subtle)' },
+        className: 'flex gap-2',
+        style: { alignItems: 'baseline', padding: '4px 6px', borderBottom: '1px solid var(--border)' },
       }, [
         h('span', { className: 'text-secondary', style: { flexShrink: 0 } }, ts),
         h('span', { className: badgeCls, style: { flexShrink: 0 } }, ev.type.replace('mqtt.', '')),
@@ -66,7 +75,7 @@ export function renderProjectMQTT(container, projectId) {
       data = await get(`/admin/api/projects/${projectId}/mqtt`);
       if (!scope.disposed) paint();
     } catch (err) {
-      if (!scope.disposed) toast.error(humanizeError(err.message));
+      if (!scope.disposed) showLoadError(container, t('mqtt.title'), err, load);
     }
   }
 
@@ -86,48 +95,57 @@ export function renderProjectMQTT(container, projectId) {
     }
   }
 
+  // Section divider: an icon + title on the left, an optional control on the
+  // right (an Add button, the live-stream pause/clear). Matches the diagnostics
+  // tab's section headers.
+  function sectionHeader(title, iconName, right) {
+    return h('div', { className: 'flex items-center justify-between mb-2 mt-4' }, [
+      h('h4', { className: 'flex items-center gap-2 text-sm text-secondary', style: { margin: 0 } }, [
+        h('span', { innerHTML: icon(iconName) }),
+        h('span', {}, title),
+      ]),
+      right || h('span'),
+    ]);
+  }
+
   function openAddDeviceModal() {
     const nameIn = h('input', { className: 'input', placeholder: 'greenhouse_esp32' });
     const userIn = h('input', { className: 'input', placeholder: 'esp1' });
     const pubIn = h('input', { className: 'input', value: '#' });
     const subIn = h('input', { className: 'input', value: '#' });
     const hbIn = h('input', { className: 'input', type: 'number', min: '0', value: '0', placeholder: '300' });
+    let token = null;
 
-    const body = h('div', { className: 'flex-col', style: { gap: '10px' } }, [
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Name'), nameIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Username'), userIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Allow Publish (CSV)'), pubIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Allow Subscribe (CSV)'), subIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Heartbeat Watchdog (sec, 0 = off)'), hbIn]),
-    ]);
-
-    modal.show(t('mqtt.addDevice'), body, [
-      modal.cancelBtn(),
-      h('button', {
-        className: 'btn btn--primary',
-        onClick: async () => {
-          try {
-            const res = await post(`/admin/api/projects/${projectId}/mqtt/devices`, {
-              name: nameIn.value.trim(),
-              username: userIn.value.trim(),
-              allow_pub: pubIn.value.trim() || '#',
-              allow_sub: subIn.value.trim() || '#',
-              heartbeat_sec: parseInt(hbIn.value, 10) || 0,
-            });
-            modal.close();
-            if (res?.token) {
-              modal.show(t('mqtt.addDevice'), h('div', { className: 'flex-col', style: { gap: '8px' } }, [
-                h('p', { className: 'text-secondary' }, t('mqtt.tokenOnce')),
-                h('code', { className: 'font-mono', style: { padding: '8px', background: 'var(--bg-subtle)', borderRadius: '6px', wordBreak: 'break-all' } }, res.token),
-              ]), [modal.cancelBtn(t('common.close'))]);
-            }
-            await load();
-          } catch (err) {
-            toast.error(humanizeError(err.message));
-          }
-        },
-      }, t('common.save')),
-    ]);
+    createFormModal({
+      title: t('mqtt.addDevice'),
+      fields: [
+        formGroup('Name', nameIn),
+        formGroup('Username', userIn),
+        formGroup('Allow Publish (CSV)', pubIn),
+        formGroup('Allow Subscribe (CSV)', subIn),
+        formGroup('Heartbeat Watchdog (sec, 0 = off)', hbIn),
+      ],
+      submit: async () => {
+        const res = await post(`/admin/api/projects/${projectId}/mqtt/devices`, {
+          name: nameIn.value.trim(),
+          username: userIn.value.trim(),
+          allow_pub: pubIn.value.trim() || '#',
+          allow_sub: subIn.value.trim() || '#',
+          heartbeat_sec: parseInt(hbIn.value, 10) || 0,
+        });
+        token = res?.token || null;
+      },
+      onDone: () => {
+        // The token is returned once; this is the owner's only chance to copy it.
+        if (token) {
+          modal.show(t('mqtt.addDevice'), h('div', { className: 'flex-col', style: { gap: '8px' } }, [
+            h('p', { className: 'text-secondary' }, t('mqtt.tokenOnce')),
+            h('code', { className: 'font-mono', style: { padding: '8px', background: 'var(--bg-secondary)', borderRadius: '6px', wordBreak: 'break-all' } }, token),
+          ]), [modal.cancelBtn(t('common.close'))]);
+        }
+        load();
+      },
+    });
   }
 
   function openAddBridgeModal() {
@@ -139,76 +157,130 @@ export function renderProjectMQTT(container, projectId) {
     const userIn = h('input', { className: 'input', placeholder: 'Optional username' });
     const passIn = h('input', { className: 'input', type: 'password', placeholder: 'Optional password' });
 
-    const body = h('div', { className: 'flex-col', style: { gap: '10px' } }, [
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Name'), nameIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Broker URL (tcp:// or tls://)'), urlIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Remote Subscribe (CSV)'), rSubIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Local Prefix'), lPreIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Local Publish Out (CSV)'), lPubIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Username'), userIn]),
-      h('label', { className: 'field' }, [h('span', { className: 'field__label' }, 'Password'), passIn]),
-    ]);
+    createFormModal({
+      title: t('mqtt.addBridge'),
+      fields: [
+        formGroup('Name', nameIn),
+        formGroup('Broker URL (tcp:// or tls://)', urlIn),
+        formGroup('Remote Subscribe (CSV)', rSubIn),
+        formGroup('Local Prefix', lPreIn),
+        formGroup('Local Publish Out (CSV)', lPubIn),
+        formGroup('Username', userIn),
+        formGroup('Password', passIn),
+      ],
+      submit: () => post(`/admin/api/projects/${projectId}/mqtt/bridges`, {
+        name: nameIn.value.trim(),
+        broker_url: urlIn.value.trim(),
+        remote_sub: rSubIn.value.trim(),
+        local_prefix: lPreIn.value.trim(),
+        local_pub: lPubIn.value.trim(),
+        username: userIn.value.trim(),
+        password: passIn.value,
+        qos: 1,
+      }),
+      onDone: load,
+    });
+  }
 
-    modal.show(t('mqtt.addBridge'), body, [
-      modal.cancelBtn(),
-      h('button', {
-        className: 'btn btn--primary',
+  function deviceCard(d, liveClients) {
+    const online = liveClients.has(d.username);
+    const badge = d.stale
+      ? h('span', { className: 'badge badge--danger' }, 'stale')
+      : online
+        ? h('span', { className: 'badge badge--success' }, t('mqtt.connected'))
+        : h('span', { className: 'badge' }, d.last_seen_at ? formatDateTime(d.last_seen_at) : '—');
+
+    return card({
+      title: d.name,
+      iconName: 'radio',
+      badge,
+      children: [
+        h('div', { className: 'text-sm text-secondary mt-2' }, [
+          h('span', {}, 'User '), h('code', { className: 'font-mono' }, d.username || '—'),
+          h('span', {}, '  ·  ACL '), h('code', { className: 'font-mono' }, `${d.allow_pub} / ${d.allow_sub}`),
+          ...(d.heartbeat_sec > 0 ? [h('span', {}, '  ·  HB '), h('code', { className: 'font-mono' }, `${d.heartbeat_sec}s`)] : []),
+        ]),
+      ],
+      actions: [{
+        label: t('common.delete'), kind: 'danger', iconName: 'trash',
         onClick: async () => {
-          try {
-            await post(`/admin/api/projects/${projectId}/mqtt/bridges`, {
-              name: nameIn.value.trim(),
-              broker_url: urlIn.value.trim(),
-              remote_sub: rSubIn.value.trim(),
-              local_prefix: lPreIn.value.trim(),
-              local_pub: lPubIn.value.trim(),
-              username: userIn.value.trim(),
-              password: passIn.value,
-              qos: 1,
-            });
-            modal.close();
-            await load();
-          } catch (err) {
-            toast.error(humanizeError(err.message));
-          }
+          await del(`/admin/api/projects/${projectId}/mqtt/devices/${encodeURIComponent(d.name)}`);
+          await load();
         },
-      }, t('common.save')),
-    ]);
+      }],
+    });
+  }
+
+  function bridgeCard(b, bridgeLive) {
+    const live = bridgeLive.get(b.name);
+    const badge = live?.connected
+      ? h('span', { className: 'badge badge--success' }, `${t('mqtt.connected')} (${live.messages_in}/${live.messages_out})`)
+      : h('span', { className: live?.last_error ? 'badge badge--danger' : 'badge', title: live?.last_error || '' },
+          live?.last_error ? live.last_error.slice(0, 48) : t('mqtt.disconnected'));
+
+    return card({
+      title: b.name,
+      iconName: 'link',
+      badge,
+      children: [
+        h('div', { className: 'text-sm text-secondary mt-2' }, [
+          h('span', {}, 'URL '), h('code', { className: 'font-mono', style: { wordBreak: 'break-all' } }, b.broker_url),
+        ]),
+        h('div', { className: 'text-sm text-secondary mt-1' }, [
+          h('span', {}, 'In '), h('code', { className: 'font-mono' }, b.remote_sub || '—'),
+          h('span', {}, '  ·  Out '), h('code', { className: 'font-mono' }, b.local_pub || '—'),
+        ]),
+      ],
+      actions: [{
+        label: t('common.delete'), kind: 'danger', iconName: 'trash',
+        onClick: async () => {
+          await del(`/admin/api/projects/${projectId}/mqtt/bridges/${encodeURIComponent(b.name)}`);
+          await load();
+        },
+      }],
+    });
   }
 
   function paint() {
-    clear(root);
+    clear(container);
     const cfg = data.config || {};
     const liveClients = new Set((data.clients || []).map(c => c.username || c.device));
     const bridgeLive = new Map((data.bridge_status || []).map(b => [b.name, b]));
 
-    // 1. Header & Broker Status
-    const header = h('div', { className: 'card' }, [
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' } }, [
-        h('div', {}, [
-          h('h2', { style: { margin: 0 } }, t('mqtt.title')),
-          h('p', { className: 'text-secondary', style: { margin: '4px 0 0' } }, t('mqtt.subtitle')),
-        ]),
-        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, [
-          h('span', { className: cfg.enabled ? 'badge badge--success' : 'badge' }, cfg.enabled ? t('mqtt.enabled') : t('mqtt.disabled')),
-          h('span', { className: 'badge' }, `${t('mqtt.connectedClients')}: ${data.connected_clients || 0}`),
-          h('span', { className: 'badge font-mono' }, cfg.ws_path || '/mqtt'),
-          ...(cfg.tcp_port ? [h('span', { className: 'badge font-mono' }, `TCP :${cfg.tcp_port}`)] : []),
-          h('button', { className: 'btn btn--sm btn--secondary', onClick: load }, t('common.refresh')),
-          h('button', { className: `btn btn--sm ${cfg.enabled ? 'btn--secondary' : 'btn--primary'}`, onClick: toggleEnabled }, cfg.enabled ? t('mqtt.disable') : t('mqtt.enable')),
-        ]),
-      ]),
-    ]);
+    container.appendChild(pageHeader({
+      title: t('mqtt.title'),
+      actions: [
+        { label: t('common.refresh'), kind: 'secondary', onClick: load },
+        {
+          label: cfg.enabled ? t('mqtt.disable') : t('mqtt.enable'),
+          kind: cfg.enabled ? 'secondary' : 'primary',
+          onClick: toggleEnabled,
+        },
+      ],
+    }));
 
-    // 2. Test Publisher
+    const body = h('div', { className: 'context-panel__body--page' });
+
+    // Broker status strip.
+    body.appendChild(h('div', { className: 'card mb-3' }, [
+      h('div', { className: 'flex items-center gap-2 flex-wrap' }, [
+        h('span', { className: cfg.enabled ? 'badge badge--success' : 'badge' }, cfg.enabled ? t('mqtt.enabled') : t('mqtt.disabled')),
+        h('span', { className: 'badge' }, `${t('mqtt.connectedClients')}: ${data.connected_clients || 0}`),
+        h('span', { className: 'badge font-mono' }, cfg.ws_path || '/mqtt'),
+        ...(cfg.tcp_port ? [h('span', { className: 'badge font-mono' }, `TCP :${cfg.tcp_port}`)] : []),
+      ]),
+    ]));
+
+    // Test Publisher.
     const topicIn = h('input', { className: 'input font-mono', placeholder: 'sensors/esp1/temp', style: { flex: '1 1 200px' } });
     const payloadIn = h('input', { className: 'input font-mono', placeholder: '{"c": 22.5}', style: { flex: '2 1 260px' } });
     const retainChk = h('input', { type: 'checkbox' });
-    const pubCard = h('div', { className: 'card' }, [
-      h('h3', { style: { marginTop: 0 } }, t('mqtt.testPublish')),
-      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } }, [
+    body.appendChild(sectionHeader(t('mqtt.testPublish'), 'send'));
+    body.appendChild(h('div', { className: 'card mb-3' }, [
+      h('div', { className: 'flex items-center gap-2 flex-wrap' }, [
         topicIn,
         payloadIn,
-        h('label', { style: { display: 'flex', gap: '4px', alignItems: 'center' } }, [retainChk, t('mqtt.retain')]),
+        h('label', { className: 'flex items-center gap-1' }, [retainChk, t('mqtt.retain')]),
         h('button', {
           className: 'btn btn--sm btn--primary',
           disabled: !cfg.enabled,
@@ -228,9 +300,9 @@ export function renderProjectMQTT(container, projectId) {
           },
         }, t('mqtt.publish')),
       ]),
-    ]);
+    ]));
 
-    // 3. Live Topic Monitor
+    // Live Topic Stream.
     const pauseBtn = h('button', {
       className: 'btn btn--sm btn--secondary',
       onClick: () => {
@@ -238,134 +310,83 @@ export function renderProjectMQTT(container, projectId) {
         pauseBtn.textContent = paused ? t('mqtt.resume') : t('mqtt.pause');
       },
     }, paused ? t('mqtt.resume') : t('mqtt.pause'));
+    const clearBtn = h('button', {
+      className: 'btn btn--sm btn--secondary',
+      onClick: () => { liveEvents = []; renderLiveList(); },
+    }, t('mqtt.clear'));
+    body.appendChild(sectionHeader(t('mqtt.liveStream'), 'activity', h('div', { className: 'flex items-center gap-2' }, [pauseBtn, clearBtn])));
     renderLiveList();
-    const liveCard = h('div', { className: 'card' }, [
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } }, [
-        h('h3', { style: { margin: 0 } }, t('mqtt.liveStream')),
-        h('div', { style: { display: 'flex', gap: '6px' } }, [
-          pauseBtn,
-          h('button', {
-            className: 'btn btn--sm btn--secondary',
-            onClick: () => { liveEvents = []; renderLiveList(); },
-          }, t('mqtt.clear')),
+    body.appendChild(h('div', { className: 'card mb-3' }, [liveListEl]));
+
+    // Devices.
+    const addDeviceBtn = h('button', { className: 'btn btn--primary btn--sm', onClick: openAddDeviceModal },
+      [h('span', { innerHTML: icon('plus') }), ' ' + t('mqtt.addDevice')]);
+    body.appendChild(sectionHeader(t('mqtt.devices'), 'radio', addDeviceBtn));
+    if (!(data.devices || []).length) {
+      body.appendChild(emptyState({ iconName: 'radio', title: t('mqtt.devices'), description: t('mqtt.devicesEmpty') }));
+    } else {
+      for (const d of data.devices) body.appendChild(deviceCard(d, liveClients));
+    }
+
+    // Outbound LAN Bridges.
+    const addBridgeBtn = h('button', { className: 'btn btn--primary btn--sm', onClick: openAddBridgeModal },
+      [h('span', { innerHTML: icon('plus') }), ' ' + t('mqtt.addBridge')]);
+    body.appendChild(sectionHeader(t('mqtt.bridges'), 'link', addBridgeBtn));
+    if (!(data.bridges || []).length) {
+      body.appendChild(emptyState({ iconName: 'link', title: t('mqtt.bridges'), description: t('mqtt.bridgesEmpty') }));
+    } else {
+      for (const b of data.bridges) body.appendChild(bridgeCard(b, bridgeLive));
+    }
+
+    // Ingest Rules & Rollups.
+    body.appendChild(sectionHeader(t('mqtt.rules'), 'zap'));
+    if (!(data.rules || []).length) {
+      body.appendChild(emptyState({ iconName: 'zap', title: t('mqtt.rules'), description: t('mqtt.rulesEmpty') }));
+    } else {
+      body.appendChild(h('div', { className: 'card mb-3' }, [
+        h('table', { className: 'table' }, [
+          h('thead', {}, [h('tr', {}, [
+            h('th', {}, 'Name'), h('th', {}, 'Topic Filter'), h('th', {}, 'Target'), h('th', {}, 'Rollup / Retention'),
+          ])]),
+          h('tbody', {}, data.rules.map(r => h('tr', {}, [
+            h('td', { className: 'font-mono' }, r.name),
+            h('td', { className: 'font-mono text-sm' }, r.topic_filter),
+            h('td', { className: 'font-mono text-sm' }, [r.target_table, r.function_path].filter(Boolean).join(' + ') || '—'),
+            h('td', { className: 'text-sm' }, [
+              r.rollup_interval ? `rollup ${r.rollup_interval}` : '',
+              r.retention_days > 0 ? `${r.retention_days}d` : '',
+              r.min_interval_sec > 0 ? `≥${r.min_interval_sec}s` : '',
+            ].filter(Boolean).join(', ') || '—'),
+          ]))),
         ]),
-      ]),
-      liveListEl,
-    ]);
+      ]));
+    }
 
-    // 4. Devices
-    const devicesCard = h('div', { className: 'card' }, [
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } }, [
-        h('h3', { style: { margin: 0 } }, t('mqtt.devices')),
-        h('button', { className: 'btn btn--sm btn--primary', onClick: openAddDeviceModal }, `+ ${t('mqtt.addDevice')}`),
-      ]),
-      !(data.devices || []).length
-        ? h('div', { className: 'text-secondary' }, t('mqtt.devicesEmpty'))
-        : h('table', { className: 'table' }, [
-            h('thead', {}, [h('tr', {}, [
-              h('th', {}, 'Name'), h('th', {}, 'Username'), h('th', {}, 'ACL (Pub / Sub)'),
-              h('th', {}, 'Heartbeat'), h('th', {}, 'Status'), h('th', {}, ''),
-            ])]),
-            h('tbody', {}, (data.devices || []).map(d => {
-              const online = liveClients.has(d.username);
-              const badge = d.stale
-                ? h('span', { className: 'badge badge--danger' }, 'stale')
-                : online
-                  ? h('span', { className: 'badge badge--success' }, t('mqtt.connected'))
-                  : h('span', { className: 'badge' }, d.last_seen_at ? d.last_seen_at.replace('T', ' ').replace('Z', '') : '—');
-              return h('tr', {}, [
-                h('td', { className: 'font-mono' }, d.name),
-                h('td', { className: 'font-mono' }, d.username),
-                h('td', { className: 'font-mono text-sm' }, `${d.allow_pub} / ${d.allow_sub}`),
-                h('td', {}, d.heartbeat_sec > 0 ? `${d.heartbeat_sec}s` : '—'),
-                h('td', {}, [badge]),
-                h('td', { style: { textAlign: 'right' } }, [
-                  h('button', {
-                    className: 'btn btn--sm btn--secondary',
-                    onClick: async () => {
-                      await del(`/admin/api/projects/${projectId}/mqtt/devices/${encodeURIComponent(d.name)}`);
-                      await load();
-                    },
-                  }, t('common.delete')),
-                ]),
-              ]);
-            })),
-          ]),
-    ]);
+    // Retained Messages.
+    body.appendChild(sectionHeader(t('mqtt.retained'), 'database'));
+    if (!(data.retained || []).length) {
+      body.appendChild(emptyState({ iconName: 'database', title: t('mqtt.retained'), description: t('mqtt.retainedEmpty') }));
+    } else {
+      body.appendChild(h('div', { className: 'card mb-3' }, [
+        h('table', { className: 'table' }, [
+          h('thead', {}, [h('tr', {}, [h('th', {}, t('mqtt.topic')), h('th', {}, t('mqtt.payload'))])]),
+          h('tbody', {}, data.retained.map(rm => h('tr', {}, [
+            h('td', { className: 'font-mono text-sm' }, rm.topic),
+            h('td', { className: 'font-mono text-sm', style: { wordBreak: 'break-all' } }, String(rm.payload || '').slice(0, 200)),
+          ]))),
+        ]),
+      ]));
+    }
 
-    // 5. Bridges
-    const bridgesCard = h('div', { className: 'card' }, [
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } }, [
-        h('h3', { style: { margin: 0 } }, t('mqtt.bridges')),
-        h('button', { className: 'btn btn--sm btn--primary', onClick: openAddBridgeModal }, `+ ${t('mqtt.addBridge')}`),
-      ]),
-      !(data.bridges || []).length
-        ? h('div', { className: 'text-secondary' }, t('mqtt.bridgesEmpty'))
-        : h('table', { className: 'table' }, [
-            h('thead', {}, [h('tr', {}, [
-              h('th', {}, 'Name'), h('th', {}, 'Broker URL'), h('th', {}, 'In / Out'), h('th', {}, 'Status'), h('th', {}, ''),
-            ])]),
-            h('tbody', {}, (data.bridges || []).map(b => {
-              const live = bridgeLive.get(b.name);
-              const badge = live?.connected
-                ? h('span', { className: 'badge badge--success' }, `${t('mqtt.connected')} (${live.messages_in}/${live.messages_out})`)
-                : h('span', { className: live?.last_error ? 'badge badge--danger' : 'badge', title: live?.last_error || '' }, live?.last_error ? live.last_error.slice(0, 48) : t('mqtt.disconnected'));
-              return h('tr', {}, [
-                h('td', { className: 'font-mono' }, b.name),
-                h('td', { className: 'font-mono text-sm' }, b.broker_url),
-                h('td', { className: 'font-mono text-sm' }, `${b.remote_sub || '—'} / ${b.local_pub || '—'}`),
-                h('td', {}, [badge]),
-                h('td', { style: { textAlign: 'right' } }, [
-                  h('button', {
-                    className: 'btn btn--sm btn--secondary',
-                    onClick: async () => {
-                      await del(`/admin/api/projects/${projectId}/mqtt/bridges/${encodeURIComponent(b.name)}`);
-                      await load();
-                    },
-                  }, t('common.delete')),
-                ]),
-              ]);
-            })),
-          ]),
-    ]);
-
-    // 6. Rules & Retained
-    const rulesCard = h('div', { className: 'card' }, [
-      h('h3', { style: { marginTop: 0 } }, t('mqtt.rules')),
-      !(data.rules || []).length
-        ? h('div', { className: 'text-secondary' }, t('mqtt.rulesEmpty'))
-        : h('table', { className: 'table' }, [
-            h('thead', {}, [h('tr', {}, [
-              h('th', {}, 'Name'), h('th', {}, 'Topic Filter'), h('th', {}, 'Target'), h('th', {}, 'Rollup / Retention'),
-            ])]),
-            h('tbody', {}, (data.rules || []).map(r => h('tr', {}, [
-              h('td', { className: 'font-mono' }, r.name),
-              h('td', { className: 'font-mono text-sm' }, r.topic_filter),
-              h('td', { className: 'font-mono text-sm' }, [r.target_table, r.function_path].filter(Boolean).join(' + ') || '—'),
-              h('td', { className: 'text-sm' }, [
-                r.rollup_interval ? `rollup ${r.rollup_interval}` : '',
-                r.retention_days > 0 ? `${r.retention_days}d` : '',
-                r.min_interval_sec > 0 ? `≥${r.min_interval_sec}s` : '',
-              ].filter(Boolean).join(', ') || '—'),
-            ]))),
-          ]),
-    ]);
-
-    const retainedCard = h('div', { className: 'card' }, [
-      h('h3', { style: { marginTop: 0 } }, t('mqtt.retained')),
-      !(data.retained || []).length
-        ? h('div', { className: 'text-secondary' }, t('mqtt.retainedEmpty'))
-        : h('table', { className: 'table' }, [
-            h('thead', {}, [h('tr', {}, [h('th', {}, t('mqtt.topic')), h('th', {}, t('mqtt.payload'))])]),
-            h('tbody', {}, (data.retained || []).map(rm => h('tr', {}, [
-              h('td', { className: 'font-mono text-sm' }, rm.topic),
-              h('td', { className: 'font-mono text-sm', style: { wordBreak: 'break-all' } }, String(rm.payload || '').slice(0, 200)),
-            ]))),
-          ]),
-    ]);
-
-    root.append(header, pubCard, liveCard, devicesCard, bridgesCard, rulesCard, retainedCard);
+    container.appendChild(body);
   }
+
+  // Initial frame: the page header plus a skeleton, so the panel reads as
+  // "loading" rather than blank until the first fetch lands.
+  clear(container);
+  container.appendChild(pageHeader({ title: t('mqtt.title') }));
+  const loadingBody = h('div', { className: 'context-panel__body--page' }, [listSkeleton()]);
+  container.appendChild(loadingBody);
 
   load();
   return () => scope.dispose();

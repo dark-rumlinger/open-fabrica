@@ -62,11 +62,28 @@ func freshBuildInstruction(plan *Plan, ownerAnswer, changeRequest string, d *sql
 	// checklist, the point the model acts from.
 	if checklistAllResolved(d) {
 		b.WriteString("Every item on the checklist below is already done or blocked: confirm nothing is left open, then stop.\n\n")
+	} else if changeRequest == "" && (projectHasDeliverables(d) || checklistHasResolved(d)) {
+		b.WriteString("This is a continuation of an in-progress build (earlier turn history rolled over). The checklist below and `<project_state>` show what is already built: do not call `manage_tasks action=list`, and do not re-read files unless you need to edit or wire into them. Complete any open item whose deliverables already exist in `<project_state>` and are wired, then continue building the remaining open items.\n\n")
 	} else {
 		b.WriteString("The full checklist is already below - your first action is the create or save that starts its first item.\n\n")
 	}
 	b.WriteString(renderChecklist(d))
 	return b.String()
+}
+
+// checklistHasResolved reports whether any checklist item is already done or blocked,
+// indicating a mid-build rollover or resume rather than a cold segment-1 start.
+func checklistHasResolved(d *sql.DB) bool {
+	all, err := LoadTasks(d)
+	if err != nil {
+		return false
+	}
+	for _, t := range all {
+		if t.Status == TaskDone || t.Status == TaskBlocked {
+			return true
+		}
+	}
+	return false
 }
 
 // checklistAllResolved reports a non-empty checklist whose every item is done or blocked,

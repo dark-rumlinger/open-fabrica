@@ -59,6 +59,18 @@ func (a *DiagTestWebSocket) Run(ctx *tools.ToolContext) (*tools.Result, error) {
 	// handling; tick_hz>0 verifies the snapshot path; authoritative expects state).
 	roomGated, e2ee, requiresAuth, authoritative, hasView, tickHz, exists := wsEndpointFlags(ctx, wsPath)
 	if !exists {
+		if trimmed := strings.Trim(strings.ToLower(strings.TrimSpace(a.EndpointPath)), "/"); trimmed == "mqtt" {
+			var mqttEnabled int
+			_ = ctx.DB.QueryRow(`SELECT COALESCE(enabled, 0) FROM of_mqtt_config WHERE id = 1`).Scan(&mqttEnabled)
+			if mqttEnabled != 0 {
+				return tools.Ok(map[string]any{
+					"endpoint": "/mqtt",
+					"passed":   true,
+					"served":   "mqtt",
+					"note":     "The project's MQTT 3.1.1 broker is enabled and mounted at /mqtt (subprotocol 'mqtt' / 'mqttv3.1'). test_websocket probes JSON room endpoints under /api/<path>/ws; to inspect the MQTT broker and test ingest rules or retained messages, use manage_mqtt action=status and manage_mqtt action=publish.",
+				}), nil
+			}
+		}
 		return tools.Fail("no WebSocket endpoint is mounted at %s - create one with a realtime tool (manage_relay/manage_tick/manage_authoritative/manage_matchmaking/manage_signaling), or check the path", wsPath), nil
 	}
 	// Fail fast, and teach, when the endpoint is auth-gated and the probe holds no

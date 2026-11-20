@@ -22,7 +22,7 @@ import (
 const RuntimeIdleWindow = 1500 * time.Millisecond
 
 // ProbeInstrumentationJS is registered with Page.addScriptToEvaluateOnNewDocument
-// so it runs BEFORE any page or platform script (including js/auth.js). Two
+// so it runs BEFORE any page or platform script (including js/auth.js). Three
 // app-agnostic, false-positive-free injections:
 //
 //  1. Booby-traps envelope fields on Response.prototype: reading `.data`/`.count`
@@ -34,6 +34,10 @@ const RuntimeIdleWindow = 1500 * time.Millisecond
 //     render-liveness signal for a canvas/WebGL page whose boot stalls before its
 //     rAF loop (see verifyPageRender / stuckBootWarning). Counting only; it
 //     changes no behavior and cannot false-positive a correct page.
+//  3. Records 2D canvas fillText/strokeText onto canvas.__ofText (cleared on full-canvas
+//     clearRect/fillRect), so user-flow assertions (expectText, expectNoText, :has-text,
+//     read) see HUD scores and status text painted onto a <canvas> without requiring
+//     test-only window globals.
 const ProbeInstrumentationJS = `(function () {
   if (window.__ofProbeViolations) return;
   var V = window.__ofProbeViolations = [];
@@ -42,6 +46,40 @@ const ProbeInstrumentationJS = `(function () {
   var _raf = window.requestAnimationFrame;
   if (typeof _raf === 'function') {
     window.requestAnimationFrame = function (cb) { window.__ofRAF++; return _raf.call(window, cb); };
+  }
+  if (typeof CanvasRenderingContext2D !== 'undefined') {
+    var CP = CanvasRenderingContext2D.prototype;
+    var recText = function (c, t) {
+      if (!c) return;
+      var s = String(t == null ? '' : t).trim();
+      if (!s) return;
+      var a = c.__ofText || (c.__ofText = []);
+      if (a.length && a[a.length - 1] === s) return;
+      a.push(s);
+      if (a.length > 64) a.splice(0, a.length - 64);
+    };
+    var fullCover = function (c, x, y, w, h) {
+      return c && x <= 0 && y <= 0 && w >= (c.width || 0) * 0.9 && h >= (c.height || 0) * 0.9;
+    };
+    var _ft = CP.fillText, _st = CP.strokeText, _cr = CP.clearRect, _fr = CP.fillRect;
+    if (typeof _ft === 'function') {
+      CP.fillText = function (t) { recText(this.canvas, t); return _ft.apply(this, arguments); };
+    }
+    if (typeof _st === 'function') {
+      CP.strokeText = function (t) { recText(this.canvas, t); return _st.apply(this, arguments); };
+    }
+    if (typeof _cr === 'function') {
+      CP.clearRect = function (x, y, w, h) {
+        if (fullCover(this.canvas, x, y, w, h)) this.canvas.__ofText = [];
+        return _cr.apply(this, arguments);
+      };
+    }
+    if (typeof _fr === 'function') {
+      CP.fillRect = function (x, y, w, h) {
+        if (fullCover(this.canvas, x, y, w, h)) this.canvas.__ofText = [];
+        return _fr.apply(this, arguments);
+      };
+    }
   }
   var P = Response.prototype;
   ['data', 'count', 'rows', 'items', 'results', 'records'].forEach(function (k) {

@@ -270,6 +270,22 @@ func flowSite(t *testing.T) string {
 		case "/still":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(flowStill))
+		case "/canvas-hud":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<!doctype html><html><body>
+<canvas id="game" width="240" height="120"></canvas>
+<script>
+var c = document.getElementById('game'), g = c.getContext('2d'), score = 0;
+function draw() {
+  g.clearRect(0, 0, 240, 120);
+  g.fillText('Score: ' + score, 10, 20);
+  g.strokeText(score === 0 ? 'Press Space' : 'Playing', 10, 40);
+}
+draw();
+document.addEventListener('keydown', function (e) {
+  if (e.key === ' ') { score += 10; draw(); }
+});
+</script></body></html>`))
 		case "/upload-ok":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<!doctype html><button id=up>Upload</button><p id=link></p><script>
@@ -1058,3 +1074,24 @@ func TestFlowsBrowser_FailureReportsConsoleOutput(t *testing.T) {
 		t.Errorf("a line repeated back to back must appear once:\n%s", msg)
 	}
 }
+
+// A 2D canvas game that draws its HUD (score, status) via fillText/strokeText and
+// clears between frames via clearRect is readable through expectText, expectNoText,
+// in: "#canvas", and remember without any test-only window globals.
+func TestFlowsBrowser_Canvas2DTextAssertions(t *testing.T) {
+	res := runFlowFixture(t, `export default { flows: [{ name: "canvas hud", steps: [
+		{ goto: "/canvas-hud" },
+		{ expectText: "Score: 0", in: "#game" },
+		{ expectText: "Press Space" },
+		{ press: "Space" },
+		{ expectText: "Score: 10", in: "#game" },
+		{ expectText: "Playing", in: "#game" },
+		{ expectNoText: "Press Space", in: "#game" },
+		{ remember: "hud", from: "#game" },
+		{ expectText: "{{hud}}" },
+	] }] }`)
+	if len(res.Issues) != 0 {
+		t.Fatalf("expected a clean run on 2D canvas HUD text, got: %s", res.Issues[0].Message)
+	}
+}
+

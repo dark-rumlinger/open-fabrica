@@ -271,6 +271,22 @@ func TestWriteFlows_RefusesToDropSavedFlows(t *testing.T) {
 	if res, _ := (&DiagWriteFlows{Source: merged}).Run(ctx); res == nil || !res.Success {
 		t.Fatalf("keeping every saved flow and adding one must be allowed: %+v", res)
 	}
+
+	// Rewording a flow's title in place (e.g. "Add, rename, reorder and archive a habit" ->
+	// "Add, rename and archive a habit") while keeping the rest of the suite is an in-place
+	// edit, not a drop.
+	beforeRename := `export default { flows: [` +
+		`{ name: "a", steps: [{ goto: "/" }] },{ name: "c", steps: [{ goto: "/" }] },` +
+		`{ name: "d", steps: [{ goto: "/" }] },{ name: "Add, rename, reorder and archive a habit", steps: [{ goto: "/" }] }] }`
+	if res, _ := (&DiagWriteFlows{Source: beforeRename}).Run(ctx); res == nil || !res.Success {
+		t.Fatalf("saving beforeRename must land: %+v", res)
+	}
+	afterRename := `export default { flows: [` +
+		`{ name: "a", steps: [{ goto: "/" }] },{ name: "c", steps: [{ goto: "/" }] },` +
+		`{ name: "d", steps: [{ goto: "/" }] },{ name: "Add, rename and archive a habit", steps: [{ goto: "/" }] }] }`
+	if res, _ := (&DiagWriteFlows{Source: afterRename}).Run(ctx); res == nil || !res.Success {
+		t.Fatalf("slightly rewording a flow name in place must not trigger flows_dropped: %+v", res)
+	}
 }
 
 // Failing further into the steps is measured from the failure text.

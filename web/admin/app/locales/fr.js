@@ -2078,7 +2078,7 @@ export default {
   "examples.7.label": "PWA installable",
   "examples.7.text": "Un simple suivi d'habitudes sous forme de PWA installable, avec prise en charge hors ligne et une icône sur l'écran d'accueil. Des validations quotidiennes et une vue de la série hebdomadaire.",
   "examples.8.label": "Serre connectée (MQTT)",
-  "examples.8.text": "Un moniteur de serre connectée via MQTT. Les capteurs publient température, humidité de l'air et du sol, enregistrées dans SQLite avec jauges en direct, graphique sur 24 h, alertes de sécheresse, boutons pour le ventilateur et la pompe à eau, et un bouton Simuler un capteur pour tester sans matériel.",
+  "examples.8.text": "Un moniteur de serre connectée via MQTT. Les capteurs publient température, humidité de l'air et du sol, avec jauges en direct, graphique sur 24 h, alertes de sécheresse, boutons pour le ventilateur et la pompe à eau, et un bouton Simuler un capteur pour tester sans matériel.",
   "chat.stopped": "Arrêté.",
   "chat.sendFailed": "Message non envoyé : {reason}. Votre texte est revenu dans la zone de saisie, appuyez sur Entrée pour réessayer.",
   "tabs.mqtt": "MQTT",

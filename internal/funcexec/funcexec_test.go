@@ -33,7 +33,7 @@ func TestApplyWritesFailsClosedWhenSecureColumnsUnreadable(t *testing.T) {
 		t.Fatalf("drop registry: %v", err)
 	}
 
-	err = applyWrites(pdb.Reader(), pdb.Writer(), []funcsandbox.Write{{
+	err = applyWrites(Runtime{Reader: pdb.Reader(), Writer: pdb.Writer()}, []funcsandbox.Write{{
 		Op:    "insert",
 		Table: "users",
 		Row:   map[string]any{"password": "attacker-chosen"},
@@ -310,5 +310,53 @@ func TestWriteTouchesSecureCaseInsensitive(t *testing.T) {
 	}
 	if !writeTouchesSecure(funcsandbox.Write{Conflict: []string{"Password_Hash"}}, sec) {
 		t.Error("expected mixed-case Conflict key to match secure column")
+	}
+}
+
+func TestExecuteWatchListAndDeleteWrite(t *testing.T) {
+	mgr := db.NewProjectDBManager(t.TempDir())
+	pdb, err := mgr.Create(1)
+	if err != nil {
+		t.Fatalf("create project db: %v", err)
+	}
+	t.Cleanup(mgr.CloseAll)
+
+	watchDir := t.TempDir()
+	if _, err := pdb.Writer().Exec(
+		`INSERT INTO of_folder_watchers (name, folder, glob, function_path, poll_sec, enabled) VALUES ('dropwatch', ?, '*', 'watch/events', 2, 1)`,
+		watchDir,
+	); err != nil {
+		t.Fatalf("insert watcher: %v", err)
+	}
+	if _, err := pdb.Writer().Exec(
+		`CREATE TABLE watch_files (id INTEGER PRIMARY KEY, path TEXT UNIQUE, name TEXT)`,
+	); err != nil {
+		t.Fatalf("create watch_files: %v", err)
+	}
+	if _, err := pdb.Writer().Exec(
+		`INSERT INTO watch_files (path, name) VALUES ('stale.txt', 'stale.txt')`,
+	); err != nil {
+		t.Fatalf("insert stale row: %v", err)
+	}
+
+	rt := Runtime{Reader: pdb.Reader(), Writer: pdb.Writer(), ProjectID: 1}
+	spec := Spec{Code: `function handler(req, ctx) {
+	  var list = ctx.watch.list('dropwatch');
+	  ctx.delete('watch_files', { path: 'stale.txt' });
+	  return { ok: list.ok, available: list.available, folder: list.folder };
+	}`}
+	resp, err := Execute(rt, spec, map[string]any{})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(string(resp.Body), `"available":true`) {
+		t.Fatalf("unexpected response body: %s", resp.Body)
+	}
+	var count int
+	if err := pdb.Reader().QueryRow(`SELECT COUNT(*) FROM watch_files`).Scan(&count); err != nil {
+		t.Fatalf("count watch_files: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected ctx.delete to remove stale row, got %d rows", count)
 	}
 }

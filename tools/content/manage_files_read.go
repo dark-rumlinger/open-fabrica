@@ -59,8 +59,17 @@ func artifactActionGetImpl(ctx *tools.ToolContext, act *ArtGet) (*tools.Result, 
 	if err != nil {
 		return tools.FailErr(err), nil
 	}
+	if a == nil && kind == "file" {
+		if resolved, ok := store.ResolveUniqueBasename(ctx.DB, "file", path); ok {
+			path = resolved
+			a, err = store.ArtifactGet(ctx.DB, kind, path)
+			if err != nil {
+				return tools.FailErr(err), nil
+			}
+		}
+	}
 	if a == nil {
-		return tools.NotFound(kind, path), nil
+		return tools.FailCode(tools.CodeNotFound, "%s %q not found.%s", kind, path, store.SuggestArtifactPathsHint(ctx.DB, kind, path)), nil
 	}
 	totalLines := lineCount(a.Body)
 
@@ -196,8 +205,17 @@ func artifactActionOutline(ctx *tools.ToolContext, kind, path string) (*tools.Re
 	if err != nil {
 		return tools.FailErr(err), nil
 	}
+	if a == nil && kind == "file" {
+		if resolved, ok := store.ResolveUniqueBasename(ctx.DB, "file", path); ok {
+			path = resolved
+			a, err = store.ArtifactGet(ctx.DB, kind, path)
+			if err != nil {
+				return tools.FailErr(err), nil
+			}
+		}
+	}
 	if a == nil {
-		return tools.NotFound(kind, path), nil
+		return tools.FailCode(tools.CodeNotFound, "%s %q not found.%s", kind, path, store.SuggestArtifactPathsHint(ctx.DB, kind, path)), nil
 	}
 	outline := analysis.GenerateOutline(a.Body, analysis.FileTypeForOutline(path, a.ContentType))
 	return tools.Ok(map[string]any{

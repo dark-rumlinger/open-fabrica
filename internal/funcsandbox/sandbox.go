@@ -90,17 +90,18 @@ const (
 	MaxCheckouts     = 3          // ctx.checkout calls per invocation (each opens a real provider session)
 	MaxMQTTPublishes = 16         // ctx.mqtt.publish calls per invocation
 	MaxLANCalls      = 8          // ctx.lan.wake / ctx.lan.ping calls per invocation
+	MaxWatchCalls    = 8          // ctx.watch.list calls per invocation
 )
 
-// Write is a durable DB write the handler declared via ctx.insert/update/upsert. Like
+// Write is a durable DB write the handler declared via ctx.insert/update/upsert/delete. Like
 // the room reducer, a write is a DECLARATION applied by the caller after the handler
 // returns (the sandbox holds no DB handle), so the handler holds no live transaction.
 // The shape mirrors roomactor.Write so the caller can apply both through one builder.
 type Write struct {
-	Op       string         // "insert" | "update" | "upsert"
+	Op       string         // "insert" | "update" | "upsert" | "delete"
 	Table    string         // target table
 	Row      map[string]any // insert/upsert row, or update SET patch ({"$increment":n} supported)
-	Where    map[string]any // update match (nil otherwise)
+	Where    map[string]any // update/delete match (nil otherwise)
 	Conflict []string       // upsert conflict-key columns (nil otherwise)
 }
 
@@ -158,6 +159,9 @@ type Deps struct {
 	LANWake func(mac, broadcast string, port int) (string, int, error)
 	// LANPing tests TCP reachability of a private LAN / .local host and port.
 	LANPing func(host string, port int, timeoutMS int) (bool, int64, error)
+	// WatchList returns the current directory inventory for a registered folder watcher
+	// (or the project's first registered watcher when target is empty or matches the folder path).
+	WatchList func(target string) (map[string]any, error)
 	// NowMS is the clock ctx.now() returns (Unix milliseconds).
 	NowMS int64
 	// Budget overrides the wall-clock cap for this invocation (0 = package default),
@@ -467,7 +471,39 @@ func (h *Handler) Run(req map[string]any, deps Deps) (resp *Response, writes []W
 			"port":       port,
 		})
 	})
+	var watchCalls int
+	callWatchList := func(call goja.FunctionCall) goja.Value {
+		if deps.WatchList == nil {
+			panic(h.vm.NewGoError(errors.New("ctx.watch.list is not available")))
+		}
+		watchCalls++
+		if watchCalls > MaxWatchCalls {
+			panic(h.vm.NewGoError(fmt.Errorf("ctx.watch call limit (%d) exceeded", MaxWatchCalls)))
+		}
+		var target string
+		if len(call.Arguments) >= 1 && !goja.IsUndefined(call.Arguments[0]) && !goja.IsNull(call.Arguments[0]) {
+			if s, ok := call.Arguments[0].Export().(string); ok {
+				target = s
+			}
+		}
+		res, err := deps.WatchList(target)
+		if err != nil {
+			panic(h.vm.NewGoError(err))
+		}
+		return h.vm.ToValue(res)
+	}
+	_ = lanObj.Set("list", callWatchList)
 	_ = ctx.Set("lan", lanObj)
+
+	watchObj := h.vm.NewObject()
+	_ = watchObj.Set("list", callWatchList)
+	_ = watchObj.Set("walk", callWatchList)
+	_ = ctx.Set("watch", watchObj)
+
+	fsObj := h.vm.NewObject()
+	_ = fsObj.Set("list", callWatchList)
+	_ = fsObj.Set("walk", callWatchList)
+	_ = ctx.Set("fs", fsObj)
 
 	// ctx.query(sql, params?) -> rows. Synchronous read; the injected closure owns
 	// the SELECT-only guard and row cap. Returning an error makes goja throw it,
@@ -487,7 +523,7 @@ func (h *Handler) Run(req map[string]any, deps Deps) (resp *Response, writes []W
 		return rows, nil
 	})
 
-	// ctx.insert/update/upsert DECLARE a durable write, applied by the caller after
+	// ctx.insert/update/upsert/delete DECLARE a durable write, applied by the caller after
 	// a successful return. Enforce the write cap eagerly so a runaway loop fails
 	// fast rather than growing an unbounded slice before a post-hoc check.
 	declare := func(w Write) error {
@@ -505,6 +541,9 @@ func (h *Handler) Run(req map[string]any, deps Deps) (resp *Response, writes []W
 	})
 	_ = ctx.Set("upsert", func(table string, row map[string]any, conflict []string) error {
 		return declare(Write{Op: "upsert", Table: table, Row: row, Conflict: conflict})
+	})
+	_ = ctx.Set("delete", func(table string, where map[string]any) error {
+		return declare(Write{Op: "delete", Table: table, Where: where})
 	})
 
 	// ctx.fetch(url, opts?) -> {status, headers, body}. Synchronous, SSRF-guarded

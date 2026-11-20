@@ -850,8 +850,8 @@ func CleanupFlowUsers(db dbh.Handle, accounts []FlowVars) {
 	}
 	for _, t := range targets {
 		col := security.QuoteIdent(t.col)
-		q := fmt.Sprintf(`DELETE FROM %s WHERE %s LIKE ?`, security.QuoteIdent(t.table), col)
-		args := []any{"of-test+%@" + flowTestEmailDomain}
+		q := fmt.Sprintf(`DELETE FROM %s WHERE %s LIKE ? OR %s LIKE ? OR %s LIKE ?`, security.QuoteIdent(t.table), col, col, col)
+		args := []any{"of-test+%@" + flowTestEmailDomain, "test_%@test.local", "probe_user_%"}
 		if len(ids) > 0 {
 			q += fmt.Sprintf(` OR %s IN (?%s)`, col, strings.Repeat(", ?", len(ids)-1))
 			args = append(args, ids...)

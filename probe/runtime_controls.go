@@ -78,6 +78,12 @@ type controlScan struct {
 //go:embed js/control_census.js
 var controlCensusJS string
 
+// ProbeDeadControls runs the dead-control and hidden-UI census on an already-loaded
+// browser tab and returns any findings (dead_control, inert_page, hidden_ui).
+func ProbeDeadControls(ctx context.Context, pagePath string) []ValidationIssue {
+	return probeDeadControls(ctx, pagePath)
+}
+
 // probeDeadControls runs the census on an already-loaded page and returns any
 // dead-control findings. Called only after a clean load (a page that already threw is
 // not judged - its listeners may never have attached), reusing that browser context.
