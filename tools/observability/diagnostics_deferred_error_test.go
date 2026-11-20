@@ -131,4 +131,3 @@ console.error(new Error("NotAllowedError: play() failed because the user didn't 
 		t.Fatalf("expected deadControls to flag the unwired button, got none")
 	}
 }
-

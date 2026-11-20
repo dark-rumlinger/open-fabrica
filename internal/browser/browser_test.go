@@ -199,4 +199,3 @@ func TestNewIsolatedTab_SeparatesCookiesAndStorage(t *testing.T) {
 		t.Fatalf("tabB inherited state from tabA: localStorage=%q cookie=%q", tokenB, cookieB)
 	}
 }
-

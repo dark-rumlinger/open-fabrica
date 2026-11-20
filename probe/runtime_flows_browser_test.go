@@ -1094,4 +1094,3 @@ func TestFlowsBrowser_Canvas2DTextAssertions(t *testing.T) {
 		t.Fatalf("expected a clean run on 2D canvas HUD text, got: %s", res.Issues[0].Message)
 	}
 }
-
