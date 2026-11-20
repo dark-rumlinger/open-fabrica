@@ -605,11 +605,13 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 			return io.EOF
 
 		case "error":
+			errType := ""
 			errMsg := "unknown error"
 			if event.Error != nil {
+				errType = event.Error.Type
 				errMsg = event.Error.Message
 			}
-			streamErr := fmt.Errorf("anthropic: stream error: %s", errMsg)
+			streamErr := classifyStreamError(errType, errMsg)
 			callback(llm.StreamChunk{Error: streamErr})
 			return streamErr
 		}
@@ -623,6 +625,32 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 	// [DONE] or a plain EOF.
 	callback(llm.StreamChunk{Done: true, StopReason: stopReason, Usage: usage})
 	return nil
+}
+
+// classifyStreamError maps an Anthropic in-band SSE error event to a typed
+// *llm.Error so retry policies and provider health tracking classify it properly.
+func classifyStreamError(errType, errMsg string) error {
+	code := llm.CodeServer
+	switch errType {
+	case "overloaded_error":
+		code = llm.CodeOverloaded
+	case "rate_limit_error":
+		code = llm.CodeRateLimit
+	case "authentication_error", "permission_error":
+		code = llm.CodeAuth
+	case "invalid_request_error":
+		if strings.Contains(strings.ToLower(errMsg), "prompt is too long") || strings.Contains(strings.ToLower(errMsg), "context length") {
+			code = llm.CodeContextOverflow
+		} else {
+			code = llm.CodeBadRequest
+		}
+	case "api_error":
+		code = llm.CodeServer
+	}
+	return &llm.Error{
+		Code:    code,
+		Message: fmt.Sprintf("anthropic: stream error (%s): %s", errType, errMsg),
+	}
 }
 
 // SSE event types for Anthropic streaming.

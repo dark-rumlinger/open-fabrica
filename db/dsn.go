@@ -62,5 +62,5 @@ func buildDSN(path string) (readDSN, writeDSN string) {
 		"&_pragma=temp_store(memory)" +
 		"&_pragma=cache_size(-8000)" +
 		"&_pragma=mmap_size(134217728)"
-	return base, base + "&_txlock=immediate"
+	return base + "&_pragma=query_only(1)", base + "&_txlock=immediate"
 }

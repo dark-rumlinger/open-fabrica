@@ -79,7 +79,7 @@ func (h *Handler) buildAPIRequestContext(w http.ResponseWriter, r *http.Request,
 	// public_read endpoints intentionally expose unscoped reads (e.g. a public
 	// blog whose writes are owner-scoped), so they are exempt; the admin and
 	// platform_admin roles keep their bypass.
-	if !ep.PublicRead {
+	if !(ep.PublicRead && r.Method == http.MethodGet) {
 		if ep.OwnerColumn != "" && authUserRole != "admin" && authUserID == 0 {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return nil, false
@@ -207,6 +207,12 @@ func (h *Handler) lookupEndpointCORS(reader *sql.DB, fullPath, endpointPath, row
 			return endpointCORSSpec{origins: ep.CORSOrigins, methods: "POST, OPTIONS", headers: "Content-Type, Authorization"}, true
 		}
 	}
+	// Agent: /api/<endpointPath>/run (POST to start/stream, GET to poll).
+	if rowID == "run" {
+		if ep, err := h.loadAgentEndpoint(reader, endpointPath); err == nil {
+			return endpointCORSSpec{origins: ep.CORSOrigins, methods: "GET, POST, OPTIONS", headers: "Content-Type, Authorization"}, true
+		}
+	}
 	// Function: owns the bare full path.
 	if ep, err := h.loadFunctionEndpoint(reader, fullPath); err == nil {
 		return endpointCORSSpec{origins: ep.CORSOrigins, methods: ep.Methods + ", OPTIONS", headers: "Content-Type, Authorization"}, true
@@ -231,13 +237,13 @@ func (h *Handler) lookupEndpointCORS(reader *sql.DB, fullPath, endpointPath, row
 // is dropped, so the row takes the table default.
 func stampScope(ep *apiEndpoint, rc *apiRequestContext, row map[string]any) {
 	if ep.OwnerColumn != "" {
-		delete(row, ep.OwnerColumn)
+		deleteFold(row, ep.OwnerColumn)
 		if rc.AuthUserID > 0 {
 			row[ep.OwnerColumn] = rc.AuthUserID
 		}
 	}
 	if ep.TenantColumn != "" {
-		delete(row, ep.TenantColumn)
+		deleteFold(row, ep.TenantColumn)
 		if rc.AuthTenantID > 0 {
 			row[ep.TenantColumn] = rc.AuthTenantID
 		}
@@ -248,9 +254,9 @@ func stampScope(ep *apiEndpoint, rc *apiRequestContext, row map[string]any) {
 // never moves to another owner or tenant through the API.
 func stripScope(ep *apiEndpoint, body map[string]any) {
 	if ep.OwnerColumn != "" {
-		delete(body, ep.OwnerColumn)
+		deleteFold(body, ep.OwnerColumn)
 	}
 	if ep.TenantColumn != "" {
-		delete(body, ep.TenantColumn)
+		deleteFold(body, ep.TenantColumn)
 	}
 }

@@ -332,6 +332,55 @@ func LoadHashTableNames(db dbh.Handle) (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// LoadSecureColumnNames returns the project-wide set of secure (PASSWORD and
+// ENCRYPTED) column names, lowercased, across every registered table.
+func LoadSecureColumnNames(db dbh.Handle) (map[string]bool, error) {
+	rows, err := db.Query("SELECT secure_columns FROM of_dynamic_tables")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		for col := range parseSecureColumns(raw.String) {
+			out[strings.ToLower(col)] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+// LoadSecureTableNames returns the lowercased names of every dynamic table that
+// holds any secure (PASSWORD or ENCRYPTED) column.
+func LoadSecureTableNames(db dbh.Handle) (map[string]bool, error) {
+	rows, err := db.Query("SELECT table_name, secure_columns FROM of_dynamic_tables")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		var raw sql.NullString
+		if err := rows.Scan(&name, &raw); err != nil {
+			return nil, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		if len(parseSecureColumns(raw.String)) > 0 {
+			out[strings.ToLower(name)] = true
+		}
+	}
+	return out, rows.Err()
+}
+
 // LoadTableSchema returns the set of column names on a dynamic table, sourced
 // from of_dynamic_tables.schema_def rather than PRAGMA so logical column types
 // (PASSWORD/ENCRYPTED) are respected. Empty set on missing row; other errors surfaced.

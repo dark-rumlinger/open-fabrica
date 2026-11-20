@@ -243,12 +243,6 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := store.ReadArtifactBytes(f.Storage, f.Body, f.DiskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-
 	ct := mimeByExtension(filename)
 	if ct == "" {
 		ct = f.ContentType.String
@@ -271,13 +265,45 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request) {
 		ct = "application/octet-stream"
 	}
 
-	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))[:18] + `"`
-	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "public, max-age=86400, must-revalidate")
 
 	// A large file over a slow link outlives the server's blanket write timeout.
 	httpx.ExtendIO(w, fileServeTimeout)
+
+	// Stream disk artifacts directly via os.Open + http.ServeContent so large
+	// downloads and video/audio Range requests do not buffer the whole file in RAM.
+	if f.Storage.String == "disk" {
+		resolved, rerr := store.ResolveArtifactDiskPath(f.DiskPath.String, h.deps.ProjectDBManager.ProjectDir(project.ID))
+		if rerr != nil {
+			http.NotFound(w, r)
+			return
+		}
+		diskFile, oerr := os.Open(resolved)
+		if oerr != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer diskFile.Close()
+		fi, serr := diskFile.Stat()
+		if serr != nil || fi.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		etag := fmt.Sprintf(`"%x-%x"`, fi.Size(), fi.ModTime().UnixNano())
+		w.Header().Set("ETag", etag)
+		http.ServeContent(w, r, filename, fi.ModTime(), diskFile)
+		return
+	}
+
+	data, err := store.ReadArtifactBytes(f.Storage, f.Body, f.DiskPath, h.deps.ProjectDBManager.ProjectDir(project.ID))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))[:18] + `"`
+	w.Header().Set("ETag", etag)
 
 	// ServeContent answers conditional (ETag) and Range requests: Safari will not
 	// play <video>/<audio> from a server that ignores Range.

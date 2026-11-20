@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -15,6 +16,7 @@ import (
 type AccountLockout struct {
 	mu        sync.Mutex
 	entries   map[string]*lockoutEntry
+	lru       *list.List // front = most recently seen, back = oldest
 	threshold int
 	baseDelay time.Duration
 	maxDelay  time.Duration
@@ -22,9 +24,11 @@ type AccountLockout struct {
 }
 
 type lockoutEntry struct {
+	key         string
 	failures    int
 	lockedUntil time.Time
 	lastSeen    time.Time
+	elem        *list.Element
 }
 
 // NewAccountLockout creates a lockout tracker. threshold is the number of
@@ -33,6 +37,7 @@ type lockoutEntry struct {
 func NewAccountLockout(threshold int, baseDelay, maxDelay time.Duration) *AccountLockout {
 	return &AccountLockout{
 		entries:   make(map[string]*lockoutEntry),
+		lru:       list.New(),
 		threshold: threshold,
 		baseDelay: baseDelay,
 		maxDelay:  maxDelay,
@@ -69,15 +74,16 @@ func (l *AccountLockout) Fail(key string) {
 
 	e, ok := l.entries[key]
 	if !ok {
-		// Bound memory the same way the rate limiter does.
+		// Bound memory without evicting actively locked accounts: an attacker
+		// flooding 50k bogus usernames must not clear a locked victim's record.
 		if len(l.entries) >= maxBuckets {
-			l.sweepLocked(now)
-			if len(l.entries) >= maxBuckets {
-				l.evictOldestLocked()
-			}
+			l.evictOldestUnlockedLocked(now)
 		}
-		e = &lockoutEntry{}
+		e = &lockoutEntry{key: key}
+		e.elem = l.lru.PushFront(e)
 		l.entries[key] = e
+	} else {
+		l.lru.MoveToFront(e.elem)
 	}
 
 	e.failures++
@@ -100,32 +106,52 @@ func (l *AccountLockout) Fail(key string) {
 func (l *AccountLockout) Reset(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.entries, key)
+	if e, ok := l.entries[key]; ok {
+		l.lru.Remove(e.elem)
+		delete(l.entries, key)
+	}
 }
 
 // sweepLocked drops entries that are no longer locked and have been idle past
-// the retention window. Caller must hold l.mu.
+// the retention window, walking from the LRU tail. Caller must hold l.mu.
 func (l *AccountLockout) sweepLocked(now time.Time) {
-	for k, e := range l.entries {
-		if now.After(e.lockedUntil) && now.Sub(e.lastSeen) > 15*time.Minute {
-			delete(l.entries, k)
+	for el := l.lru.Back(); el != nil; {
+		prev := el.Prev()
+		e := el.Value.(*lockoutEntry)
+		if now.Sub(e.lastSeen) <= 15*time.Minute {
+			break
 		}
+		if now.After(e.lockedUntil) {
+			l.lru.Remove(el)
+			delete(l.entries, e.key)
+		}
+		el = prev
 	}
 	l.lastSweep = now
 }
 
-// evictOldestLocked removes the least-recently-seen entry so a new key can be
-// admitted at the cap. Caller must hold l.mu.
-func (l *AccountLockout) evictOldestLocked() {
-	var oldestKey string
-	var oldest time.Time
-	first := true
-	for k, e := range l.entries {
-		if first || e.lastSeen.Before(oldest) {
-			oldestKey, oldest, first = k, e.lastSeen, false
+// evictOldestUnlockedLocked removes the oldest entry that is NOT currently
+// locked (scanning up to 64 tail entries to keep eviction O(1)) so a flood of
+// bogus keys cannot reset an active brute-force lockout. If the map still grows
+// past 2*maxBuckets (all-locked flood), the LRU tail is evicted as a hard cap.
+// Caller must hold l.mu.
+func (l *AccountLockout) evictOldestUnlockedLocked(now time.Time) {
+	const maxScan = 64
+	scanned := 0
+	for el := l.lru.Back(); el != nil && scanned < maxScan; el = el.Prev() {
+		scanned++
+		e := el.Value.(*lockoutEntry)
+		if !now.Before(e.lockedUntil) {
+			l.lru.Remove(el)
+			delete(l.entries, e.key)
+			return
 		}
 	}
-	if oldestKey != "" {
-		delete(l.entries, oldestKey)
+	if len(l.entries) >= 2*maxBuckets {
+		if el := l.lru.Back(); el != nil {
+			e := el.Value.(*lockoutEntry)
+			l.lru.Remove(el)
+			delete(l.entries, e.key)
+		}
 	}
 }

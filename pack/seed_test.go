@@ -89,9 +89,11 @@ func TestEmbeddedLoads(t *testing.T) {
 	// (PixiJS or vanilla canvas + matter-js) otherwise have no pinned UMD entry,
 	// fixed-step accumulator, or body/sprite sync contract.
 	// mqtt earns a slot for the built-in MQTT 3.1.1 broker (/mqtt WS + TCP),
-	// device ACLs, SQLite/function ingest rules, and ctx.mqtt.publish contract.
-	if cap > 28 {
-		t.Errorf("got %d capability guides; the lean guide core should stay small (<=28 load-bearing contracts/flows)", cap)
+	// device ACLs, outbound LAN bridges, topic captures/rollups, and ctx.mqtt.publish.
+	// lan earns a slot for the pure-Go local-network toolkit (manage_lan discover/wake/ping
+	// plus ctx.lan.wake / ctx.lan.ping in server functions) for home-lab & IoT apps.
+	if cap > 29 {
+		t.Errorf("got %d capability guides; the lean guide core should stay small (<=29 load-bearing contracts/flows)", cap)
 	}
 	t.Logf("packs: %d stage, %d capability, %d fragment", stage, cap, frag)
 }

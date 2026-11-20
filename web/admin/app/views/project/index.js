@@ -36,6 +36,7 @@ import { renderProjectMemory } from './memory.js';
 import { renderProjectLayouts } from './layouts.js';
 import { renderProjectAnalytics } from './analytics.js';
 import { renderProjectDiagnostics } from './diagnostics.js';
+import { renderProjectMQTT } from './mqtt.js';
 
 // The active project-detail lifecycle. One scope owns the header watchers, the
 // home chat, and the context-panel cleanup, replacing three hand-tracked
@@ -226,6 +227,7 @@ function renderContextPanel(scope, container, panel, projectId, project) {
     layouts: (c, id, sec) => renderProjectLayouts(c, id, sec),
     analytics: (c, id) => renderProjectAnalytics(c, id, project),
     diagnostics: (c, id) => renderProjectDiagnostics(c, id),
+    mqtt: (c, id) => renderProjectMQTT(c, id),
     settings: (c, id, sec) => renderProjectSettings(c, id, project, sec),
   };
 

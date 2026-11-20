@@ -9,7 +9,41 @@ import (
 	"strings"
 )
 
-var systemTableRef = regexp.MustCompile(`(?i)\bof_\w*`)
+var (
+	systemTableRef  = regexp.MustCompile(`(?i)\bof_\w*`)
+	queryIdentRef   = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+	queryMemoryHogs = map[string]bool{"randomblob": true, "zeroblob": true, "load_extension": true}
+	queryCompounds  = map[string]bool{"with": true, "union": true, "intersect": true, "except": true, "values": true}
+)
+
+// CheckQueryTargets rejects read-only SQL that references SQLite engine tables
+// (sqlite_*, pragma_*), memory-hog/extension functions (randomblob, zeroblob,
+// load_extension), caller-blocked tables, secret (PASSWORD/ENCRYPTED) columns,
+// or compound queries (WITH/UNION/INTERSECT/EXCEPT/VALUES) over tables with
+// secret columns (which can rename columns and defeat result-side stripping).
+func CheckQueryTargets(query string, blockedTables, secretCols, secretTables map[string]bool) string {
+	toks := queryIdentRef.FindAllString(query, -1)
+	touchesSecretTable, compound := false, false
+	for _, tok := range toks {
+		low := strings.ToLower(tok)
+		switch {
+		case strings.HasPrefix(low, "sqlite_") || strings.HasPrefix(low, "pragma_"):
+			return fmt.Sprintf("cannot reference engine table: %s", low)
+		case blockedTables[low]:
+			return fmt.Sprintf("cannot reference protected table: %s", low)
+		case secretCols[low]:
+			return fmt.Sprintf("cannot reference secret column: %s", low)
+		case queryMemoryHogs[low]:
+			return fmt.Sprintf("function not allowed: %s", low)
+		}
+		touchesSecretTable = touchesSecretTable || secretTables[low]
+		compound = compound || queryCompounds[low]
+	}
+	if touchesSecretTable && compound {
+		return "queries over a table with a secure column must be a plain SELECT (no WITH, UNION, INTERSECT, EXCEPT or VALUES)"
+	}
+	return ""
+}
 
 // CheckReadOnlySelect enforces "single SELECT/VALUES (or WITH ... SELECT), no
 // of_* system tables" on read-only SQL surfaces (public query endpoint, JS

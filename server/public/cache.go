@@ -115,6 +115,18 @@ func (c *apiCache) invalidateTable(projectID int, tableName string) {
 	c.mu.Unlock()
 }
 
+// invalidateProject removes all cached API responses belonging to projectID.
+func (c *apiCache) invalidateProject(projectID int) {
+	prefix := fmt.Sprintf("%d:", projectID)
+	c.mu.Lock()
+	for key := range c.entries {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			delete(c.entries, key)
+		}
+	}
+	c.mu.Unlock()
+}
+
 // evict removes all expired entries.
 func (c *apiCache) evict() {
 	now := time.Now()

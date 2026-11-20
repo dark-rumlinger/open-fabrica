@@ -24,12 +24,17 @@ func (w *Worker) handleCommand(ctx context.Context, cmd Command) {
 			w.chatThread = nil
 			w.setState(StateBuilding) // commandLoop re-enters drive
 		case models.ModeLive:
-			// Explicit move to live clears any run pause so wakes flow again.
-			if run, _ := activeRun(w.pdb); run != nil && run.Status == RunStatusPaused {
-				_ = run.resume(w.pdb)
+			// Explicit move to live closes any superseded active build run so
+			// LIVE chat wakes do not bill tokens onto it and a later flip back
+			// to building does not silently resume an abandoned run.
+			if run, _ := activeRun(w.pdb); run != nil {
+				_ = run.fail(w.pdb, "switched to live")
 			}
 			w.setState(StateLive)
 		case models.ModePaused:
+			if run, _ := activeRun(w.pdb); run != nil && run.Status == RunStatusRunning {
+				_ = run.pause(w.pdb, "paused")
+			}
 			w.setState(StatePaused)
 		}
 
@@ -52,6 +57,13 @@ func (w *Worker) handleCommand(ctx context.Context, cmd Command) {
 				w.logger.Warn("carry plan into update run failed", "error", uerr)
 			}
 		}
+		// Persist projects.mode = 'building' before flipping in-memory state so
+		// publishPhase() and crash recovery agree that an update build is active.
+		if w.deps.DB != nil {
+			if merr := models.UpdateProjectMode(w.deps.DB.DB, w.projectID, models.ModeBuilding); merr != nil {
+				w.logger.Warn("update project mode to building failed", "error", merr)
+			}
+		}
 		w.setState(StateBuilding) // commandLoop re-enters drive
 
 	case CommandChat:
@@ -63,7 +75,7 @@ func (w *Worker) handleCommand(ctx context.Context, cmd Command) {
 		// The engine is the one agent the owner talks to. Mid-build messages normally
 		// reach the inbox (Send); one that raced the state flip lands here and joins it.
 		// Every other state - live, paused, idle, error - answers with a LIVE wake.
-		if w.State() == StateBuilding && w.offerOwnerInbox(msg) {
+		if w.State() == StateBuilding && len(imgs) == 0 && w.offerOwnerInbox(msg) {
 			return
 		}
 		w.handleChatWakeWithImages(ctx, msg, imgs)

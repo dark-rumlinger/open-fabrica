@@ -12,10 +12,11 @@ import (
 
 // subscriptionChange is one reconciled subscription webhook.
 type subscriptionChange struct {
-	externalID string
-	sessionID  string // set on checkout completion, to link the stored session id
-	status     string
-	renewal    bool // invoice for a cycle after the first
+	externalID   string
+	sessionID    string // set on checkout completion, to link the stored session id
+	status       string
+	renewal      bool  // invoice for a cycle after the first
+	eventCreated int64 // provider event unix timestamp for monotonic ordering (0 = unknown)
 }
 
 // subscriptionEventFor maps a subscription status onto the payment event a
@@ -47,7 +48,8 @@ func applySubscriptionChange(tx *sql.Tx, ch subscriptionChange, periodEnd func()
 	}
 
 	var current string
-	err = tx.QueryRow("SELECT status FROM of_subscriptions WHERE external_id = ?", ch.externalID).Scan(&current)
+	var lastEventCreated int64
+	err = tx.QueryRow("SELECT status, COALESCE(last_event_created, 0) FROM of_subscriptions WHERE external_id = ?", ch.externalID).Scan(&current, &lastEventCreated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, nil
 	}
@@ -58,12 +60,16 @@ func applySubscriptionChange(tx *sql.Tx, ch subscriptionChange, periodEnd func()
 	if current == "canceled" {
 		return true, false, nil
 	}
+	// Monotonic ordering: ignore stale out-of-order events older than the last applied event.
+	if ch.eventCreated > 0 && lastEventCreated > 0 && ch.eventCreated < lastEventCreated {
+		return true, false, nil
+	}
 
 	changed := current != ch.status
-	if changed {
+	if changed || (ch.eventCreated > lastEventCreated) {
 		if _, err := tx.Exec(
-			"UPDATE of_subscriptions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE external_id = ?",
-			ch.status, ch.externalID,
+			"UPDATE of_subscriptions SET status = ?, last_event_created = MAX(COALESCE(last_event_created, 0), ?), updated_at = CURRENT_TIMESTAMP WHERE external_id = ?",
+			ch.status, ch.eventCreated, ch.externalID,
 		); err != nil {
 			return false, false, err
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"openfabrica/events"
+	"openfabrica/internal/folderwatch"
 	"openfabrica/internal/mqtt"
 	"openfabrica/internal/msgcat"
 	"openfabrica/server/admin"
@@ -40,8 +41,11 @@ type Server struct {
 	deps         *ServerDeps
 	wsHub        events.WSBroadcaster
 	mqttHub      *mqtt.Hub
+	watchHub     *folderwatch.Hub
+	publicDeps   *public.Deps
 	busSubID     uint64
 	mqttSubID    uint64
+	watchSubID   uint64
 	publicStop   func()
 }
 
@@ -167,9 +171,14 @@ func New(deps *ServerDeps) *Server {
 	mqttHub := public.NewMQTTHub(publicDeps)
 	publicDeps.MQTTHub = mqttHub
 	s.mqttHub = mqttHub
+	s.watchHub = public.NewWatchHub(publicDeps)
+	s.publicDeps = publicDeps
 	if deps.Bus != nil {
 		s.mqttSubID = deps.Bus.Subscribe(events.EventMQTTConfigChanged, func(e events.Event) {
 			mqttHub.Reload(e.ProjectID)
+		})
+		s.watchSubID = deps.Bus.Subscribe(events.EventWatchConfigChanged, func(e events.Event) {
+			s.watchHub.Reload(e.ProjectID)
 		})
 	}
 	s.publicStop = public.RegisterRoutes(s.publicRouter, publicDeps)
@@ -262,7 +271,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("listen public %s: %w", publicAddr, err)
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
 	go func() {
 		s.deps.Logger.Debug("admin server starting", "addr", adminAddr)
@@ -278,6 +287,14 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
+	mqttCtx, cancelMQTT := context.WithCancel(ctx)
+	defer cancelMQTT()
+	if s.mqttHub != nil {
+		go public.StartMQTTBridges(s.publicDeps, s.mqttHub)
+	}
+	if s.watchHub != nil {
+		go public.StartWatchers(s.publicDeps, s.watchHub)
+	}
 	if s.deps.Config.MQTTPort > 0 && s.mqttHub != nil {
 		mqttAddr := fmt.Sprintf("0.0.0.0:%d", s.deps.Config.MQTTPort)
 		mqttListener, merr := lc.Listen(ctx, "tcp", mqttAddr)
@@ -288,7 +305,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		go func() {
 			s.deps.Logger.Info("mqtt tcp broker listening", "addr", mqttAddr)
-			if err := mqtt.ServeTCP(ctx, mqttListener, s.mqttHub.HandleTCPConn); err != nil {
+			if err := mqtt.ServeTCP(mqttCtx, mqttListener, s.mqttHub.HandleTCPConn); err != nil {
 				errCh <- fmt.Errorf("mqtt server: %w", err)
 			}
 		}()
@@ -310,21 +327,16 @@ func (s *Server) Start(ctx context.Context) error {
 		serveErr = err
 	}
 
-	if s.busSubID != 0 && s.deps.Bus != nil {
-		s.deps.Bus.Unsubscribe(s.busSubID)
+	// 1. Stop external TLS ingress first so :80/:443 traffic does not hit 502s
+	// while localhost:{PublicPort} drains. Stop() is idempotent.
+	if s.deps.TLSManager != nil {
+		_ = s.deps.TLSManager.Stop()
 	}
-	if s.mqttSubID != 0 && s.deps.Bus != nil {
-		s.deps.Bus.Unsubscribe(s.mqttSubID)
-	}
-	if s.mqttHub != nil {
-		s.mqttHub.CloseAll()
-	}
-	if s.publicStop != nil {
-		s.publicStop()
-	}
+	// Stop MQTT TCP accept loop before closing brokers.
+	cancelMQTT()
 
-	// Graceful shutdown with a shared deadline; run admin + public in parallel
-	// so neither one's drain time eats into the other's.
+	// 2. Gracefully drain admin + public HTTP listeners in parallel while their
+	// backing caches and MQTT hub are still alive.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -340,10 +352,27 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	// Listeners are down, so no new WebSocket events arrive: drain the room actors
-	// (authoritative endpoints) so each flushes its final state BEFORE main.go's
-	// deferred ProjectDBManager.CloseAll runs. Otherwise an actor mid-event would
-	// persist into a closed DB.
+	// 3. Listeners are down: unsubscribe bus hooks, close MQTT brokers and API
+	// caches, and drain authoritative WebSocket room actors before DBs close.
+	if s.busSubID != 0 && s.deps.Bus != nil {
+		s.deps.Bus.Unsubscribe(s.busSubID)
+	}
+	if s.mqttSubID != 0 && s.deps.Bus != nil {
+		s.deps.Bus.Unsubscribe(s.mqttSubID)
+	}
+	if s.watchSubID != 0 && s.deps.Bus != nil {
+		s.deps.Bus.Unsubscribe(s.watchSubID)
+	}
+	if s.mqttHub != nil {
+		s.mqttHub.CloseAll()
+	}
+	if s.watchHub != nil {
+		s.watchHub.CloseAll()
+	}
+	if s.publicStop != nil {
+		s.publicStop()
+	}
+
 	if d, ok := s.wsHub.(interface{ DrainActors(context.Context) }); ok {
 		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
 		d.DrainActors(drainCtx)

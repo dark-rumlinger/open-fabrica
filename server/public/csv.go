@@ -71,18 +71,19 @@ func (h *Handler) apiCSVExport(w http.ResponseWriter, r *http.Request, projectID
 			}
 		}
 	}
-	// PASSWORD columns are stored as TEXT, so the PRAGMA type check above never sees
-	// them, and an explicit public_columns list is not checked at all. The registered
-	// secure-column metadata is the authority (the same set the function runtime hides);
-	// drop every hash column from both lists, and fail closed if it cannot be read.
-	hashed, err := store.LoadHashColumnNames(projectDB)
+	// PASSWORD and ENCRYPTED columns are stored as TEXT, so the PRAGMA type check
+	// above never sees them, and an explicit public_columns list is not checked at
+	// all. The registered secure-column metadata is the authority (matching CRUD
+	// stripSecureCols); drop every secure column from both lists, and fail closed
+	// if it cannot be read.
+	secureCols, err := store.LoadSecureColumns(projectDB, table)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not determine secret columns")
 		return
 	}
 	kept := publicCols[:0]
 	for _, c := range publicCols {
-		if !hashed[strings.ToLower(c)] {
+		if _, ok := lookupSecureCol(secureCols, c); !ok {
 			kept = append(kept, c)
 		}
 	}
@@ -258,19 +259,23 @@ func (h *Handler) apiCSVImport(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 	stampCols := map[string]bool{}
+	stampColsLower := map[string]bool{}
 	if ownerCol != "" {
 		stampCols[ownerCol] = true
+		stampColsLower[strings.ToLower(ownerCol)] = true
 	}
 	if tenantCol != "" {
 		stampCols[tenantCol] = true
+		stampColsLower[strings.ToLower(tenantCol)] = true
 	}
 
 	// Effective insert columns: the CSV data columns (minus any stamped RLS
-	// column) followed by the stamped columns with their claim values.
+	// column, matched case-insensitively) followed by the stamped columns with
+	// their claim values.
 	var dataIdx []int
 	insertCols := make([]string, 0, len(header)+2)
 	for i, c := range header {
-		if stampCols[c] {
+		if stampColsLower[strings.ToLower(c)] {
 			continue
 		}
 		dataIdx = append(dataIdx, i)
@@ -310,7 +315,8 @@ func (h *Handler) apiCSVImport(w http.ResponseWriter, r *http.Request, projectID
 		}
 		args := make([]any, 0, len(insertCols))
 		for _, idx := range dataIdx {
-			val, serr := security.ProcessSecureValue(secureCols[header[idx]], record[idx], h.deps.Encryptor)
+			kind, _ := lookupSecureCol(secureCols, header[idx])
+			val, serr := security.ProcessSecureValue(kind, record[idx], h.deps.Encryptor)
 			if serr != nil {
 				return nil, fmt.Errorf("secure: %w", serr)
 			}

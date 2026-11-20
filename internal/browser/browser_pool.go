@@ -38,10 +38,23 @@ type pooledBrowser struct {
 	timer    *time.Timer
 }
 
+type inFlightLaunch struct {
+	done chan struct{}
+	err  error
+}
+
 var (
-	browserPoolMu sync.Mutex
-	browserPool   = map[string]*pooledBrowser{}
+	browserPoolMu   sync.Mutex
+	browserPool     = map[string]*pooledBrowser{}
+	browserInFlight = map[string]*inFlightLaunch{}
 )
+
+func onceRelease(key string, pb *pooledBrowser) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() { releaseBrowser(key, pb) })
+	}
+}
 
 // poolKey identifies a set of allocator flags plus the reuse partition. ExtraFlags
 // are opaque funcs with no identity, so a config carrying any is never pooled
@@ -67,56 +80,80 @@ func AcquireBrowser(ctx context.Context, cfg BrowserConfig) (context.Context, fu
 		return launchSharedBrowser(ctx, cfg)
 	}
 
-	browserPoolMu.Lock()
-	if pb := browserPool[key]; pb != nil {
-		if pb.allocCtx.Err() == nil {
-			pb.borrowed++
-			if pb.timer != nil {
-				pb.timer.Stop()
-				pb.timer = nil
+	for {
+		browserPoolMu.Lock()
+		if pb := browserPool[key]; pb != nil {
+			if pb.allocCtx.Err() == nil {
+				pb.borrowed++
+				if pb.timer != nil {
+					pb.timer.Stop()
+					pb.timer = nil
+				}
+				browserPoolMu.Unlock()
+				return pb.allocCtx, onceRelease(key, pb), nil
 			}
+			// Chrome died under us: drop it so the launch below replaces it.
+			delete(browserPool, key)
+			pb.cancel()
+		}
+		if inflight := browserInFlight[key]; inflight != nil {
 			browserPoolMu.Unlock()
-			return pb.allocCtx, func() { releaseBrowser(key, pb) }, nil
+			select {
+			case <-inflight.done:
+				if inflight.err != nil {
+					return nil, nil, inflight.err
+				}
+				continue
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
 		}
-		// Chrome died under us: drop it so the launch below replaces it.
-		delete(browserPool, key)
-		pb.cancel()
-	}
-	browserPoolMu.Unlock()
-
-	// Launch outside the lock: a cold start is seconds, and holding the pool mutex
-	// across it would serialize every other project's probes behind this one.
-	// Rooted at Background so the borrower's ctx cannot tear down a shared process.
-	allocCtx, cancel, err := launchSharedBrowser(context.Background(), cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	browserPoolMu.Lock()
-	if existing := browserPool[key]; existing != nil && existing.allocCtx.Err() == nil {
-		// Another caller raced us to it. Keep theirs, discard ours.
-		existing.borrowed++
-		if existing.timer != nil {
-			existing.timer.Stop()
-			existing.timer = nil
-		}
+		inflight := &inFlightLaunch{done: make(chan struct{})}
+		browserInFlight[key] = inflight
 		browserPoolMu.Unlock()
-		cancel()
-		return existing.allocCtx, func() { releaseBrowser(key, existing) }, nil
+
+		// Launch outside the lock: a cold start is seconds, and holding the pool mutex
+		// across it would serialize every other project's probes behind this one.
+		// Rooted at Background so the borrower's ctx cannot tear down a shared process.
+		allocCtx, cancel, err := func() (aCtx context.Context, cFn context.CancelFunc, lErr error) {
+			completed := false
+			defer func() {
+				if !completed {
+					browserPoolMu.Lock()
+					delete(browserInFlight, key)
+					inflight.err = ErrBrowserUnavailable
+					close(inflight.done)
+					browserPoolMu.Unlock()
+				}
+			}()
+			aCtx, cFn, lErr = launchSharedBrowser(context.Background(), cfg)
+			completed = true
+			return aCtx, cFn, lErr
+		}()
+
+		browserPoolMu.Lock()
+		delete(browserInFlight, key)
+		inflight.err = err
+		if err != nil {
+			close(inflight.done)
+			browserPoolMu.Unlock()
+			return nil, nil, err
+		}
+		// Stay under the process cap: reclaim the longest-idle entry before adding a new
+		// one. Cancel it after the lock is dropped, since teardown need not be serialized.
+		var evicted *pooledBrowser
+		if len(browserPool) >= maxPooledBrowsers {
+			evicted = takeOldestIdleLocked()
+		}
+		pb := &pooledBrowser{allocCtx: allocCtx, cancel: cancel, borrowed: 1}
+		browserPool[key] = pb
+		close(inflight.done)
+		browserPoolMu.Unlock()
+		if evicted != nil {
+			evicted.cancel()
+		}
+		return allocCtx, onceRelease(key, pb), nil
 	}
-	// Stay under the process cap: reclaim the longest-idle entry before adding a new
-	// one. Cancel it after the lock is dropped, since teardown need not be serialized.
-	var evicted *pooledBrowser
-	if len(browserPool) >= maxPooledBrowsers {
-		evicted = takeOldestIdleLocked()
-	}
-	pb := &pooledBrowser{allocCtx: allocCtx, cancel: cancel, borrowed: 1}
-	browserPool[key] = pb
-	browserPoolMu.Unlock()
-	if evicted != nil {
-		evicted.cancel()
-	}
-	return allocCtx, func() { releaseBrowser(key, pb) }, nil
 }
 
 // launchSharedBrowser launches Chrome and starts one shared browser on it, returning a

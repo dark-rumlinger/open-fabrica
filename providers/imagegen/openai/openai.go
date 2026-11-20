@@ -125,8 +125,12 @@ func (c *Client) Generate(ctx context.Context, req imagegen.GenerateRequest) (*i
 		N:       n,
 		Size:    req.Size,
 		Quality: mapQuality(req.Quality),
-		// response_format intentionally omitted: every gpt-image-* model
-		// returns base64 by default and rejects the field.
+	}
+	// gpt-image-* models always return base64 and reject response_format;
+	// OpenAI-compatible image endpoints (Gemini image models, Imagen, DALL-E)
+	// expect response_format: "b64_json" to return inline bytes.
+	if !strings.HasPrefix(strings.ToLower(model), "gpt-image") {
+		body.ResponseFormat = "b64_json"
 	}
 
 	data, err := json.Marshal(body)
@@ -223,13 +227,21 @@ func (c *Client) ListModels(ctx context.Context) ([]imagegen.ModelInfo, error) {
 	}
 	out := make([]imagegen.ModelInfo, 0, len(payload.Data))
 	for _, m := range payload.Data {
-		low := strings.ToLower(m.ID)
-		if !strings.HasPrefix(low, "gpt-image") && !strings.HasPrefix(low, "dall-e") {
+		id := strings.TrimPrefix(m.ID, "models/")
+		low := strings.ToLower(id)
+		if !isImageGenModel(low) {
 			continue
 		}
-		out = append(out, imagegen.ModelInfo{ID: m.ID, DisplayName: m.ID})
+		out = append(out, imagegen.ModelInfo{ID: id, DisplayName: id})
 	}
 	return out, nil
+}
+
+func isImageGenModel(low string) bool {
+	return strings.HasPrefix(low, "gpt-image") ||
+		strings.HasPrefix(low, "dall-e") ||
+		strings.HasPrefix(low, "imagen-") ||
+		strings.Contains(low, "-image")
 }
 
 func (c *Client) readError(resp *http.Response) error {

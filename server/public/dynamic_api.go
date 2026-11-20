@@ -305,6 +305,8 @@ func (h *Handler) dispatchViaSpine(w http.ResponseWriter, r *http.Request, proje
 			h.apiUpload(w, r, project.ID, projectDB, endpointPath)
 			return true
 		case endpoints.KindSSE:
+			projectDB.Pin()
+			defer projectDB.Unpin()
 			h.apiStream(w, r, project.ID, reader)
 			return true
 		case endpoints.KindLLM:

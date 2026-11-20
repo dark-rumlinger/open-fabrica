@@ -219,8 +219,11 @@ func (w *Worker) publishPhase() {
 func (w *Worker) Send(cmd Command) error {
 	// An owner message during a build goes to the inbox the running session reads
 	// between turns; queued as a command it would wait for the whole build.
+	// Messages carrying images bypass the text-only inbox so attachments are never
+	// silently dropped and instead run through handleChatWakeWithImages.
 	if cmd.Type == CommandChat {
-		if msg, _ := cmd.Payload["message"].(string); strings.TrimSpace(msg) != "" && w.offerOwnerInbox(msg) {
+		imgs, _ := cmd.Payload["images"].([]llm.MessageImage)
+		if msg, _ := cmd.Payload["message"].(string); len(imgs) == 0 && strings.TrimSpace(msg) != "" && w.offerOwnerInbox(msg) {
 			return nil
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"openfabrica/security"
+	"openfabrica/server/middleware"
 	"openfabrica/store"
 )
 
@@ -28,6 +29,16 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "endpoint not found")
+		return
+	}
+
+	applyCORSHeaders(w, r, ep)
+	if !methodAllowed(ep.Methods, http.MethodGet) {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.checkEndpointRateLimit("api:"+projectKeyOf(r)+":"+endpointPath+":"+middleware.RateLimitIdentity(r), ep.RateLimit) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
 
@@ -56,7 +67,7 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 			writeError(w, http.StatusBadRequest, "invalid column name")
 			return
 		}
-		if kind, ok := ep.SecureCols[col]; ok && kind == "hash" {
+		if _, ok := lookupSecureCol(ep.SecureCols, col); ok {
 			writeError(w, http.StatusBadRequest, "cannot aggregate on secure columns")
 			return
 		}
@@ -84,7 +95,7 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 				writeError(w, http.StatusBadRequest, "invalid group_by column: "+gc)
 				return
 			}
-			if kind, ok := ep.SecureCols[gc]; ok && kind == "hash" {
+			if _, ok := lookupSecureCol(ep.SecureCols, gc); ok {
 				writeError(w, http.StatusBadRequest, "cannot group by secure columns")
 				return
 			}
@@ -106,7 +117,7 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request, projectDB *sq
 		if err := security.ValidateColumnName(key); err != nil {
 			continue
 		}
-		if kind, ok := ep.SecureCols[key]; ok && kind == "hash" {
+		if _, ok := lookupSecureCol(ep.SecureCols, key); ok {
 			continue
 		}
 		if !columnReadable(ep, key) && columnExists(projectDB, ep.TableName, key) {

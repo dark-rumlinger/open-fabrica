@@ -1,6 +1,7 @@
 package public
 
 import (
+	"container/list"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -101,46 +102,54 @@ func recordLLMUsage(projectDB *sql.DB, path string, tokens int) {
 // so a flood of distinct source addresses cannot grow the map without bound.
 const maxEndpointRateLimitKeys = 50000
 
+// endpointRateBucket tracks a sliding-window per-minute counter in O(1) memory.
+type endpointRateBucket struct {
+	key         string
+	windowStart time.Time
+	prevCount   int
+	currCount   int
+	lastSeen    time.Time
+	elem        *list.Element
+}
+
 // endpointRateLimiter tracks per-minute request counts per key for endpoint-level
-// rate limiting. Keys include the client IP, so idle keys are swept at most once
-// per window and the map is capped at maxEndpointRateLimitKeys.
+// rate limiting with O(1) memory per key and O(1) LRU eviction.
 type endpointRateLimiter struct {
 	sync.Mutex
-	counts    map[string][]time.Time
+	buckets   map[string]*endpointRateBucket
+	lru       *list.List // front = most recently seen, back = oldest
 	lastSweep time.Time
 }
 
 func newEndpointRateLimiter() *endpointRateLimiter {
-	return &endpointRateLimiter{counts: make(map[string][]time.Time)}
-}
-
-// sweepIdleKeys drops keys whose newest request is older than window.
-// Caller holds rl.Mutex.
-func (rl *endpointRateLimiter) sweepIdleKeys(window time.Time) {
-	for k, ts := range rl.counts {
-		if len(ts) == 0 || !ts[len(ts)-1].After(window) {
-			delete(rl.counts, k)
-		}
+	return &endpointRateLimiter{
+		buckets: make(map[string]*endpointRateBucket),
+		lru:     list.New(),
 	}
 }
 
-// evictOldestKey removes the key with the oldest latest timestamp when at cap.
+// sweepIdleKeys drops keys idle beyond two minutes from the LRU tail.
+// Caller holds rl.Mutex.
+func (rl *endpointRateLimiter) sweepIdleKeys(cutoff time.Time) {
+	for e := rl.lru.Back(); e != nil; {
+		prev := e.Prev()
+		b := e.Value.(*endpointRateBucket)
+		if b.lastSeen.After(cutoff) {
+			break
+		}
+		rl.lru.Remove(e)
+		delete(rl.buckets, b.key)
+		e = prev
+	}
+}
+
+// evictOldestKey removes the least-recently-seen key in O(1).
 // Caller holds rl.Mutex.
 func (rl *endpointRateLimiter) evictOldestKey() {
-	var oldestKey string
-	var oldest time.Time
-	first := true
-	for k, ts := range rl.counts {
-		var latest time.Time
-		if len(ts) > 0 {
-			latest = ts[len(ts)-1]
-		}
-		if first || latest.Before(oldest) {
-			oldestKey, oldest, first = k, latest, false
-		}
-	}
-	if oldestKey != "" {
-		delete(rl.counts, oldestKey)
+	if e := rl.lru.Back(); e != nil {
+		b := e.Value.(*endpointRateBucket)
+		rl.lru.Remove(e)
+		delete(rl.buckets, b.key)
 	}
 }
 
@@ -152,34 +161,47 @@ func (rl *endpointRateLimiter) allow(key string, maxPerMinute int) bool {
 	defer rl.Unlock()
 
 	now := time.Now()
-	window := now.Add(-time.Minute)
 	if now.Sub(rl.lastSweep) >= time.Minute {
-		rl.sweepIdleKeys(window)
+		rl.sweepIdleKeys(now.Add(-2 * time.Minute))
 		rl.lastSweep = now
 	}
 
-	timestamps, exists := rl.counts[key]
-	if !exists && len(rl.counts) >= maxEndpointRateLimitKeys {
-		rl.sweepIdleKeys(window)
-		if len(rl.counts) >= maxEndpointRateLimitKeys {
+	b, exists := rl.buckets[key]
+	if !exists {
+		if len(rl.buckets) >= maxEndpointRateLimitKeys {
 			rl.evictOldestKey()
 		}
+		b = &endpointRateBucket{key: key, windowStart: now, lastSeen: now}
+		b.elem = rl.lru.PushFront(b)
+		rl.buckets[key] = b
+	} else {
+		rl.lru.MoveToFront(b.elem)
+		b.lastSeen = now
 	}
 
-	// Filter out expired entries.
-	valid := timestamps[:0]
-	for _, ts := range timestamps {
-		if ts.After(window) {
-			valid = append(valid, ts)
-		}
+	// Advance the 1-minute sliding window.
+	elapsed := now.Sub(b.windowStart)
+	if elapsed >= 2*time.Minute {
+		b.prevCount = 0
+		b.currCount = 0
+		b.windowStart = now
+		elapsed = 0
+	} else if elapsed >= time.Minute {
+		b.prevCount = b.currCount
+		b.currCount = 0
+		b.windowStart = b.windowStart.Add(time.Minute)
+		elapsed = now.Sub(b.windowStart)
 	}
 
-	if len(valid) >= maxPerMinute {
-		rl.counts[key] = valid
+	weight := float64(time.Minute-elapsed) / float64(time.Minute)
+	if weight < 0 {
+		weight = 0
+	}
+	estimated := float64(b.currCount) + float64(b.prevCount)*weight
+	if estimated >= float64(maxPerMinute) {
 		return false
 	}
-
-	rl.counts[key] = append(valid, now)
+	b.currCount++
 	return true
 }
 

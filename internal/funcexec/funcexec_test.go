@@ -167,7 +167,7 @@ func TestGuardReadOnlySelectVerbs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, msg := guardReadOnlySelect(tc.sql, nil)
+			_, msg := guardReadOnlySelect(tc.sql, nil, nil)
 			if tc.wantReject && msg == "" {
 				t.Errorf("expected %q to be rejected, got none", tc.sql)
 			}
@@ -211,10 +211,10 @@ func TestQueryStripsPasswordColumnFromWildcard(t *testing.T) {
 	if !strings.Contains(body, "ada") {
 		t.Fatalf("the strip removed non-secure columns too: %s", body)
 	}
-	// ENCRYPTED columns stay: they read back as ciphertext, which is not a
-	// disclosure, and the REST path returns them decrypted by design.
-	if !strings.Contains(body, "ciphertext") {
-		t.Fatalf("an ENCRYPTED column was stripped: %s", body)
+	// Both PASSWORD and ENCRYPTED columns are stripped on read, matching the
+	// public REST API (stripSecureCols) and the agent data-query contract.
+	if strings.Contains(body, "ciphertext") {
+		t.Fatalf("SELECT * returned an ENCRYPTED column: %s", body)
 	}
 }
 
@@ -280,5 +280,35 @@ func TestNewLLMUsesTheStandInDuringAReplay(t *testing.T) {
 	got, err := call("hello", "", 0)
 	if err != nil || got != replaymodel.Text {
 		t.Fatalf("during a replay the stand-in answers, got %q err=%v", got, err)
+	}
+}
+
+func TestQueryReadOnlyBlocksCompoundAndMemoryHogs(t *testing.T) {
+	pdb := secureProjectDB(t)
+	for name, q := range map[string]string{
+		"union rename":  `SELECT 1, 2, 3, 4 UNION SELECT * FROM users`,
+		"cte rename":    `WITH x(a, b, c, d) AS (SELECT * FROM users) SELECT a, b, c, d FROM x`,
+		"sqlite_master": `SELECT name FROM sqlite_master`,
+		"randomblob":    `SELECT hex(randomblob(500000000))`,
+		"encrypted ref": `SELECT api_token FROM users`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := QueryReadOnly(pdb.Reader(), q, nil); err == nil {
+				t.Fatalf("expected %q to be rejected", q)
+			}
+		})
+	}
+}
+
+func TestWriteTouchesSecureCaseInsensitive(t *testing.T) {
+	sec := map[string]string{"password_hash": "hash"}
+	if !writeTouchesSecure(funcsandbox.Write{Row: map[string]any{"Password_Hash": "plain"}}, sec) {
+		t.Error("expected mixed-case Row key to match secure column")
+	}
+	if !writeTouchesSecure(funcsandbox.Write{Where: map[string]any{"PASSWORD_HASH": "x"}}, sec) {
+		t.Error("expected mixed-case Where key to match secure column")
+	}
+	if !writeTouchesSecure(funcsandbox.Write{Conflict: []string{"Password_Hash"}}, sec) {
+		t.Error("expected mixed-case Conflict key to match secure column")
 	}
 }

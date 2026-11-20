@@ -81,18 +81,37 @@ func printActions(opts PDFOptions, out *[]byte) chromedp.Action {
 	})
 }
 
-// RenderURLToPDF loads a URL in a headless browser and returns its PDF bytes.
+// pdfRenderSem caps concurrent headless-Chrome PDF renders across public and
+// build requests so a burst of PDF traffic cannot OOM the host.
+var pdfRenderSem = make(chan struct{}, 4)
+
+func acquirePDFSlot(ctx context.Context) (func(), error) {
+	select {
+	case pdfRenderSem <- struct{}{}:
+		return func() { <-pdfRenderSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// RenderURLToPDF loads a URL in a pooled headless browser and returns its PDF bytes.
 // cfg.HostResolverMap should be the project's vhost so a project-relative URL
 // resolves to the local public server. Wraps ErrBrowserUnavailable when Chrome
 // cannot launch.
 func RenderURLToPDF(ctx context.Context, cfg BrowserConfig, url string, opts PDFOptions) ([]byte, error) {
-	allocCtx, cancelAlloc, err := LaunchBrowser(ctx, cfg)
+	releaseSlot, err := acquirePDFSlot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer cancelAlloc()
+	defer releaseSlot()
 
-	tabCtx, cancelTab := chromedp.NewContext(allocCtx)
+	allocCtx, releaseBrowser, err := AcquireBrowser(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseBrowser()
+
+	tabCtx, cancelTab := NewPooledTab(ctx, allocCtx)
 	defer cancelTab()
 	runCtx, cancelRun := context.WithTimeout(tabCtx, pdfRenderTimeout)
 	defer cancelRun()
@@ -114,13 +133,19 @@ func RenderURLToPDF(ctx context.Context, cfg BrowserConfig, url string, opts PDF
 // to the project - inline styles or absolute URLs in the HTML, or use
 // RenderURLToPDF against a real page when project CSS/assets are needed.
 func RenderHTMLToPDF(ctx context.Context, cfg BrowserConfig, html string, opts PDFOptions) ([]byte, error) {
-	allocCtx, cancelAlloc, err := LaunchBrowser(ctx, cfg)
+	releaseSlot, err := acquirePDFSlot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer cancelAlloc()
+	defer releaseSlot()
 
-	tabCtx, cancelTab := chromedp.NewContext(allocCtx)
+	allocCtx, releaseBrowser, err := AcquireBrowser(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseBrowser()
+
+	tabCtx, cancelTab := NewPooledTab(ctx, allocCtx)
 	defer cancelTab()
 	runCtx, cancelRun := context.WithTimeout(tabCtx, pdfRenderTimeout)
 	defer cancelRun()

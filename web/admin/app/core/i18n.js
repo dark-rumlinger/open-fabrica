@@ -96,8 +96,11 @@ const entry = SUPPORTED.find((l) => l.code === locale);
 const tag = entry.tag;
 const dir = entry.dir === 'rtl' ? 'rtl' : 'ltr';
 
-const english = (await LOADERS.en()).default;
-const active = locale === 'en' ? english : (await LOADERS[locale]()).default;
+const [englishMod, activeMod] = locale === 'en'
+  ? [await LOADERS.en(), null]
+  : await Promise.all([LOADERS.en(), LOADERS[locale]()]);
+const english = englishMod.default;
+const active = activeMod ? activeMod.default : english;
 
 const activeRules = new Intl.PluralRules(tag);
 const englishRules = new Intl.PluralRules('en');

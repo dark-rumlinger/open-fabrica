@@ -13,6 +13,7 @@ package funcsandbox
 
 import (
 	"container/list"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,9 +41,34 @@ const topLevelBudget = 2 * time.Second
 // module code as much as the handler call - or a `while(true){}` at top level pins the
 // goroutine forever, un-interruptibly.
 func withBudget(vm *goja.Runtime, budget time.Duration, fn func() error) error {
-	stop := time.AfterFunc(budget, func() { vm.Interrupt("timeout") })
-	defer stop.Stop()
+	return withBudgetCtx(context.Background(), vm, budget, fn)
+}
+
+// withBudgetCtx runs fn with vm's interrupt armed against both the wall-clock budget
+// and parent context cancellation (e.g. HTTP client disconnect). It also recovers
+// *goja.InterruptedError / *goja.Exception panics that goja raises when obj.Get or
+// v.Export triggers a getter or Proxy trap during return-value inspection.
+func withBudgetCtx(parent context.Context, vm *goja.Runtime, budget time.Duration, fn func() error) (retErr error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	runCtx, cancel := context.WithTimeout(parent, budget)
+	defer cancel()
+	stop := context.AfterFunc(runCtx, func() { vm.Interrupt("timeout") })
+	defer stop()
 	defer vm.ClearInterrupt()
+	defer func() {
+		if r := recover(); r != nil {
+			switch v := r.(type) {
+			case *goja.InterruptedError:
+				retErr = &Timeout{}
+			case *goja.Exception:
+				retErr = v
+			default:
+				panic(r)
+			}
+		}
+	}()
 	err := fn()
 	var ie *goja.InterruptedError
 	if errors.As(err, &ie) {
@@ -63,6 +89,7 @@ const (
 	MaxLLMCalls      = 4          // ctx.llm calls per invocation (each is a real, billable completion)
 	MaxCheckouts     = 3          // ctx.checkout calls per invocation (each opens a real provider session)
 	MaxMQTTPublishes = 16         // ctx.mqtt.publish calls per invocation
+	MaxLANCalls      = 8          // ctx.lan.wake / ctx.lan.ping calls per invocation
 )
 
 // Write is a durable DB write the handler declared via ctx.insert/update/upsert. Like
@@ -127,11 +154,18 @@ type Deps struct {
 	// MQTTPublish publishes a message to the project's MQTT broker.
 	// Nil when MQTT is not wired (ctx.mqtt.publish then throws).
 	MQTTPublish func(topic, payload string, qos int, retain bool) error
+	// LANWake sends a Wake-on-LAN magic packet on the local network.
+	LANWake func(mac, broadcast string, port int) (string, int, error)
+	// LANPing tests TCP reachability of a private LAN / .local host and port.
+	LANPing func(host string, port int, timeoutMS int) (bool, int64, error)
 	// NowMS is the clock ctx.now() returns (Unix milliseconds).
 	NowMS int64
 	// Budget overrides the wall-clock cap for this invocation (0 = package default),
 	// letting a per-endpoint timeout_ms widen the window for a slow external call.
 	Budget time.Duration
+	// Ctx cancels the invocation (and interrupts the JS VM) when the caller's
+	// context expires or the client disconnects. Optional; nil uses Background.
+	Ctx context.Context
 }
 
 // Handler is a compiled, validated handler(req, ctx) in a locked-down runtime.
@@ -365,6 +399,76 @@ func (h *Handler) Run(req map[string]any, deps Deps) (resp *Response, writes []W
 	})
 	_ = ctx.Set("mqtt", mqttObj)
 
+	var lanCalls int
+	lanObj := h.vm.NewObject()
+	_ = lanObj.Set("wake", func(call goja.FunctionCall) goja.Value {
+		if deps.LANWake == nil {
+			panic(h.vm.NewGoError(errors.New("ctx.lan.wake is not available")))
+		}
+		lanCalls++
+		if lanCalls > MaxLANCalls {
+			panic(h.vm.NewGoError(fmt.Errorf("ctx.lan call limit (%d) exceeded", MaxLANCalls)))
+		}
+		if len(call.Arguments) < 1 {
+			panic(h.vm.NewGoError(errors.New("ctx.lan.wake(mac, opts?) requires a MAC address")))
+		}
+		mac := call.Arguments[0].String()
+		var broadcast string
+		var port int
+		if len(call.Arguments) >= 2 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			if opts, ok := call.Arguments[1].Export().(map[string]any); ok {
+				if b, ok := opts["broadcast"].(string); ok {
+					broadcast = b
+				}
+				switch p := opts["port"].(type) {
+				case int64:
+					port = int(p)
+				case float64:
+					port = int(p)
+				}
+			}
+		}
+		bcast, usedPort, err := deps.LANWake(mac, broadcast, port)
+		if err != nil {
+			panic(h.vm.NewGoError(err))
+		}
+		return h.vm.ToValue(map[string]any{
+			"ok":        true,
+			"mac":       mac,
+			"broadcast": bcast,
+			"port":      usedPort,
+		})
+	})
+	_ = lanObj.Set("ping", func(call goja.FunctionCall) goja.Value {
+		if deps.LANPing == nil {
+			panic(h.vm.NewGoError(errors.New("ctx.lan.ping is not available")))
+		}
+		lanCalls++
+		if lanCalls > MaxLANCalls {
+			panic(h.vm.NewGoError(fmt.Errorf("ctx.lan call limit (%d) exceeded", MaxLANCalls)))
+		}
+		if len(call.Arguments) < 2 {
+			panic(h.vm.NewGoError(errors.New("ctx.lan.ping(host, port, timeoutMs?) requires host and port")))
+		}
+		host := call.Arguments[0].String()
+		port := int(call.Arguments[1].ToInteger())
+		timeoutMS := 1000
+		if len(call.Arguments) >= 3 && !goja.IsUndefined(call.Arguments[2]) && !goja.IsNull(call.Arguments[2]) {
+			timeoutMS = int(call.Arguments[2].ToInteger())
+		}
+		reachable, latencyMS, err := deps.LANPing(host, port, timeoutMS)
+		if err != nil {
+			panic(h.vm.NewGoError(err))
+		}
+		return h.vm.ToValue(map[string]any{
+			"reachable":  reachable,
+			"latency_ms": latencyMS,
+			"host":       host,
+			"port":       port,
+		})
+	})
+	_ = ctx.Set("lan", lanObj)
+
 	// ctx.query(sql, params?) -> rows. Synchronous read; the injected closure owns
 	// the SELECT-only guard and row cap. Returning an error makes goja throw it,
 	// so the handler can try/catch or let it 500.
@@ -469,30 +573,32 @@ func (h *Handler) Run(req map[string]any, deps Deps) (resp *Response, writes []W
 	if deps.Budget > 0 {
 		budget = deps.Budget
 	}
-	var ret goja.Value
-	if gerr := withBudget(h.vm, budget, func() error {
-		var err error
-		ret, err = h.fn(goja.Undefined(), h.vm.ToValue(req), ctx)
-		return err
+	var r *Response
+	if gerr := withBudgetCtx(deps.Ctx, h.vm, budget, func() error {
+		ret, err := h.fn(goja.Undefined(), h.vm.ToValue(req), ctx)
+		if err != nil {
+			var ie *goja.InterruptedError
+			if errors.As(err, &ie) {
+				return err
+			}
+			return fmt.Errorf("handler threw: %w", err)
+		}
+
+		// A returned Promise (async handler that slipped past Compile, or an explicit one)
+		// has a then() method and cannot be resolved without a loop - reject it.
+		// Kept inside withBudgetCtx because obj.Get("then") invokes JS getters/Proxy traps.
+		if obj, ok := ret.(*goja.Object); ok {
+			if _, ok := goja.AssertFunction(obj.Get("then")); ok {
+				return errors.New("handler returned a Promise: it must be synchronous (no async/await)")
+			}
+		}
+
+		// parseResponse calls v.Export(), which can also invoke JS getters/Proxy traps.
+		var perr error
+		r, perr = parseResponse(ret)
+		return perr
 	}); gerr != nil {
-		var to *Timeout
-		if errors.As(gerr, &to) {
-			return nil, nil, gerr
-		}
-		return nil, nil, fmt.Errorf("handler threw: %w", gerr)
-	}
-
-	// A returned Promise (async handler that slipped past Compile, or an explicit one)
-	// has a then() method and cannot be resolved without a loop - reject it.
-	if obj, ok := ret.(*goja.Object); ok {
-		if _, ok := goja.AssertFunction(obj.Get("then")); ok {
-			return nil, nil, errors.New("handler returned a Promise: it must be synchronous (no async/await)")
-		}
-	}
-
-	r, perr := parseResponse(ret)
-	if perr != nil {
-		return nil, nil, perr
+		return nil, nil, gerr
 	}
 	if len(r.Body) > MaxResponseBytes {
 		return nil, nil, fmt.Errorf("response body is %d bytes (limit %d)", len(r.Body), MaxResponseBytes)

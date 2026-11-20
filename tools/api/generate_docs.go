@@ -447,25 +447,11 @@ func epGenerateDocs(ctx *tools.ToolContext) (*tools.Result, error) {
 	}
 
 	// Save the spec as a file-based asset (api-docs.json).
-	storagePath, err := store.WriteFileToDisk(ctx.DataDirOrDefault(), ctx.ProjectID, "assets", "api-docs.json", specJSON)
-	if err != nil {
-		return tools.Fail("%s", "failed to write spec file: "+err.Error()), nil
-	}
-	_, err = ctx.DB.Exec(
-		`INSERT INTO of_files (kind, path, storage, content_type, size, disk_path, scope, metadata, is_deleted, updated_at)
-		 VALUES ('file', ?, 'disk', ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
-		 ON CONFLICT(kind, path) DO UPDATE SET
-		   storage = 'disk',
-		   body = '',
-		   content_type = excluded.content_type,
-		   size = excluded.size,
-		   disk_path = excluded.disk_path,
-		   metadata = excluded.metadata,
-		   updated_at = CURRENT_TIMESTAMP`,
-		"api-docs.json", "application/json", len(specJSON), storagePath, "global",
+	if _, err := store.SaveDiskArtifact(
+		ctx.DB, ctx.DataDirOrDefault(), ctx.ProjectID, "assets",
+		"api-docs.json", "application/json", specJSON,
 		`{"alt_text":"OpenAPI 3.0 specification"}`,
-	)
-	if err != nil {
+	); err != nil {
 		return tools.Fail("%s", "failed to save spec asset: "+err.Error()), nil
 	}
 

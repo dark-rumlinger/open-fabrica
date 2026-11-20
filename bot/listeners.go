@@ -24,11 +24,11 @@ func (s *BotService) onBrainMessage(e events.Event) {
 	// The go-live message carries a hidden payload and phone-useless links; show
 	// it as a purpose-built card instead.
 	if info, ok := parseGoLive(content); ok {
-		safego.Go("bot-golive", func() { s.announceGoLive(e.ProjectID, info) })
+		s.announceGoLive(e.ProjectID, info)
 		return
 	}
 	if strings.HasPrefix(content, "<!--of-preview:") && strings.HasSuffix(content, "-->") {
-		safego.Go("bot-preview-photo", func() { s.broadcastPreviewPhoto(e.ProjectID) })
+		s.broadcastPreviewPhoto(e.ProjectID)
 		return
 	}
 	// The expanded brief opens with a marker line instead of a heading, so each
@@ -38,23 +38,20 @@ func (s *BotService) onBrainMessage(e events.Event) {
 		if body == "" {
 			return
 		}
-		safego.Go("bot-broadcast", func() {
-			s.broadcastRender(e.ProjectID, func(v voice) string {
-				return "<b>" + v.tr("Expanded brief") + "</b>\n\n" + body
-			})
+		s.broadcastRender(e.ProjectID, func(v voice) string {
+			return "<b>" + v.tr("Expanded brief") + "</b>\n\n" + body
 		})
 		return
 	}
 	// LLM output is untrusted markup for Telegram's HTML parser: mdToTelegramHTML
 	// escapes it before converting the few markdown forms the builder uses, so a
 	// stray '<' or unbalanced tag can't make Telegram reject (and drop) the whole
-	// message. Fire-and-forget so the engine's publishing goroutine isn't stalled
-	// behind a synchronous HTTP send.
+	// message. Runs on the notifyQueue worker so sends stay ordered and drained.
 	safe := mdToTelegramHTML(content)
 	if safe == "" {
 		return
 	}
-	safego.Go("bot-broadcast", func() { s.broadcastToProjectUsers(e.ProjectID, safe) })
+	s.broadcastToProjectUsers(e.ProjectID, safe)
 }
 
 func (s *BotService) onQuestionAsked(e events.Event) {
@@ -62,11 +59,9 @@ func (s *BotService) onQuestionAsked(e events.Event) {
 	if questionID == "" || questionID == "<nil>" {
 		return
 	}
-	safego.Go("bot-question-alert", func() { s.alertOthers(e.ProjectID, "question", "❓ <b>%s</b> has a question for you.") })
+	s.alertOthers(e.ProjectID, "question", "❓ <b>%s</b> has a question for you.")
 
-	// Snapshot the target users under the lock, then send outside it, detached
-	// from the publishing goroutine. Holding s.mu across synchronous HTTP would
-	// freeze the engine worker that published this event.
+	// Snapshot the target users under the lock, then deliver outside s.mu.
 	s.mu.RLock()
 	var targets []*UserState
 	for _, state := range s.users {
@@ -83,13 +78,11 @@ func (s *BotService) onQuestionAsked(e events.Event) {
 	// Deliver them one at a time, surface the oldest pending question and skip if
 	// the user is already answering one, so a free-text reply is never ambiguous
 	// about which question it answers. The next question appears after each answer.
-	safego.Go("bot-question", func() {
-		for _, state := range targets {
-			state.Mu.Lock()
-			s.deliverNextIfIdle(state)
-			state.Mu.Unlock()
-		}
-	})
+	for _, state := range targets {
+		state.Mu.Lock()
+		s.deliverNextIfIdle(state)
+		state.Mu.Unlock()
+	}
 }
 
 func (s *BotService) onStageChange(e events.Event) {
@@ -118,7 +111,7 @@ func (s *BotService) onBrainError(e events.Event) {
 		return
 	}
 	s.broadcastRender(e.ProjectID, func(v voice) string { return v.trh("Error: %s", errMsg) })
-	safego.Go("bot-error-alert", func() { s.alertOthers(e.ProjectID, "error", "⚠️ <b>%s</b> ran into a problem.") })
+	s.alertOthers(e.ProjectID, "error", "⚠️ <b>%s</b> ran into a problem.")
 }
 
 func (s *BotService) onBrainStarted(e events.Event) {

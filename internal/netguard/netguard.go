@@ -145,11 +145,19 @@ func IsPrivateIP(ip net.IP) bool {
 	return false
 }
 
+var defaultSSRFSafeTransport = transportForHost("")
+
 // SSRFSafeClient returns an http.Client hardened against SSRF for external
 // URLs, for callers outside this package (e.g. the trigger runner) that fetch
 // config-supplied URLs. Pair it with ValidateExternalURL for pre-flight checks.
+// Returns a fresh *http.Client sharing a singleton http.Transport connection pool
+// so callers may safely customize Timeout without mutating global state.
 func SSRFSafeClient() *http.Client {
-	return clientForHost("")
+	return &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: redirectGuard(""),
+		Transport:     defaultSSRFSafeTransport,
+	}
 }
 
 // SSRFSafeClientAllowingHost is SSRFSafeClient with a scoped exception: the one
@@ -166,18 +174,24 @@ func SSRFSafeClientAllowingHost(allowHost string) *http.Client {
 // When allowHost is non-empty, that single host (matched exactly) is exempt from
 // the private-IP block; all other hosts remain blocked.
 func clientForHost(allowHost string) *http.Client {
-	client := &http.Client{Timeout: 30 * time.Second}
+	return &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: redirectGuard(allowHost),
+		Transport:     transportForHost(allowHost),
+	}
+}
 
-	// Re-validate every redirect destination against SSRF rules.
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+func redirectGuard(allowHost string) func(req *http.Request, via []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return fmt.Errorf("too many redirects")
 		}
 		return ValidateExternalURLAllowingHost(req.URL.String(), allowHost)
 	}
+}
 
-	// Validate resolved IPs at connect time to prevent DNS rebinding.
-	client.Transport = &http.Transport{
+func transportForHost(allowHost string) *http.Transport {
+	return &http.Transport{
 		// A server that accepts the connection and then stalls must not hold a worker.
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
@@ -191,10 +205,16 @@ func clientForHost(allowHost string) *http.Client {
 			if err != nil {
 				return nil, err
 			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("blocked: no IP addresses resolved for %s", host)
+			}
 			if !hostAllowed {
 				for _, ipStr := range ips {
 					ip := net.ParseIP(ipStr)
-					if ip != nil && IsPrivateIP(ip) {
+					if ip == nil {
+						return nil, fmt.Errorf("blocked: unparseable IP %s", ipStr)
+					}
+					if IsPrivateIP(ip) {
 						return nil, fmt.Errorf("blocked: resolved to private IP %s", ipStr)
 					}
 				}
@@ -204,6 +224,4 @@ func clientForHost(allowHost string) *http.Client {
 			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0], port))
 		},
 	}
-
-	return client
 }

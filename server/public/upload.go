@@ -1,6 +1,7 @@
 package public
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -159,8 +160,14 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 		return
 	}
 
-	// Parse multipart form.
-	if err := r.ParseMultipartForm(maxBytes); err != nil {
+	// Parse multipart form with a bounded in-memory threshold (4 MB); larger
+	// payloads spill to a temp file instead of holding 2x maxBytes in RAM.
+	parseMem := maxBytes
+	const maxMultipartMem = 4 << 20
+	if parseMem > maxMultipartMem {
+		parseMem = maxMultipartMem
+	}
+	if err := r.ParseMultipartForm(parseMem); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("file too large (max %d MB)", ue.MaxSizeMB))
 		return
 	}
@@ -173,32 +180,31 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	}
 	defer func() { _ = file.Close() }()
 
-	// Read file data first so we can sniff the real MIME type from magic bytes
-	// rather than trusting the client-supplied Content-Type header. Without
-	// this, a request could upload "image.jpg" with Content-Type: text/html
-	// and end up with HTML being served as a trusted image from this project's
-	// asset path - stored XSS.
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil || int64(len(data)) > maxBytes {
+	// Sniff the real MIME type from the first 512 bytes (magic bytes) rather than
+	// buffering the entire upload into RAM or trusting the client Content-Type.
+	headBuf := make([]byte, 512)
+	headN, headErr := io.ReadFull(file, headBuf)
+	if headErr != nil && !errors.Is(headErr, io.EOF) && !errors.Is(headErr, io.ErrUnexpectedEOF) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("file too large (max %d MB)", ue.MaxSizeMB))
 		return
 	}
+	head := headBuf[:headN]
 
 	allowed := ue.AllowedTypes
 	if len(allowed) == 0 {
 		allowed = defaultUploadTypes
 	}
-	ct, typeAllowed := sniffUploadContentType(data, header.Header.Get("Content-Type"), allowed)
+	ct, typeAllowed := sniffUploadContentType(head, header.Header.Get("Content-Type"), allowed)
 	if !typeAllowed {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("file type %q not allowed (accepted: %v)", ct, allowed))
 		return
 	}
 
-	// Per-project disk quota: refuse the upload if it would push the project's
-	// total stored uploads past the cap. Without this an internet visitor can
-	// fill the host disk by spamming an upload endpoint.
-	if usedBytes, err := store.SumDiskUploadBytes(projectDB.Reader()); err == nil {
-		if usedBytes+int64(len(data)) > endpoints.MaxProjectUploadBytes {
+	// Per-project disk quota pre-check using reported header size (verified again
+	// with exact streamed byte count below).
+	usedBytes, usedErr := store.SumDiskUploadBytes(projectDB.Reader())
+	if usedErr == nil && header.Size > 0 {
+		if usedBytes+header.Size > endpoints.MaxProjectUploadBytes {
 			writeError(w, http.StatusInsufficientStorage, "project upload quota exceeded")
 			return
 		}
@@ -209,12 +215,12 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	// same-nanosecond concurrent-upload collisions astronomically unlikely. Still
 	// paired with O_EXCL below so a genuine collision fails loudly instead of silently
 	// overwriting the first writer's bytes - which would be a cross-user data-leak.
-	ext := filepath.Ext(header.Filename)
+	ext := sanitizeUploadExt(filepath.Ext(header.Filename))
 	if ext == "" {
 		// Try to get extension from content type.
 		exts, _ := mime.ExtensionsByType(ct)
 		if len(exts) > 0 {
-			ext = exts[0]
+			ext = sanitizeUploadExt(exts[0])
 		}
 	}
 	baseStem := strings.TrimSuffix(filepath.Base(header.Filename), ext)
@@ -239,41 +245,47 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	}
 	storageName += uniqueName
 
-	// Write to disk. O_EXCL turns the random-suffixed name into a
-	// genuine cross-process write-lock: if a second uploader on a
-	// different core happened to derive the same name (vanishingly
-	// rare but mathematically possible), the second writer fails
-	// instead of silently overwriting the first writer's bytes - a
-	// cross-user data leak we'd otherwise never see in logs.
+	// Stream directly to disk under O_EXCL without holding the full file in RAM.
 	dir := filepath.Join(dirParts...)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, "storage error")
 		return
 	}
 	storagePath := filepath.Join(dir, uniqueName)
-	if err := writeExclusive(storagePath, data); err != nil {
-		// One retry with a fresh random suffix is enough; if even that
-		// collides we have bigger problems than this upload.
-		if errors.Is(err, os.ErrExist) {
-			uniqueName = fmt.Sprintf("%d_%s_%s%s", time.Now().UnixNano(), randomHex4(), sanitizeUploadBasename(baseStem), ext)
-			storagePath = filepath.Join(dir, uniqueName)
-			// Also refresh storageName so the URL and DB row match.
-			storageName = strings.TrimSuffix(storageName, filepath.Base(storageName)) + uniqueName
-			if err := writeExclusive(storagePath, data); err != nil {
-				writeError(w, http.StatusInternalServerError, "storage error")
-				return
-			}
-		} else {
-			writeError(w, http.StatusInternalServerError, "storage error")
-			return
-		}
+	dst, err := os.OpenFile(storagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		uniqueName = fmt.Sprintf("%d_%s_%s%s", time.Now().UnixNano(), randomHex4(), sanitizeUploadBasename(baseStem), ext)
+		storagePath = filepath.Join(dir, uniqueName)
+		storageName = strings.TrimSuffix(storageName, filepath.Base(storageName)) + uniqueName
+		dst, err = os.OpenFile(storagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "storage error")
+		return
+	}
+	written, copyErr := io.Copy(dst, io.LimitReader(io.MultiReader(bytes.NewReader(head), file), maxBytes+1))
+	closeErr := dst.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(storagePath)
+		writeError(w, http.StatusInternalServerError, "storage error")
+		return
+	}
+	if written > maxBytes {
+		_ = os.Remove(storagePath)
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("file too large (max %d MB)", ue.MaxSizeMB))
+		return
+	}
+	if usedErr == nil && usedBytes+written > endpoints.MaxProjectUploadBytes {
+		_ = os.Remove(storagePath)
+		writeError(w, http.StatusInsufficientStorage, "project upload quota exceeded")
+		return
 	}
 
 	// Insert metadata into files table.
 	// Must match what ServeFile reads: kind='file' + storage='disk' so
-	// artifactBytes loads the on-disk bytes via disk_path instead of returning
+	// ServeFile streams the on-disk bytes via disk_path instead of returning
 	// an empty inline body.
-	if err := store.UpsertUploadedFile(projectDB.Writer(), storageName, ct, len(data), storagePath); err != nil {
+	if err := store.UpsertUploadedFile(projectDB.Writer(), storageName, ct, int(written), storagePath); err != nil {
 		slog.Error("upload: failed to insert file metadata", "error", err)
 		_ = os.Remove(storagePath) // clean up orphaned file
 		writeError(w, http.StatusInternalServerError, "storage error")
@@ -298,7 +310,7 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 			return
 		}
 		cols := []string{"filename", "url", "content_type", "size"}
-		vals := []any{header.Filename, fileURL, ct, len(data)}
+		vals := []any{header.Filename, fileURL, ct, int(written)}
 		if ue.OwnerColumn != "" && authUserID > 0 {
 			if err := security.ValidateColumnName(ue.OwnerColumn); err == nil {
 				cols = append(cols, ue.OwnerColumn)
@@ -346,7 +358,7 @@ func (h *Handler) apiUpload(w http.ResponseWriter, r *http.Request, projectID in
 	resp := map[string]any{
 		"url":      fileURL,
 		"filename": header.Filename,
-		"size":     len(data),
+		"size":     written,
 		"type":     ct,
 	}
 	if len(inserted) > 0 {
@@ -453,6 +465,22 @@ func sanitizeUploadFolder(folder string) string {
 		clean = append(clean, p)
 	}
 	return strings.Join(clean, "/")
+}
+
+// sanitizeUploadExt keeps only a clean ASCII alphanumeric extension (e.g. ".png",
+// ".jpeg") of length 1..10 after the dot; anything containing path separators,
+// whitespace, or special characters is dropped.
+func sanitizeUploadExt(ext string) string {
+	if len(ext) < 2 || len(ext) > 11 || ext[0] != '.' {
+		return ""
+	}
+	for i := 1; i < len(ext); i++ {
+		c := ext[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return ""
+		}
+	}
+	return strings.ToLower(ext)
 }
 
 // SSE Stream handler

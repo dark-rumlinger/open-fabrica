@@ -51,11 +51,12 @@ func ResetAgentEndpointDailyBudget(db *sql.DB, path, today string) error {
 	return err
 }
 
-// InsertAgentRun records a new running async agent run in of_agent_runs.
-func InsertAgentRun(writer *sql.DB, runID, path, reqJSON string) error {
+// InsertAgentRun records a new running async agent run in of_agent_runs,
+// bound to the caller's userID and tenantID (0 when unauthenticated).
+func InsertAgentRun(writer *sql.DB, runID, path string, userID, tenantID int, reqJSON string) error {
 	_, err := writer.Exec(
-		`INSERT INTO of_agent_runs (id, path, status, request) VALUES (?, ?, 'running', ?)`,
-		runID, path, reqJSON,
+		`INSERT INTO of_agent_runs (id, path, user_id, tenant_id, status, request) VALUES (?, ?, ?, ?, 'running', ?)`,
+		runID, path, userID, tenantID, reqJSON,
 	)
 	return err
 }
@@ -80,6 +81,8 @@ func MarkAgentRunDone(writer *sql.DB, runID, content, stopReason string, steps, 
 
 // AgentRunStatusRow holds the status and metrics for an async agent run.
 type AgentRunStatusRow struct {
+	UserID       int
+	TenantID     int
 	Status       string
 	Content      string
 	StopReason   string
@@ -95,11 +98,11 @@ type AgentRunStatusRow struct {
 func LoadAgentRunStatus(reader *sql.DB, runID, path string) (*AgentRunStatusRow, error) {
 	var r AgentRunStatusRow
 	err := reader.QueryRow(
-		`SELECT status, content, stop_reason, steps, subagents, input_tokens, output_tokens, error,
+		`SELECT user_id, tenant_id, status, content, stop_reason, steps, subagents, input_tokens, output_tokens, error,
 		        CAST(strftime('%s','now') - strftime('%s', updated_at) AS INTEGER)
 		   FROM of_agent_runs WHERE id = ? AND path = ?`,
 		runID, path,
-	).Scan(&r.Status, &r.Content, &r.StopReason, &r.Steps, &r.Subagents, &r.InputTokens, &r.OutputTokens, &r.RunErr, &r.AgeSecs)
+	).Scan(&r.UserID, &r.TenantID, &r.Status, &r.Content, &r.StopReason, &r.Steps, &r.Subagents, &r.InputTokens, &r.OutputTokens, &r.RunErr, &r.AgeSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +128,38 @@ func ListAppTableNames(reader *sql.DB, limit int) ([]string, error) {
 		}
 	}
 	return out, rows.Err()
+}
+
+// ListScopedAPITablesByKind returns lowercased table names that have an
+// owner_column and/or tenant_column on any CRUD endpoint, separated by scope
+// kind so callers can enforce admin (owner bypass) vs platform_admin (tenant
+// bypass) independently.
+func ListScopedAPITablesByKind(reader *sql.DB) (ownerScoped, tenantScoped map[string]bool, err error) {
+	rows, err := reader.Query(
+		`SELECT table_name, COALESCE(owner_column,''), COALESCE(tenant_column,'')
+		 FROM of_api_endpoints
+		 WHERE COALESCE(owner_column,'') != '' OR COALESCE(tenant_column,'') != ''`,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	ownerScoped = map[string]bool{}
+	tenantScoped = map[string]bool{}
+	for rows.Next() {
+		var name, ownerCol, tenantCol string
+		if rows.Scan(&name, &ownerCol, &tenantCol) == nil && name != "" {
+			low := strings.ToLower(name)
+			if ownerCol != "" {
+				ownerScoped[low] = true
+			}
+			if tenantCol != "" {
+				tenantScoped[low] = true
+			}
+		}
+	}
+	return ownerScoped, tenantScoped, rows.Err()
 }
 
 // ListScopedAPITables returns the lower-cased names of tables behind an

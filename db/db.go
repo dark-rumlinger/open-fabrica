@@ -13,7 +13,8 @@ import (
 )
 
 type DB struct {
-	*sql.DB         // read pool (concurrent reads)
+	*sql.DB         // points to writer pool so legacy callers calling DB.DB serialize writes
+	reader  *sql.DB // read pool (4 concurrent query_only connections)
 	writer  *sql.DB // write pool (single connection, serializes writes)
 }
 
@@ -29,7 +30,7 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 
-	db := &DB{DB: readDB, writer: writeDB}
+	db := &DB{DB: writeDB, reader: readDB, writer: writeDB}
 
 	// Run migrations
 	if err := db.migrate(); err != nil {
@@ -42,11 +43,21 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
+// Reader returns the multi-connection read-only pool.
+func (db *DB) Reader() *sql.DB {
+	return db.reader
+}
+
+// Writer returns the single-connection serialized write pool.
+func (db *DB) Writer() *sql.DB {
+	return db.writer
+}
+
 // Close closes both the read and write pools.
 func (db *DB) Close() error {
 	werr := db.writer.Close()
-	if derr := db.DB.Close(); derr != nil {
-		return derr
+	if rerr := db.reader.Close(); rerr != nil {
+		return rerr
 	}
 	return werr
 }
@@ -64,7 +75,7 @@ func (db *DB) BeginWriteTx() (*sql.Tx, error) {
 // GetSetting retrieves a setting value by key
 func (db *DB) GetSetting(key string) (string, error) {
 	var value string
-	err := db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
+	err := db.reader.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
 	return value, err
 }
 

@@ -82,6 +82,29 @@ func TestTopicMatching(t *testing.T) {
 	}
 }
 
+func TestValidateRuleTopicFilterAndExtract(t *testing.T) {
+	if err := ValidateRuleTopicFilter("sensors/{zone}/{metric}"); err != nil {
+		t.Fatalf("expected valid rule filter, got %v", err)
+	}
+	if err := ValidateRuleTopicFilter("zigbee2mqtt/{device}/#"); err != nil {
+		t.Fatalf("expected valid rule filter with #, got %v", err)
+	}
+	for _, bad := range []string{"sensors/{123}/temp", "sensors/{a-b}/temp", "sensors/{}/temp", "sensors/#/bad"} {
+		if err := ValidateRuleTopicFilter(bad); err == nil {
+			t.Errorf("expected invalid rule filter for %q", bad)
+		}
+	}
+
+	ok, vars := MatchTopicExtract("sensors/{zone}/{metric}", "sensors/greenhouse/temp")
+	if !ok || vars["zone"] != "greenhouse" || vars["metric"] != "temp" {
+		t.Fatalf("unexpected MatchTopicExtract result: ok=%v vars=%v", ok, vars)
+	}
+	ok, _ = MatchTopicExtract("{root}/status", "$SYS/status")
+	if ok {
+		t.Fatal("leading capture must not match $ system topics")
+	}
+}
+
 func TestBroker_PubSubRetainedAndLWT(t *testing.T) {
 	var mu sync.Mutex
 	var events []PublishEvent
@@ -243,5 +266,190 @@ func TestBroker_ACLEnforcement(t *testing.T) {
 	subAck, err := readPacket(r)
 	if err != nil || subAck.ptype != pktSubAck || subAck.body[2] != 0x80 {
 		t.Fatalf("expected 0x80 subscribe failure for disallowed topic, got %+v %v", subAck, err)
+	}
+}
+
+func TestBroker_QoS1PubAckDoesNotDisconnect(t *testing.T) {
+	b := NewBroker(BrokerConfig{})
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c, s := net.Pipe()
+	defer c.Close()
+	go b.HandleConn(ctx, s)
+
+	if err := writePacket(c, pktConnect, 0, buildConnectBody("sub-qos1", "", "", true, 30, "", nil)); err != nil {
+		t.Fatal(err)
+	}
+	r := bufio.NewReader(c)
+	if ack, err := readPacket(r); err != nil || ack.ptype != pktConnAck || ack.body[1] != connAccepted {
+		t.Fatalf("connack failed: %+v %v", ack, err)
+	}
+	if err := writePacket(c, pktSubscribe, 0x02, buildSubscribeBody(1, "sensors/#", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if subAck, err := readPacket(r); err != nil || subAck.ptype != pktSubAck || subAck.body[2] != 1 {
+		t.Fatalf("suback failed: %+v %v", subAck, err)
+	}
+
+	// Broker delivers a QoS 1 publish; compliant client replies with PUBACK.
+	if err := b.Publish("sensors/esp1/temp", []byte("21.5"), 1, false); err != nil {
+		t.Fatal(err)
+	}
+	msg1, err := readPacket(r)
+	if err != nil || msg1.ptype != pktPublish {
+		t.Fatalf("expected first publish, got %+v %v", msg1, err)
+	}
+	p1, err := parsePublish(msg1.flags, msg1.body)
+	if err != nil || p1.qos != 1 || p1.packetID == 0 {
+		t.Fatalf("expected QoS 1 with non-zero packetID, got %+v %v", p1, err)
+	}
+
+	var ack [2]byte
+	binary.BigEndian.PutUint16(ack[:], p1.packetID)
+	if err := writePacket(c, pktPubAck, 0, ack[:]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Connection must remain alive and respond to PINGREQ + receive subsequent publishes.
+	if err := writePacket(c, pktPingReq, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	pingResp, err := readPacket(r)
+	if err != nil || pingResp.ptype != pktPingResp {
+		t.Fatalf("expected PINGRESP after PUBACK (client must stay connected), got %+v %v", pingResp, err)
+	}
+
+	if err := b.Publish("sensors/esp1/temp", []byte("22.0"), 1, false); err != nil {
+		t.Fatal(err)
+	}
+	msg2, err := readPacket(r)
+	if err != nil || msg2.ptype != pktPublish {
+		t.Fatalf("expected second publish after PUBACK, got %+v %v", msg2, err)
+	}
+}
+
+func TestBroker_ConnectDisconnectHooksAndStats(t *testing.T) {
+	connCh := make(chan ClientEvent, 2)
+	discCh := make(chan ClientEvent, 2)
+	b := NewBroker(BrokerConfig{
+		Auth: func(clientID, username, password string) (AuthResult, bool) {
+			return AuthResult{DeviceName: "esp_greenhouse", Username: username, AllowPub: "#", AllowSub: "#"}, true
+		},
+		OnConnect: func(ev ClientEvent) {
+			connCh <- ev
+		},
+		OnDisconnect: func(ev ClientEvent) {
+			discCh <- ev
+		},
+	})
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c, s := net.Pipe()
+	go b.HandleConn(ctx, s)
+	if err := writePacket(c, pktConnect, 0, buildConnectBody("esp-client-1", "esp1", "tok", true, 30, "", nil)); err != nil {
+		t.Fatal(err)
+	}
+	r := bufio.NewReader(c)
+	if _, err := readPacket(r); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-connCh:
+		if ev.ClientID != "esp-client-1" || ev.DeviceName != "esp_greenhouse" || ev.Username != "esp1" {
+			t.Fatalf("unexpected OnConnect event: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OnConnect")
+	}
+
+	st := b.Stats()
+	if st.ConnectedClients != 1 || len(st.Clients) != 1 || st.Clients[0].DeviceName != "esp_greenhouse" {
+		t.Fatalf("unexpected stats: %+v", st)
+	}
+
+	_ = writePacket(c, pktDisconnect, 0, nil)
+	_ = c.Close()
+
+	select {
+	case ev := <-discCh:
+		if ev.ClientID != "esp-client-1" || !ev.CleanExit || ev.Replaced {
+			t.Fatalf("unexpected OnDisconnect event: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OnDisconnect")
+	}
+}
+
+func TestBroker_SleepyDeviceOfflineQueue(t *testing.T) {
+	b := NewBroker(BrokerConfig{})
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 1. Sleepy ESP32 connects with cleanSession=false, subscribes QoS 1, then goes to sleep.
+	c1, s1 := net.Pipe()
+	go b.HandleConn(ctx, s1)
+	if err := writePacket(c1, pktConnect, 0, buildConnectBody("esp-sleepy", "", "", false, 30, "", nil)); err != nil {
+		t.Fatal(err)
+	}
+	r1 := bufio.NewReader(c1)
+	ack1, err := readPacket(r1)
+	if err != nil || ack1.ptype != pktConnAck || ack1.body[0] != 0x00 || ack1.body[1] != connAccepted {
+		t.Fatalf("expected clean initial connack, got %+v %v", ack1, err)
+	}
+	if err := writePacket(c1, pktSubscribe, 0x02, buildSubscribeBody(1, "actuators/esp1/#", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPacket(r1); err != nil {
+		t.Fatal(err)
+	}
+	_ = writePacket(c1, pktDisconnect, 0, nil)
+	_ = c1.Close()
+
+	// Wait briefly until session is removed.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && b.Stats().ConnectedClients > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 2. Server publishes 2 QoS 1 commands while ESP32 is asleep.
+	if err := b.Publish("actuators/esp1/valve", []byte("open"), 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Publish("actuators/esp1/valve", []byte("close"), 1, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. ESP32 wakes up with cleanSession=false -> sessionPresent=1 and receives both queued commands in FIFO order.
+	c2, s2 := net.Pipe()
+	defer c2.Close()
+	go b.HandleConn(ctx, s2)
+	if err := writePacket(c2, pktConnect, 0, buildConnectBody("esp-sleepy", "", "", false, 30, "", nil)); err != nil {
+		t.Fatal(err)
+	}
+	r2 := bufio.NewReader(c2)
+	ack2, err := readPacket(r2)
+	if err != nil || ack2.ptype != pktConnAck || ack2.body[0] != 0x01 || ack2.body[1] != connAccepted {
+		t.Fatalf("expected sessionPresent=1 on reconnect, got %+v %v", ack2, err)
+	}
+
+	wantPayloads := []string{"open", "close"}
+	for i, want := range wantPayloads {
+		p, err := readPacket(r2)
+		if err != nil || p.ptype != pktPublish {
+			t.Fatalf("queued msg %d: expected PUBLISH, got %+v %v", i, p, err)
+		}
+		pub, err := parsePublish(p.flags, p.body)
+		if err != nil || pub.topic != "actuators/esp1/valve" || string(pub.payload) != want {
+			t.Fatalf("queued msg %d: got topic=%q payload=%q, want %q", i, pub.topic, string(pub.payload), want)
+		}
 	}
 }

@@ -41,7 +41,7 @@ func agentScopeProject(t *testing.T) *db.ProjectDB {
 
 func runAgentQuery(t *testing.T, pdb *db.ProjectDB, full bool, sqlText string) string {
 	t.Helper()
-	tool := agentDataQueryTool(pdb, full)
+	tool := agentDataQueryTool(pdb, full, full)
 	out, err := tool.Invoke(context.Background(), `{"sql":`+quoteJSON(sqlText)+`}`)
 	if err != nil {
 		t.Fatalf("invoke: %v", err)
@@ -79,14 +79,14 @@ func TestAgentQueryWithholdsScopedTables(t *testing.T) {
 
 func TestAgentQueryDescriptionHidesScopedTables(t *testing.T) {
 	pdb := agentScopeProject(t)
-	desc := agentDataQueryTool(pdb, false).Def.Description
+	desc := agentDataQueryTool(pdb, false, false).Def.Description
 	if strings.Contains(desc, "notes") {
 		t.Errorf("scoped table named in the tool description: %s", desc)
 	}
 	if !strings.Contains(desc, "posts") {
 		t.Errorf("unscoped table missing from the tool description: %s", desc)
 	}
-	if full := agentDataQueryTool(pdb, true).Def.Description; !strings.Contains(full, "notes") {
+	if full := agentDataQueryTool(pdb, true, true).Def.Description; !strings.Contains(full, "notes") {
 		t.Errorf("full-access description should list every table: %s", full)
 	}
 }

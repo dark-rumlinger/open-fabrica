@@ -386,8 +386,12 @@ func (c *Client) buildRequestBody(req llm.CompletionRequest, stream bool) map[st
 // A model whose endpoint refuses the disabled mode gets reasoning/thinking enabled
 // at the cheapest legal level instead, as close to the caller's "off" as permitted.
 func (c *Client) applyReasoningMode(body map[string]any, thinking *bool, effort string, k llm.ModelKey) {
-	if c.cfg.EffectiveShape() == providercfg.ShapeOpenRouter {
+	switch c.cfg.EffectiveShape() {
+	case providercfg.ShapeOpenRouter:
 		applyOpenRouterReasoningMode(body, thinking, effort, k)
+		return
+	case providercfg.ShapeGemini:
+		applyGeminiReasoningMode(body, thinking, effort, k)
 		return
 	}
 	switch {
@@ -443,6 +447,31 @@ func applyOpenRouterReasoningMode(body map[string]any, thinking *bool, effort st
 	}
 }
 
+// applyGeminiReasoningMode maps thinking/effort onto Gemini's OpenAI-compatible
+// `reasoning_effort` parameter (used across Gemini 2.5, 3.x, and 4.x models),
+// avoiding Z.ai/DeepSeek `thinking`/`enable_thinking` fields that Gemini rejects.
+func applyGeminiReasoningMode(body map[string]any, thinking *bool, effort string, k llm.ModelKey) {
+	if !llm.Caps.Allowed(k, llm.CapReasoningEffort) {
+		return
+	}
+	switch {
+	case thinking == nil:
+		if effort != "" {
+			body["reasoning_effort"] = effort
+		}
+	case *thinking:
+		if effort != "" {
+			body["reasoning_effort"] = effort
+		}
+	case llm.Caps.Allowed(k, llm.CapThinkingOff):
+		body["reasoning_effort"] = "none"
+	default:
+		// Models that forbid disabling thinking (Gemini 2.5 Pro, 3.x, 4.x)
+		// fall back to the cheapest universally accepted effort level.
+		body["reasoning_effort"] = forcedReasoningEffort
+	}
+}
+
 // buildMessages renders the request into the OpenAI messages array: the system
 // prompt, role mapping, assistant tool_calls, multimodal user parts, and the
 // explicit cache-control breakpoints (all no-ops unless emitCacheControl is set,
@@ -488,14 +517,18 @@ func (c *Client) buildMessages(req llm.CompletionRequest) []map[string]any {
 			}
 			var toolCalls []map[string]any
 			for _, tc := range m.ToolCalls {
-				toolCalls = append(toolCalls, map[string]any{
+				entry := map[string]any{
 					"id":   tc.ID,
 					"type": "function",
 					"function": map[string]any{
 						"name":      tc.Name,
 						"arguments": tc.Arguments,
 					},
-				})
+				}
+				if len(tc.ExtraContent) > 0 && string(tc.ExtraContent) != "null" {
+					entry["extra_content"] = tc.ExtraContent
+				}
+				toolCalls = append(toolCalls, entry)
 			}
 			msg["tool_calls"] = toolCalls
 		} else if m.Role == llm.RoleUser && len(m.Images) > 0 {
@@ -628,10 +661,11 @@ type apiToolCall struct {
 	// order, so only `index` identifies which call a delta belongs to. Pointer so a
 	// missing value is distinguishable from index 0 (some gateways omit it on
 	// non-streaming responses); the SSE parser falls back to arrival order when nil.
-	Index    *int        `json:"index,omitempty"`
-	ID       string      `json:"id"`
-	Type     string      `json:"type"`
-	Function apiFunction `json:"function"`
+	Index        *int            `json:"index,omitempty"`
+	ID           string          `json:"id"`
+	Type         string          `json:"type"`
+	Function     apiFunction     `json:"function"`
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 type apiFunction struct {
@@ -733,11 +767,15 @@ func (c *Client) parseResponse(resp *apiResponse) *llm.CompletionResponse {
 		}
 
 		for _, tc := range choice.Message.ToolCalls {
-			out.ToolCalls = append(out.ToolCalls, llm.ToolCall{
+			item := llm.ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
 				Arguments: tc.Function.Arguments,
-			})
+			}
+			if len(tc.ExtraContent) > 0 && string(tc.ExtraContent) != "null" {
+				item.ExtraContent = tc.ExtraContent
+			}
+			out.ToolCalls = append(out.ToolCalls, item)
 		}
 	}
 
@@ -903,6 +941,9 @@ func (c *Client) parseSSEStream(body io.Reader, callback llm.StreamCallback) err
 			}
 			if tc.Function.Arguments != "" {
 				toolArgs[idx].WriteString(tc.Function.Arguments)
+			}
+			if len(tc.ExtraContent) > 0 && string(tc.ExtraContent) != "null" {
+				toolCalls[idx].ExtraContent = tc.ExtraContent
 			}
 		}
 

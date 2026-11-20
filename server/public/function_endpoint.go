@@ -94,7 +94,7 @@ func (h *Handler) apiFunction(w http.ResponseWriter, r *http.Request, project *m
 		spec.Timeout = time.Duration(ep.TimeoutMS) * time.Millisecond
 	}
 	rt := funcexec.NewRuntime(project.ID, projectDB.Reader(), projectDB.Writer(), h.deps.completeDeps())
-	resp, err := funcexec.Execute(rt, spec, reqObj)
+	resp, err := funcexec.ExecuteContext(r.Context(), rt, spec, reqObj)
 	if err != nil {
 		var to *funcsandbox.Timeout
 		if errors.As(err, &to) {
@@ -206,17 +206,19 @@ func writeFunctionResponse(w http.ResponseWriter, resp *funcsandbox.Response) {
 }
 
 // disallowedResponseHeader blocks handler-set headers that would let a function
-// mint credentials or steer the transport on the project's own origin. A handler
-// returns application content, not session or connection control, so Set-Cookie
-// and the hop-by-hop headers are dropped rather than forwarded.
+// mint credentials, weaken browser/CORS security policies, or steer the transport
+// on the project's own origin.
 func disallowedResponseHeader(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
 	case "set-cookie", "set-cookie2",
 		"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-		"te", "trailer", "transfer-encoding", "upgrade":
+		"te", "trailer", "transfer-encoding", "upgrade",
+		"content-security-policy", "content-security-policy-report-only",
+		"x-frame-options", "x-content-type-options", "strict-transport-security":
 		return true
 	}
-	return false
+	return strings.HasPrefix(lower, "access-control-") || strings.HasPrefix(lower, "cross-origin-")
 }
 
 // functionMethodAllowed reports whether method is in the endpoint's

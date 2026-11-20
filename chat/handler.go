@@ -8,12 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"openfabrica/internal/httpx"
-	"openfabrica/internal/safego"
 	"openfabrica/providers/llm"
 )
 
@@ -23,60 +19,18 @@ const (
 	maxImageBytes   = 4 << 20 // 4 MB per decoded image
 )
 
-const sessionMaxIdle = 2 * time.Hour
-
-// sessionEntry pairs a session with its last-used timestamp and a reference
-// count to prevent cleanup during active streaming.
-type sessionEntry struct {
-	session  *Session
-	lastUsed time.Time
-	inUse    int32 // atomic ref count of active streams
-}
-
-// ChatHandler exposes HTTP endpoints for the streaming chat interface.
+// ChatHandler exposes HTTP endpoints for the chat interface.
 type ChatHandler struct {
-	deps     SessionDeps
-	mu       sync.Mutex
-	sessions map[string]*sessionEntry // keyed by "projectID:sessionID"
-	stop     chan struct{}            // closed by Close to end the cleanup loop
+	deps SessionDeps
 }
 
 // NewChatHandler creates a ChatHandler with the given dependencies.
 func NewChatHandler(deps SessionDeps) *ChatHandler {
-	ch := &ChatHandler{
-		deps:     deps,
-		sessions: make(map[string]*sessionEntry),
-		stop:     make(chan struct{}),
-	}
-	safego.Go("chat-session-cleanup", ch.cleanupLoop)
-	return ch
+	return &ChatHandler{deps: deps}
 }
 
-// Close stops the background cleanup loop. Safe to call once at shutdown.
-func (h *ChatHandler) Close() {
-	close(h.stop)
-}
-
-// cleanupLoop removes idle sessions every 30 minutes until Close is called.
-func (h *ChatHandler) cleanupLoop() {
-	ticker := time.NewTicker(30 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-h.stop:
-			return
-		case <-ticker.C:
-		}
-		h.mu.Lock()
-		now := time.Now()
-		for key, entry := range h.sessions {
-			if atomic.LoadInt32(&entry.inUse) == 0 && now.Sub(entry.lastUsed) > sessionMaxIdle {
-				delete(h.sessions, key)
-			}
-		}
-		h.mu.Unlock()
-	}
-}
+// Close is a no-op retained for shutdown lifecycle compatibility.
+func (h *ChatHandler) Close() {}
 
 // ImageInput is a base64-encoded image attachment in a chat or project request.
 type ImageInput struct {
@@ -172,20 +126,12 @@ func (h *ChatHandler) HandleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry, err := h.getOrCreateSession(projectID, sessionID)
+	session, err := NewSession(sessionID, projectID, h.deps)
 	if err != nil {
 		writeChatError(w, http.StatusInternalServerError, "failed to open project database")
 		return
 	}
-	atomic.AddInt32(&entry.inUse, 1)
-	defer atomic.AddInt32(&entry.inUse, -1)
-	session := entry.session
 	logger := h.deps.Logger.With("handler", "chat_send", "project_id", projectID, "session_id", sessionID)
-
-	// A reply can take minutes (a tool loop). The admin server's WriteTimeout is sized
-	// for ordinary requests and would cut the connection before the answer is written,
-	// so the caller would see a network error for work that finished.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) // best-effort; some writers have no deadline
 
 	result, sendErr := session.SendWithImages(r.Context(), req.Message, images)
 	if sendErr != nil {
@@ -289,25 +235,4 @@ func (h *ChatHandler) HandleHistory(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(messages); err != nil {
 		h.deps.Logger.Error("encode history error", "error", err)
 	}
-}
-
-// getOrCreateSession returns an existing session or creates a new one.
-func (h *ChatHandler) getOrCreateSession(projectID int, sessionID string) (*sessionEntry, error) {
-	key := fmt.Sprintf("%d:%s", projectID, sessionID)
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if entry, ok := h.sessions[key]; ok {
-		entry.lastUsed = time.Now()
-		return entry, nil
-	}
-
-	s, err := NewSession(sessionID, projectID, h.deps)
-	if err != nil {
-		return nil, err
-	}
-	entry := &sessionEntry{session: s, lastUsed: time.Now()}
-	h.sessions[key] = entry
-	return entry, nil
 }

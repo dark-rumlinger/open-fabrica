@@ -17,8 +17,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/evanw/esbuild/pkg/api"
 
 	"openfabrica/internal/assetmin"
 	"openfabrica/internal/repopath"
@@ -65,11 +68,107 @@ func run() error {
 	return pruneAdmin(outputs)
 }
 
+var cssLinkRe = regexp.MustCompile(`(?i)<link\s+rel="stylesheet"\s+href="(/css/[^"]+\.css)"\s*>`)
+
 // plan computes every generated file's desired content, keyed by its repo-relative
 // slash path. The working directory must be the repo root.
+//
+// In addition to minifying, plan bundles web/admin's 30 CSS stylesheets into one
+// /css/app.css and bundles web/admin/app/main.js via esbuild (with ESM splitting
+// so locale catalogs remain lazy-loaded chunks), eliminating the ~180-request
+// HTTP/1.1 waterfall on admin cold load while keeping plaintext web/admin/ for dev.
 func plan() (map[string][]byte, error) {
 	out := map[string][]byte{}
-	err := filepath.WalkDir(adminSrc, func(path string, d fs.DirEntry, err error) error {
+
+	// 1. Read web/admin/index.html, bundle all referenced /css/*.css in exact
+	//    declaration order into web/admin-min/css/app.css, and rewrite index.html
+	//    to load that single stylesheet.
+	indexRaw, err := os.ReadFile(filepath.Join(adminSrc, "index.html"))
+	if err != nil {
+		return nil, fmt.Errorf("reading admin index.html: %w", err)
+	}
+	indexHTML := string(indexRaw)
+	var cssBuf strings.Builder
+	var cssReadErr error
+	bundledCSS := map[string]bool{}
+	replacedFirst := false
+	rewrittenHTML := cssLinkRe.ReplaceAllStringFunc(indexHTML, func(tag string) string {
+		m := cssLinkRe.FindStringSubmatch(tag)
+		if len(m) < 2 {
+			return tag
+		}
+		href := strings.TrimPrefix(m[1], "/")
+		bundledCSS[href] = true
+		raw, rerr := os.ReadFile(filepath.Join(adminSrc, filepath.FromSlash(href)))
+		if rerr != nil {
+			if cssReadErr == nil {
+				cssReadErr = fmt.Errorf("reading %s: %w", href, rerr)
+			}
+			return tag
+		}
+		cssBuf.Write(raw)
+		cssBuf.WriteByte('\n')
+		if !replacedFirst {
+			replacedFirst = true
+			return `<link rel="stylesheet" href="/css/app.css">`
+		}
+		return ""
+	})
+	if cssReadErr != nil {
+		return nil, cssReadErr
+	}
+	if cssBuf.Len() > 0 {
+		minCSS, err := assetmin.MinifyCSS("web/admin/css/app.css", cssBuf.String())
+		if err != nil {
+			return nil, fmt.Errorf("minifying bundled admin CSS: %w", err)
+		}
+		out[filepath.ToSlash(filepath.Join(adminOut, "css", "app.css"))] = []byte(minCSS)
+	}
+	out[filepath.ToSlash(filepath.Join(adminOut, "index.html"))] = []byte(assetmin.MinifyHTML(rewrittenHTML))
+
+	// 2. Bundle web/admin/app/main.js with esbuild (ESM splitting keeps dynamic
+	//    locale imports as separate lazy chunks).
+	absRoot, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	res := api.Build(api.BuildOptions{
+		EntryPoints:       []string{filepath.Join(adminSrc, "app", "main.js")},
+		Bundle:            true,
+		Splitting:         true,
+		Format:            api.FormatESModule,
+		Target:            api.ES2022,
+		MinifyWhitespace:  true,
+		MinifyIdentifiers: true,
+		MinifySyntax:      true,
+		Outdir:            filepath.Join(adminOut, "app"),
+		ChunkNames:        "chunks/[name]-[hash]",
+		Write:             false,
+	})
+	if len(res.Errors) > 0 {
+		return nil, fmt.Errorf("bundling admin JS: %s", res.Errors[0].Text)
+	}
+	for _, f := range res.OutputFiles {
+		rel, err := filepath.Rel(absRoot, f.Path)
+		if err != nil {
+			return nil, err
+		}
+		out[filepath.ToSlash(rel)] = f.Contents
+	}
+
+	// 3. Minify classic pre-paint theme-boot.js separately and copy static assets
+	//    (fonts, icons, any unbundled files).
+	themeRaw, err := os.ReadFile(filepath.Join(adminSrc, "app", "theme-boot.js"))
+	if err != nil {
+		return nil, fmt.Errorf("reading theme-boot.js: %w", err)
+	}
+	themeMin, err := assetmin.MinifyJS("web/admin/app/theme-boot.js", string(themeRaw), true)
+	if err != nil {
+		return nil, err
+	}
+	out[filepath.ToSlash(filepath.Join(adminOut, "app", "theme-boot.js"))] = []byte(themeMin)
+
+	err = filepath.WalkDir(adminSrc, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -79,6 +178,10 @@ func plan() (map[string][]byte, error) {
 		rel, err := filepath.Rel(adminSrc, path)
 		if err != nil {
 			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		if relSlash == "index.html" || strings.HasPrefix(relSlash, "app/") || bundledCSS[relSlash] {
+			return nil
 		}
 		// #nosec G122 -- build-time tool walking the repo's own admin source tree, not untrusted input.
 		raw, err := os.ReadFile(path)

@@ -556,6 +556,8 @@ CREATE TABLE IF NOT EXISTS of_agent_endpoints (
 CREATE TABLE IF NOT EXISTS of_agent_runs (
     id TEXT PRIMARY KEY,
     path TEXT NOT NULL,
+    user_id INTEGER NOT NULL DEFAULT 0,
+    tenant_id INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'running',
     request TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL DEFAULT '',
@@ -767,6 +769,7 @@ CREATE TABLE IF NOT EXISTS of_subscriptions (
     current_period_start DATETIME,
     current_period_end DATETIME,
     canceled_at DATETIME,
+    last_event_created INTEGER NOT NULL DEFAULT 0,
     metadata TEXT DEFAULT '{}',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -1436,6 +1439,8 @@ CREATE TABLE IF NOT EXISTS of_mqtt_config (
     enabled INTEGER NOT NULL DEFAULT 0,
     allow_anonymous INTEGER NOT NULL DEFAULT 0,
     max_clients INTEGER NOT NULL DEFAULT 100,
+    user_allow_pub TEXT NOT NULL DEFAULT '#',
+    user_allow_sub TEXT NOT NULL DEFAULT '#',
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1446,6 +1451,8 @@ CREATE TABLE IF NOT EXISTS of_mqtt_devices (
     secret_hash TEXT NOT NULL,
     allow_pub TEXT NOT NULL DEFAULT '#',
     allow_sub TEXT NOT NULL DEFAULT '#',
+    heartbeat_sec INTEGER NOT NULL DEFAULT 0,
+    stale_notified INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
     last_seen_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -1464,6 +1471,85 @@ CREATE TABLE IF NOT EXISTS of_mqtt_rules (
     topic_filter TEXT NOT NULL,
     target_table TEXT NOT NULL DEFAULT '',
     function_path TEXT NOT NULL DEFAULT '',
+    min_interval_sec INTEGER NOT NULL DEFAULT 0,
+    retention_days INTEGER NOT NULL DEFAULT 0,
+    rollup_interval TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS of_mqtt_rollups (
+    rule_name TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    series_key TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    min_val REAL NOT NULL,
+    max_val REAL NOT NULL,
+    sum_val REAL NOT NULL,
+    avg_val REAL NOT NULL,
+    last_val REAL NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (rule_name, interval, bucket, series_key, metric)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mqtt_rollups_lookup
+    ON of_mqtt_rollups(rule_name, interval, series_key, bucket);
+
+CREATE TABLE IF NOT EXISTS of_mqtt_subscriptions (
+    client_id TEXT NOT NULL,
+    topic_filter TEXT NOT NULL,
+    qos INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (client_id, topic_filter)
+);
+
+CREATE TABLE IF NOT EXISTS of_mqtt_offline_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    qos INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_mqtt_offline_queue_client
+    ON of_mqtt_offline_queue(client_id, id);
+
+-- Local folder drop-zone watchers and idempotent processed-file log.
+
+CREATE TABLE IF NOT EXISTS of_folder_watchers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    folder TEXT NOT NULL,
+    glob TEXT NOT NULL DEFAULT '*',
+    function_path TEXT NOT NULL DEFAULT '',
+    poll_sec INTEGER NOT NULL DEFAULT 5,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS of_folder_watch_seen (
+    watcher_name TEXT NOT NULL,
+    rel_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mod_time_ns INTEGER NOT NULL,
+    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (watcher_name, rel_path)
+);
+
+CREATE TABLE IF NOT EXISTS of_mqtt_bridges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    broker_url TEXT NOT NULL,
+    client_id TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    password_enc TEXT NOT NULL DEFAULT '',
+    remote_sub TEXT NOT NULL DEFAULT '',
+    local_prefix TEXT NOT NULL DEFAULT '',
+    local_pub TEXT NOT NULL DEFAULT '',
+    remote_prefix TEXT NOT NULL DEFAULT '',
+    qos INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

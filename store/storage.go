@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"openfabrica/internal/dbh"
 )
 
 // StorageDir returns the storage directory for a project, creating it if needed.
@@ -32,6 +34,47 @@ func ValidateStorageFilename(filename string) error {
 		return fmt.Errorf("invalid filename %q: path traversal or absolute path not allowed", filename)
 	}
 	return nil
+}
+
+// RegisterDiskArtifact upserts a kind='file', storage='disk' row in of_files
+// for bytes already written at diskPath, always clearing is_deleted = 0 and
+// deleted_at = NULL so overwriting a previously soft-deleted file works.
+func RegisterDiskArtifact(db dbh.Handle, filename, contentType string, size int64, diskPath, metaJSON string) error {
+	if metaJSON == "" {
+		metaJSON = "{}"
+	}
+	_, err := db.Exec(
+		`INSERT INTO of_files (kind, path, storage, content_type, size, disk_path, scope, metadata, is_deleted, updated_at)
+		 VALUES ('file', ?, 'disk', ?, ?, ?, 'global', ?, 0, CURRENT_TIMESTAMP)
+		 ON CONFLICT(kind, path) DO UPDATE SET
+		   storage = 'disk',
+		   body = '',
+		   content_type = excluded.content_type,
+		   size = excluded.size,
+		   disk_path = excluded.disk_path,
+		   scope = excluded.scope,
+		   metadata = excluded.metadata,
+		   is_deleted = 0,
+		   deleted_at = NULL,
+		   updated_at = CURRENT_TIMESTAMP`,
+		filename, contentType, size, diskPath, metaJSON,
+	)
+	return err
+}
+
+// SaveDiskArtifact writes data to the project's subdir on disk and registers
+// it in of_files. If the DB upsert fails, the newly written file is removed so
+// failed writes do not leave orphaned files on disk.
+func SaveDiskArtifact(db dbh.Handle, dataDir string, projectID int, subdir, filename, contentType string, data []byte, metaJSON string) (string, error) {
+	storagePath, err := WriteFileToDisk(dataDir, projectID, subdir, filename, data)
+	if err != nil {
+		return "", fmt.Errorf("writing to disk: %w", err)
+	}
+	if err := RegisterDiskArtifact(db, filename, contentType, int64(len(data)), storagePath, metaJSON); err != nil {
+		_ = os.Remove(storagePath)
+		return "", fmt.Errorf("recording artifact: %w", err)
+	}
+	return storagePath, nil
 }
 
 // WriteFileToDisk writes data to data/projects/{projectID}/{subdir}/{filename} and

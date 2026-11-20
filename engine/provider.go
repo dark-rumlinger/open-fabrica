@@ -88,13 +88,34 @@ func (r *providerResolver) fallback() (resolvedProvider, error) {
 	return r.build(model, providerRow)
 }
 
+// canFallback reports whether an error from the primary provider is worth
+// retrying on a different provider. True payload-shape errors (bad request,
+// context overflow) would fail identically anywhere; provider-scoped errors
+// (schema unsupported, auth, quota, rate limit, overloaded, timeout, server,
+// transport, truncated, schema drift) can succeed on an alternate provider.
+func canFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsSchemaUnsupported(err) {
+		return true
+	}
+	lerr, ok := llm.AsLLMError(err)
+	if !ok {
+		return true
+	}
+	switch lerr.Code {
+	case llm.CodeBadRequest, llm.CodeContextOverflow:
+		return false
+	default:
+		return true
+	}
+}
+
 // fallbackHook adapts the resolver into the retry layer's FallbackHook shape.
 func (r *providerResolver) fallbackHook() FallbackHook {
 	return func(err error) (llm.Provider, string) {
-		// Schema-unsupported means THIS provider can't honour structured
-		// output; a different provider might. Everything fatal-for-payload
-		// (auth, bad request, quota) would fail identically - don't bother.
-		if IsFatalLLMError(err) && !IsSchemaUnsupported(err) {
+		if !canFallback(err) {
 			return nil, ""
 		}
 		alt, ferr := r.fallback()

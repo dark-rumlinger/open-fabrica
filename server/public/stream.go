@@ -91,26 +91,22 @@ func (h *Handler) apiStream(w http.ResponseWriter, r *http.Request, projectID in
 		allowedTypes[events.EventType(et)] = true
 	}
 
-	// pass is the ONE filter every event clears before this stream emits it - the
-	// same decision for a live event and a backfilled one: this project, an allowed
-	// type, the scoped table (if any), and the row-level scope check.
-	pass := func(e events.Event) bool {
+	// matchHeader is a pure in-memory filter safe to run inline inside Bus.Publish
+	// (no SQLite I/O on the publisher's goroutine). Row-level scope.allow runs on
+	// this connection's own goroutine during backfill and live delivery.
+	matchHeader := func(e events.Event) bool {
 		if e.ProjectID != projectID || !allowedTypes[e.Type] {
 			return false
 		}
-		// When the endpoint is scoped to one table, only push row events whose
-		// payload "table" matches; other tables' events are not this stream's.
 		if se.TableName != "" {
 			if t, _ := e.Payload["table"].(string); t != se.TableName {
 				return false
 			}
 		}
-		// Row-level scoping. A row event carries the row's own fields, so a stream
-		// over an owner- or tenant-scoped table would hand every subscriber every
-		// other user's and tenant's data unless filtered here - the same leak the REST
-		// path closes with its SQL predicate and the WS path by folding tenant into
-		// the room key.
-		return scope.allow(e.Type, e.Payload)
+		return true
+	}
+	pass := func(e events.Event) bool {
+		return matchHeader(e) && scope.allow(e.Type, e.Payload)
 	}
 
 	// Subscribe BEFORE reading the backfill so no event slips through the gap
@@ -118,7 +114,7 @@ func (h *Handler) apiStream(w http.ResponseWriter, r *http.Request, projectID in
 	// captured by Since below, and the id-based dedup in the loop drops the copy.
 	eventCh := make(chan events.Event, 64)
 	subID := h.deps.Bus.SubscribeAll(func(e events.Event) {
-		if !pass(e) {
+		if !matchHeader(e) {
 			return
 		}
 		select {
@@ -169,6 +165,9 @@ func (h *Handler) apiStream(w http.ResponseWriter, r *http.Request, projectID in
 		case e := <-eventCh:
 			if e.ID <= backfillMax {
 				continue // already delivered (or filtered) during backfill
+			}
+			if !scope.allow(e.Type, e.Payload) {
+				continue
 			}
 			data, err := json.Marshal(e.Payload)
 			if err != nil {

@@ -117,6 +117,21 @@ func (h *Handler) ProjectResolver(next http.Handler) http.Handler {
 	})
 }
 
+// InvalidateProject drops cached domain lookups and API responses for projectID
+// so a deleted or updated project does not continue serving stale entries.
+func (h *Handler) InvalidateProject(projectID int) {
+	h.domainCacheMu.Lock()
+	for host, entry := range h.domainCache {
+		if entry.project != nil && entry.project.ID == projectID {
+			delete(h.domainCache, host)
+		}
+	}
+	h.domainCacheMu.Unlock()
+	if h.apiCache != nil {
+		h.apiCache.invalidateProject(projectID)
+	}
+}
+
 func (h *Handler) lookupProjectByDomain(host string) (*models.Project, error) {
 	now := time.Now()
 	h.domainCacheMu.RLock()

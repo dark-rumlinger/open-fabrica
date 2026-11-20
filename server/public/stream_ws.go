@@ -378,6 +378,9 @@ func (h *Handler) prepareWSConnect(w http.ResponseWriter, r *http.Request, proje
 // apiWebSocket handles GET /api/{path}/ws: pure transparent relay with room support.
 // Messages are relayed as-sent to all other clients in the same room, with _sender injected.
 func (h *Handler) apiWebSocket(w http.ResponseWriter, r *http.Request, projectID int, projectDB *db.ProjectDB) {
+	projectDB.Pin()
+	defer projectDB.Unpin()
+
 	spec, releaseConn, ok := h.prepareWSConnect(w, r, projectID, projectDB)
 	if !ok {
 		return

@@ -159,10 +159,10 @@ func TestGuardQueryTargetsBlocksAuthTables(t *testing.T) {
 	d := migratedTestDB(t,
 		`INSERT INTO of_auth_endpoints (table_name, path) VALUES ('members', 'auth')`,
 	)
-	if msg, _ := guardQueryTargets(d, "SELECT * FROM members"); !strings.Contains(msg, "protected table") {
+	if msg, _ := guardQueryTargets(d, "SELECT * FROM members", false, false); !strings.Contains(msg, "protected table") {
 		t.Errorf("auth table not blocked: %q", msg)
 	}
-	if msg, _ := guardQueryTargets(d, "SELECT 1"); msg != "" {
+	if msg, _ := guardQueryTargets(d, "SELECT 1", false, false); msg != "" {
 		t.Errorf("harmless query refused: %q", msg)
 	}
 }
@@ -183,7 +183,7 @@ func TestGuardQueryTargetsHashTablesAndMemoryHogs(t *testing.T) {
 		"zeroblob":       "SELECT length(zeroblob(900000000))",
 		"load_extension": "SELECT load_extension('x')",
 	} {
-		if msg, _ := guardQueryTargets(d, q); msg == "" {
+		if msg, _ := guardQueryTargets(d, q, false, false); msg == "" {
 			t.Errorf("%s: query was allowed", name)
 		}
 	}
@@ -193,7 +193,7 @@ func TestGuardQueryTargetsHashTablesAndMemoryHogs(t *testing.T) {
 		"union over normal tables":   "SELECT 1 UNION SELECT id FROM notes",
 		"cte over normal table":      "WITH x AS (SELECT * FROM notes) SELECT * FROM x",
 	} {
-		if msg, _ := guardQueryTargets(d, q); msg != "" {
+		if msg, _ := guardQueryTargets(d, q, false, false); msg != "" {
 			t.Errorf("%s: refused: %q", name, msg)
 		}
 	}

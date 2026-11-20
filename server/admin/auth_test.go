@@ -18,6 +18,7 @@ import (
 	"openfabrica/config"
 	"openfabrica/db"
 	"openfabrica/db/models"
+	"openfabrica/providers/llm"
 	"openfabrica/security"
 	sdeps "openfabrica/server/deps"
 	"openfabrica/server/middleware"
@@ -454,5 +455,56 @@ func TestSetupTokenNotArmedOnceClaimed(t *testing.T) {
 	h.armSetupToken()
 	if h.setupToken.Load() != nil {
 		t.Error("a token was armed on an instance that already has an admin")
+	}
+}
+
+// Regression test: HandleSetup holds the single writer connection via
+// BeginWriteTx() and must read provider metadata through Reader() so selecting
+// a provider in the first-run wizard never deadlocks on MaxOpenConns(1).
+func TestHandleSetup_WithProviderDoesNotDeadlock(t *testing.T) {
+	d := newBotTestDeps(t)
+	d.JWTManager = security.NewJWTManager("test-secret-0123456789abcdef0123456789abcdef", time.Hour)
+	d.LLMRegistry = llm.NewRegistry()
+	h := &AuthHandler{deps: d}
+
+	res, err := d.DB.ExecWrite(
+		`INSERT INTO providers (vendor, kind, name, transport, base_url, is_enabled) VALUES ('gemini', 'llm', 'Google Gemini', 'openai-chat', 'https://generativelanguage.googleapis.com/v1beta/openai', 0)`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provID, _ := res.LastInsertId()
+	if _, err := d.DB.ExecWrite(
+		`INSERT INTO llm_models (provider_id, model_id, display_name, is_enabled) VALUES (?, 'gemini-4-neon', 'Gemini 4 Neon', 1)`,
+		provID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"username":     "admin",
+		"password":     "ValidPassword123!",
+		"display_name": "Admin",
+		"provider_id":  provID,
+		"model_id":     "gemini-4-neon",
+		"api_key":      "test-key",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/setup", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.HandleSetup(rec, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HandleSetup deadlocked while configuring provider inside write transaction")
+	}
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("HandleSetup status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }

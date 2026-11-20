@@ -83,8 +83,8 @@ func TestShippedSeedLLMVendors(t *testing.T) {
 			plan = "standard"
 		}
 		got[p.Vendor] = plan
-		if p.Config.EmbeddingModel != "" && p.Vendor != "openai" {
-			t.Errorf("%s declares an embedding model; only openai should", p.Vendor)
+		if p.Config.EmbeddingModel != "" && p.Vendor != "openai" && p.Vendor != "gemini" {
+			t.Errorf("%s declares an embedding model; only openai and gemini should", p.Vendor)
 		}
 	}
 	if len(got) != len(want) {

@@ -74,6 +74,8 @@ func (h *Hub) BrokerFor(projectID int) (*Broker, error) {
 }
 
 // Reload refreshes an active project's broker config (or closes it if disabled).
+// If the project is enabled and has outbound bridges configured, Reload also
+// starts the broker immediately so bridges connect without waiting for a client.
 func (h *Hub) Reload(projectID int) {
 	if h.hooks.Enabled != nil && !h.hooks.Enabled(projectID) {
 		h.mu.Lock()
@@ -85,14 +87,53 @@ func (h *Hub) Reload(projectID int) {
 		}
 		return
 	}
+	if h.hooks.LoadConfig == nil {
+		return
+	}
+	cfg, err := h.hooks.LoadConfig(projectID)
+	if err != nil {
+		return
+	}
 	h.mu.Lock()
 	b := h.brokers[projectID]
 	h.mu.Unlock()
-	if b == nil || h.hooks.LoadConfig == nil {
+	if b == nil {
+		if len(cfg.Bridges) > 0 || cfg.HasWatchdogs {
+			_, _ = h.BrokerFor(projectID)
+		}
 		return
 	}
-	if cfg, err := h.hooks.LoadConfig(projectID); err == nil {
-		b.UpdateConfig(cfg.MaxClients, cfg.Auth, cfg.OnPublish)
+	b.UpdateConfig(cfg.MaxClients, cfg.Auth, cfg.OnPublish, cfg.OnConnect, cfg.OnDisconnect, cfg.Bridges)
+}
+
+// StartBridgedProjects starts brokers for any enabled project in projectIDs that
+// has at least one configured outbound bridge, so bridges reconnect automatically
+// after server startup.
+func (h *Hub) StartBridgedProjects(projectIDs []int) {
+	for _, pid := range projectIDs {
+		h.Reload(pid)
+	}
+}
+
+// StatsFor returns live broker stats for projectID if a broker is currently active.
+func (h *Hub) StatsFor(projectID int) (BrokerStats, bool) {
+	h.mu.Lock()
+	b := h.brokers[projectID]
+	h.mu.Unlock()
+	if b == nil || b.closed.Load() {
+		return BrokerStats{}, false
+	}
+	return b.Stats(), true
+}
+
+// CloseProject closes and removes the active broker for a single project (e.g. on delete).
+func (h *Hub) CloseProject(projectID int) {
+	h.mu.Lock()
+	b := h.brokers[projectID]
+	delete(h.brokers, projectID)
+	h.mu.Unlock()
+	if b != nil {
+		b.Close()
 	}
 }
 

@@ -372,7 +372,9 @@ func (s *BotService) deleteProject(state *UserState) error {
 	}
 	s.deps.Bus.Publish(events.NewEvent(events.EventProjectDeleted, pid, nil))
 
+	s.mu.Lock()
 	state.ActiveProjectID = 0
+	s.mu.Unlock()
 	state.LastStatusMessageID = 0
 	state.LastStatusText = ""
 	SaveSession(s.deps.DB, state)
@@ -393,8 +395,13 @@ func (s *BotService) forgetProject(pid int, except *UserState) {
 	s.mu.RUnlock()
 	for _, st := range affected {
 		st.Mu.Lock()
-		if st.ActiveProjectID == pid {
+		s.mu.Lock()
+		matched := st.ActiveProjectID == pid
+		if matched {
 			st.ActiveProjectID = 0
+		}
+		s.mu.Unlock()
+		if matched {
 			st.LastStatusMessageID = 0
 			st.LastStatusText = ""
 			SaveSession(s.deps.DB, st)

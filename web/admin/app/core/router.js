@@ -150,7 +150,7 @@ export function start() {
 
 // First segments the shell serves; anything else (uploads, API paths) is a
 // plain link and keeps the browser's default.
-const APP_ROUTE_RE = /^\/(new|projects|providers|messaging-apps|service-providers|settings|usage|users|questions)(\/|$)/;
+const APP_ROUTE_RE = /^\/(new|projects|providers|messaging-apps|service-providers|settings|usage|users|questions|audit)(\/|$)/;
 
 /** Map a link href to a router path, or null when it is not an in-app link. */
 export function appPath(href) {

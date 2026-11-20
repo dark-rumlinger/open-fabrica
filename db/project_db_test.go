@@ -41,14 +41,25 @@ func TestProjectDBManagerEvictIdleAndDeleteCleanup(t *testing.T) {
 		t.Fatalf("Open(1) returned nil")
 	}
 
-	// Delete should also prune opLocks[1].
+	// Pinned project DBs must not be evicted even when idle.
+	p2.Pin()
+	p2.lastUsed.Store(time.Now().Add(-10 * time.Minute).UnixNano())
+	if evicted := mgr.EvictIdle(5 * time.Minute); evicted != 0 {
+		t.Fatalf("EvictIdle() evicted pinned DB: got %d, want 0", evicted)
+	}
+	p2.Unpin()
+
+	// Delete removes the project DB and directory.
 	if err := mgr.Delete(1); err != nil {
 		t.Fatalf("Delete(1): %v", err)
 	}
-	mgr.opMu.Lock()
-	_, hasLock := mgr.opLocks[1]
-	mgr.opMu.Unlock()
-	if hasLock {
-		t.Errorf("opLocks[1] was not pruned on Delete")
+	if mgr.Exists(1) {
+		t.Errorf("project 1 should not exist after Delete")
+	}
+
+	// CloseAll prevents late Opens from reopening pools after shutdown.
+	mgr.CloseAll()
+	if _, err := mgr.Open(2); err != ErrManagerClosed {
+		t.Errorf("Open after CloseAll: got %v, want ErrManagerClosed", err)
 	}
 }

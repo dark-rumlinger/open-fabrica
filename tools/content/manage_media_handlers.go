@@ -115,18 +115,7 @@ func mediaRegisterOutput(ctx *tools.ToolContext, storage, filename, contentType 
 		subdir = "assets"
 	}
 	diskPath := filepath.Join(ctx.ProjectDir(), subdir, filepath.FromSlash(filename))
-	if _, err := ctx.DB.Exec(
-		`INSERT INTO of_files (kind, path, storage, content_type, size, disk_path, scope, is_deleted, updated_at)
-		 VALUES ('file', ?, 'disk', ?, ?, ?, 'global', 0, CURRENT_TIMESTAMP)
-		 ON CONFLICT(kind, path) DO UPDATE SET
-		   storage = 'disk',
-		   body = '',
-		   content_type = excluded.content_type,
-		   size = excluded.size,
-		   disk_path = excluded.disk_path,
-		   updated_at = CURRENT_TIMESTAMP`,
-		filename, contentType, size, diskPath,
-	); err != nil {
+	if err := store.RegisterDiskArtifact(ctx.DB, filename, contentType, size, diskPath, "{}"); err != nil {
 		return fmt.Errorf("registering media output %q: %w", filename, err)
 	}
 	return nil

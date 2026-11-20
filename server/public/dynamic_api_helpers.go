@@ -178,7 +178,41 @@ func tokenMembershipPattern(token string) string {
 	return "%," + token + ",%"
 }
 
-// columnExists checks if a column name exists in the given table.
+// lookupSecureCol looks up col in secureCols case-insensitively because SQLite
+// column identifiers are case-insensitive while incoming JSON/query/CSV keys
+// may use arbitrary casing (e.g., "PASSWORD_HASH" vs "password_hash").
+func lookupSecureCol(secureCols map[string]string, col string) (string, bool) {
+	if len(secureCols) == 0 {
+		return "", false
+	}
+	if kind, ok := secureCols[col]; ok {
+		return kind, true
+	}
+	if kind, ok := secureCols[strings.ToLower(col)]; ok {
+		return kind, true
+	}
+	for sc, kind := range secureCols {
+		if strings.EqualFold(sc, col) {
+			return kind, true
+		}
+	}
+	return "", false
+}
+
+// deleteFold removes every key in m matching name case-insensitively.
+func deleteFold(m map[string]any, name string) {
+	if name == "" || len(m) == 0 {
+		return
+	}
+	for k := range m {
+		if strings.EqualFold(k, name) {
+			delete(m, k)
+		}
+	}
+}
+
+// columnExists checks if a column name exists in the given table (case-insensitively,
+// matching SQLite identifier resolution).
 func columnExists(projectDB *sql.DB, physTable, colName string) bool {
 	if !validTableName.MatchString(physTable) {
 		return false
@@ -188,7 +222,7 @@ func columnExists(projectDB *sql.DB, physTable, colName string) bool {
 		return false
 	}
 	for _, c := range info {
-		if c.Name == colName {
+		if strings.EqualFold(c.Name, colName) {
 			return true
 		}
 	}
@@ -313,14 +347,14 @@ func autoLookupColumn(projectDB *sql.DB, physTable string) string {
 // Secure (PASSWORD/ENCRYPTED) columns never; otherwise public_columns bounds it
 // when configured, so a hidden column cannot be probed through a query parameter.
 func columnReadable(ep *apiEndpoint, col string) bool {
-	if _, ok := ep.SecureCols[col]; ok {
+	if _, ok := lookupSecureCol(ep.SecureCols, col); ok {
 		return false
 	}
-	if len(ep.PublicColumns) == 0 || col == "id" || col == "created_at" {
+	if len(ep.PublicColumns) == 0 || strings.EqualFold(col, "id") || strings.EqualFold(col, "created_at") {
 		return true
 	}
 	for _, c := range ep.PublicColumns {
-		if c == col {
+		if strings.EqualFold(c, col) {
 			return true
 		}
 	}
@@ -335,10 +369,10 @@ func restrictWritable(ep *apiEndpoint, body map[string]any) {
 	}
 	allowed := make(map[string]bool, len(ep.WritableColumns))
 	for _, c := range ep.WritableColumns {
-		allowed[c] = true
+		allowed[strings.ToLower(c)] = true
 	}
 	for col := range body {
-		if !allowed[col] {
+		if !allowed[strings.ToLower(col)] {
 			delete(body, col)
 		}
 	}
@@ -351,7 +385,7 @@ func (h *Handler) visibleColumns(ep *apiEndpoint) string {
 	if len(ep.PublicColumns) > 0 {
 		var safe []string
 		for _, col := range ep.PublicColumns {
-			if _, ok := ep.SecureCols[col]; ok {
+			if _, ok := lookupSecureCol(ep.SecureCols, col); ok {
 				continue
 			}
 			safe = append(safe, col)
@@ -367,7 +401,7 @@ func (h *Handler) visibleColumns(ep *apiEndpoint) string {
 // parseFieldsParam reads ?fields=col1,col2 from the request and returns a
 // validated, safe column list. Returns "" if the param is absent or empty,
 // which signals the caller to use the default visibleColumns() result.
-// Security: validates each name, strips hash columns, intersects with
+// Security: validates each name, strips secure columns, intersects with
 // public_columns if configured, and always includes "id".
 func parseFieldsParam(r *http.Request, ep *apiEndpoint) string {
 	raw := r.URL.Query().Get("fields")
@@ -379,7 +413,7 @@ func parseFieldsParam(r *http.Request, ep *apiEndpoint) string {
 	if len(ep.PublicColumns) > 0 {
 		allowed = make(map[string]bool, len(ep.PublicColumns))
 		for _, col := range ep.PublicColumns {
-			allowed[col] = true
+			allowed[strings.ToLower(col)] = true
 		}
 	}
 
@@ -388,21 +422,22 @@ func parseFieldsParam(r *http.Request, ep *apiEndpoint) string {
 	var cols []string
 	for _, f := range strings.Split(raw, ",") {
 		col := strings.TrimSpace(f)
-		if col == "" || seen[col] {
+		low := strings.ToLower(col)
+		if col == "" || seen[low] {
 			continue
 		}
 		if security.ValidateColumnName(col) != nil {
 			continue
 		}
-		if _, ok := ep.SecureCols[col]; ok {
+		if _, ok := lookupSecureCol(ep.SecureCols, col); ok {
 			continue
 		}
-		if allowed != nil && !allowed[col] {
+		if allowed != nil && !allowed[low] {
 			continue
 		}
-		seen[col] = true
+		seen[low] = true
 		cols = append(cols, col)
-		if col == "id" {
+		if low == "id" {
 			hasID = true
 		}
 	}
@@ -426,8 +461,10 @@ func stripSecureCols(results []map[string]any, secureCols map[string]string) {
 		return
 	}
 	for _, row := range results {
-		for col := range secureCols {
-			delete(row, col)
+		for k := range row {
+			if _, ok := lookupSecureCol(secureCols, k); ok {
+				delete(row, k)
+			}
 		}
 	}
 }

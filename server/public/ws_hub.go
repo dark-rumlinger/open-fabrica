@@ -16,9 +16,9 @@ import (
 	"openfabrica/internal/safego"
 )
 
-// wsClientBufferSize is the outbound channel depth per client. Sized for realtime games:
-// 4096 absorbs short stalls (GC, slow consumer) at 30Hz with several peers without dropping.
-const wsClientBufferSize = 4096
+// wsClientBufferSize is the outbound channel depth per client. 256 absorbs short
+// bursts at 30Hz (~8.5s of frames) without allocating ~128 KB per idle socket.
+const wsClientBufferSize = 256
 
 // wsHub manages WebSocket rooms. Each room key is built via events.RoomKey
 // ("projectID:tenantID:endpointPath:room"), ensuring full project AND tenant isolation.
@@ -784,4 +784,49 @@ func (h *wsHub) activeRooms(prefix string) map[string]int {
 		}
 	}
 	return result
+}
+
+// CloseProject tears down all active WebSocket rooms, tickers, clients, and
+// authoritative room actors belonging to projectID (called on project delete).
+func (h *wsHub) CloseProject(projectID int) {
+	prefix := strconv.Itoa(projectID) + ":"
+
+	h.mu.Lock()
+	for k, r := range h.rooms {
+		if len(k) < len(prefix) || k[:len(prefix)] != prefix {
+			continue
+		}
+		if r.tickCancel != nil {
+			r.tickCancel()
+		}
+		if r.matchCancel != nil {
+			r.matchCancel()
+		}
+		for _, c := range r.clients {
+			if c.superseded != nil {
+				select {
+				case <-c.superseded:
+				default:
+					close(c.superseded)
+				}
+			}
+		}
+		delete(h.rooms, k)
+	}
+	for k := range h.matchCaps {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			delete(h.matchCaps, k)
+		}
+	}
+	h.mu.Unlock()
+
+	h.actorsMu.Lock()
+	for k, a := range h.actors {
+		if len(k) < len(prefix) || k[:len(prefix)] != prefix {
+			continue
+		}
+		delete(h.actors, k)
+		close(a.stopCh)
+	}
+	h.actorsMu.Unlock()
 }

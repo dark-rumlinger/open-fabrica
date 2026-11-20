@@ -13,6 +13,9 @@ const (
 	// project. Generous enough for a classroom behind one NAT, small enough that a
 	// single client cannot exhaust the goroutines and buffers each socket holds.
 	wsMaxConnsPerVisitor = 100
+	// wsMaxTotalConns caps concurrent WebSocket connections instance-wide so
+	// distributed IP floods cannot exhaust process memory or file descriptors.
+	wsMaxTotalConns = 4096
 	// wsMaxRoomName bounds a room name taken from the query string.
 	wsMaxRoomName = 128
 )
@@ -20,6 +23,7 @@ const (
 var (
 	wsConnMu     sync.Mutex
 	wsConnCounts = map[string]int{}
+	wsConnTotal  int
 )
 
 // acquireWSConn reserves a socket slot for (project, visitor). The returned
@@ -28,10 +32,11 @@ func acquireWSConn(projectID int, visitor string) (release func(), ok bool) {
 	key := fmt.Sprintf("%d|%s", projectID, visitor)
 	wsConnMu.Lock()
 	defer wsConnMu.Unlock()
-	if wsConnCounts[key] >= wsMaxConnsPerVisitor {
+	if wsConnTotal >= wsMaxTotalConns || wsConnCounts[key] >= wsMaxConnsPerVisitor {
 		return nil, false
 	}
 	wsConnCounts[key]++
+	wsConnTotal++
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -41,6 +46,9 @@ func acquireWSConn(projectID int, visitor string) (release func(), ok bool) {
 				delete(wsConnCounts, key)
 			} else {
 				wsConnCounts[key]--
+			}
+			if wsConnTotal > 0 {
+				wsConnTotal--
 			}
 		})
 	}, true

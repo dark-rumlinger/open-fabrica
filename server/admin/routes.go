@@ -55,6 +55,7 @@ type adminHandlers struct {
 	projectComponents *ProjectComponentsHandler
 	projectAnalytics  *ProjectAnalyticsHandler
 	projectDiag       *ProjectDiagnosticsHandler
+	projectMQTT       *ProjectMQTTHandler
 	builds            *BuildsHandler
 	bot               *BotHandler
 	firewall          *FirewallHandler
@@ -104,6 +105,7 @@ func newAdminHandlers(deps *Deps) *adminHandlers {
 		projectComponents: &ProjectComponentsHandler{deps: deps},
 		projectAnalytics:  &ProjectAnalyticsHandler{deps: deps},
 		projectDiag:       &ProjectDiagnosticsHandler{deps: deps},
+		projectMQTT:       &ProjectMQTTHandler{deps: deps},
 		builds:            &BuildsHandler{deps: deps},
 		bot:               &BotHandler{deps: deps},
 		firewall:          &FirewallHandler{deps: deps},
@@ -288,6 +290,7 @@ func registerProjectScopedRoutes(r chi.Router, h *adminHandlers) {
 	r.Get("/components/{componentID}/versions", h.projectComponents.ListVersions)
 	r.Get("/analytics/summary", h.projectAnalytics.Summary)
 	r.Get("/diagnostics/health", h.projectDiag.Health)
+	r.Get("/mqtt", h.projectMQTT.Status)
 	r.Get("/diagnostics/integrity", h.projectDiag.Integrity)
 	r.Get("/diagnostics/errors", h.projectDiag.Errors)
 	r.Get("/hosting/status", h.hosting.Status)
@@ -352,6 +355,12 @@ func registerProjectScopedRoutes(r chi.Router, h *adminHandlers) {
 		r.Post("/components/{componentID}/restore", h.projectComponents.Restore)
 		r.Post("/service-providers/{provID}/toggle", h.svcProviders.Toggle)
 		r.Delete("/service-providers/{provID}", h.svcProviders.Delete)
+		r.Put("/mqtt/config", h.projectMQTT.UpdateConfig)
+		r.Post("/mqtt/devices", h.projectMQTT.AddDevice)
+		r.Delete("/mqtt/devices/{name}", h.projectMQTT.DeleteDevice)
+		r.Post("/mqtt/bridges", h.projectMQTT.AddBridge)
+		r.Delete("/mqtt/bridges/{name}", h.projectMQTT.DeleteBridge)
+		r.Post("/mqtt/publish", h.projectMQTT.Publish)
 	})
 }
 

@@ -94,10 +94,10 @@ func (h *Handler) apiAgent(w http.ResponseWriter, r *http.Request, project *mode
 	// functions passes the caller as req.user, exactly as a direct function call
 	// would (function_endpoint.go).
 	var user map[string]any
-	// fullDataAccess is true for the admin role, the caller the REST path also
-	// exempts from owner scoping. The agent's query_data tool withholds scoped
-	// tables from everyone else.
-	fullDataAccess := false
+	var authUserID, authTenantID int
+	// Separate owner bypass (admin) from tenant bypass (platform_admin) to match
+	// CRUD RLS semantics: a tenant's admin must not read another tenant's rows.
+	bypassOwner, bypassTenant := false, false
 	if ep.RequiresAuth {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		claims, ok := h.projectUserClaims(project.ID, token)
@@ -106,8 +106,11 @@ func (h *Handler) apiAgent(w http.ResponseWriter, r *http.Request, project *mode
 			return
 		}
 		if claims.UserID > 0 {
+			authUserID = claims.UserID
+			authTenantID = claims.TenantID
 			user = map[string]any{"id": claims.UserID, "role": claims.Role}
-			fullDataAccess = claims.Role == "admin"
+			bypassOwner = claims.Role == "admin"
+			bypassTenant = claims.TenantRole == "platform_admin"
 		}
 	}
 
@@ -182,7 +185,7 @@ func (h *Handler) apiAgent(w http.ResponseWriter, r *http.Request, project *mode
 		MaxTokens:    ep.MaxTokens,
 		Temperature:  &temp,
 		MaxSteps:     ep.MaxSteps,
-		Tools:        h.buildAgentTools(project.ID, projectDB, ep, user, fullDataAccess, middleware.RateLimitIdentity(r)),
+		Tools:        h.buildAgentTools(project.ID, projectDB, ep, user, bypassOwner, bypassTenant, middleware.RateLimitIdentity(r)),
 		Budget:       budget,
 		MaxSubagents: ep.MaxSubagents,
 		MaxDepth:     ep.MaxDepth,
@@ -193,7 +196,7 @@ func (h *Handler) apiAgent(w http.ResponseWriter, r *http.Request, project *mode
 	// owns its own call logger, set up inside the goroutine rather than here where
 	// the request scope (and the deferred Close) ends first.
 	if r.URL.Query().Get("async") == "1" {
-		h.startAgentRunAsync(w, project, projectDB, ep, cfg, provider, messages, modelID)
+		h.startAgentRunAsync(w, project, projectDB, ep, cfg, provider, messages, modelID, authUserID, authTenantID)
 		return
 	}
 
@@ -293,26 +296,42 @@ func (h *Handler) runAgentSSE(w http.ResponseWriter, r *http.Request, writer *sq
 // "running" before a poll reports it failed (its goroutine is gone, typically a
 // server restart mid-run); set a hair past the wall-clock cap.
 const (
-	agentAsyncMaxWall = 15 * time.Minute
-	agentRunExpiry    = 16 * time.Minute
+	agentAsyncMaxWall    = 15 * time.Minute
+	agentRunExpiry       = 16 * time.Minute
+	maxConcurrentAsyncAg = 16
 )
+
+// agentAsyncSem bounds concurrent detached async agent runs across the server
+// so abusive ?async=1 floods cannot spawn unbounded goroutines or bypass budgets.
+var agentAsyncSem = make(chan struct{}, maxConcurrentAsyncAg)
 
 // startAgentRunAsync records a run row, kicks off a detached goroutine to run the
 // agent, and answers 202 with the id to poll. The goroutine owns its own call
 // logger and a background context so it survives the request returning.
-func (h *Handler) startAgentRunAsync(w http.ResponseWriter, project *models.Project, projectDB *db.ProjectDB, ep *agentEndpointRow, cfg agentrt.Config, provider llm.Provider, messages []llm.Message, modelID string) {
+func (h *Handler) startAgentRunAsync(w http.ResponseWriter, project *models.Project, projectDB *db.ProjectDB, ep *agentEndpointRow, cfg agentrt.Config, provider llm.Provider, messages []llm.Message, modelID string, userID, tenantID int) {
+	select {
+	case agentAsyncSem <- struct{}{}:
+	default:
+		writeError(w, http.StatusTooManyRequests, "too many concurrent agent runs")
+		return
+	}
+
 	runID := uuid.NewString()
 	writer := projectDB.Writer()
 	path := ep.Path
 
 	reqJSON, _ := json.Marshal(messages)
-	if err := store.InsertAgentRun(writer, runID, path, string(reqJSON)); err != nil {
+	if err := store.InsertAgentRun(writer, runID, path, userID, tenantID, string(reqJSON)); err != nil {
+		<-agentAsyncSem
 		slog.Error("agent endpoint: failed to record async run", "project_id", project.ID, "path", path, "error", err)
 		writeError(w, http.StatusInternalServerError, "could not start run")
 		return
 	}
 
+	projectDB.Pin()
 	safego.Go(fmt.Sprintf("agent-run[%d:%s]", project.ID, runID), func() {
+		defer projectDB.Unpin()
+		defer func() { <-agentAsyncSem }()
 		ctx, cancel := context.WithTimeout(context.Background(), agentAsyncMaxWall)
 		defer cancel()
 
@@ -367,18 +386,39 @@ func (h *Handler) apiAgentRunStatus(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	var authUserID, authTenantID int
+	var authRole, authTenantRole string
 	if ep.RequiresAuth {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if _, ok := h.projectUserClaims(project.ID, token); !ok {
+		claims, ok := h.projectUserClaims(project.ID, token)
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		authUserID = claims.UserID
+		authTenantID = claims.TenantID
+		authRole = claims.Role
+		authTenantRole = claims.TenantRole
+	}
+
+	rateLimitKey := fmt.Sprintf("agent-poll:%d:%s:%s", project.ID, ep.Path, middleware.RateLimitIdentity(r))
+	if !h.checkEndpointRateLimit(rateLimitKey, ep.RateLimit) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
 	}
 
 	row, err := store.LoadAgentRunStatus(reader, runID, endpointPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "run not found")
 		return
+	}
+	if ep.RequiresAuth {
+		ownerOK := row.UserID == 0 || row.UserID == authUserID || authRole == "admin"
+		tenantOK := row.TenantID == 0 || row.TenantID == authTenantID || authTenantRole == "platform_admin"
+		if !ownerOK || !tenantOK {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
 	}
 	status, content, stopReason, runErr := row.Status, row.Content, row.StopReason, row.RunErr
 	steps, subagents, inTok, outTok, ageSecs := row.Steps, row.Subagents, row.InputTokens, row.OutputTokens, row.AgeSecs
@@ -409,13 +449,13 @@ func (h *Handler) apiAgentRunStatus(w http.ResponseWriter, r *http.Request, proj
 // buildAgentTools turns the endpoint's allowlist into the concrete tool set the
 // loop dispatches: one tool per manage_function endpoint named in `functions`,
 // plus the read-only data-query tool when allow_data_query is set.
-func (h *Handler) buildAgentTools(projectID int, projectDB *db.ProjectDB, ep *agentEndpointRow, user map[string]any, fullDataAccess bool, identity string) []agentrt.Tool {
+func (h *Handler) buildAgentTools(projectID int, projectDB *db.ProjectDB, ep *agentEndpointRow, user map[string]any, bypassOwner, bypassTenant bool, identity string) []agentrt.Tool {
 	var out []agentrt.Tool
 	for _, fnPath := range parseFunctionAllowlist(ep.Functions) {
 		out = append(out, h.agentFunctionTool(projectID, projectDB, fnPath, user, identity))
 	}
 	if ep.AllowDataQuery {
-		out = append(out, agentDataQueryTool(projectDB, fullDataAccess))
+		out = append(out, agentDataQueryTool(projectDB, bypassOwner, bypassTenant))
 	}
 	if ep.AllowHTTPFetch {
 		out = append(out, agentHTTPFetchTool())
@@ -527,7 +567,7 @@ func (h *Handler) agentFunctionTool(projectID int, projectDB *db.ProjectDB, fnPa
 				spec.Timeout = time.Duration(fn.TimeoutMS) * time.Millisecond
 			}
 			rt := funcexec.NewRuntime(projectID, projectDB.Reader(), projectDB.Writer(), h.deps.completeDeps())
-			resp, err := funcexec.Execute(rt, spec, reqObj)
+			resp, err := funcexec.ExecuteContext(ctx, rt, spec, reqObj)
 			if err != nil {
 				// Hand a generic failure back in-band so the model can react without
 				// leaking internal detail; the specifics go to the log.
@@ -552,13 +592,28 @@ func agentTableNames(projectDB *db.ProjectDB) []string {
 	return out
 }
 
-// agentScopedTables returns the lower-cased names of tables behind an endpoint that
-// scopes rows by owner or tenant. A read error answers nil with ok=false so the
-// caller can fail closed.
-func agentScopedTables(projectDB *db.ProjectDB) (map[string]bool, bool) {
-	out, err := store.ListScopedAPITables(projectDB.Reader())
+// agentScopedTables returns the lower-cased names of tables withheld from the
+// caller based on owner/tenant scoping (admin bypasses owner-scoped tables;
+// platform_admin bypasses tenant-scoped tables). A read error answers nil with
+// ok=false so the caller fails closed.
+func agentScopedTables(projectDB *db.ProjectDB, bypassOwner, bypassTenant bool) (map[string]bool, bool) {
+	if bypassOwner && bypassTenant {
+		return map[string]bool{}, true
+	}
+	ownerScoped, tenantScoped, err := store.ListScopedAPITablesByKind(projectDB.Reader())
 	if err != nil {
 		return nil, false
+	}
+	out := map[string]bool{}
+	if !bypassOwner {
+		for t := range ownerScoped {
+			out[t] = true
+		}
+	}
+	if !bypassTenant {
+		for t := range tenantScoped {
+			out[t] = true
+		}
 	}
 	return out, true
 }
@@ -585,12 +640,13 @@ func sqlMentionsTable(sqlText string, tables map[string]bool) (string, bool) {
 // Tables behind an owner- or tenant-scoped endpoint are therefore withheld unless the
 // caller has full access (the admin role); the app exposes such data
 // to an agent through a function that filters on req.user.
-func agentDataQueryTool(projectDB *db.ProjectDB, fullAccess bool) agentrt.Tool {
+func agentDataQueryTool(projectDB *db.ProjectDB, bypassOwner, bypassTenant bool) agentrt.Tool {
 	desc := "Run ONE read-only SQL SELECT over the app's tables and return the rows as JSON. No writes; system tables and PASSWORD/ENCRYPTED columns are refused. Use ? placeholders and pass their values in params."
+	fullAccess := bypassOwner && bypassTenant
 	var scoped map[string]bool
 	if !fullAccess {
 		var ok bool
-		if scoped, ok = agentScopedTables(projectDB); !ok {
+		if scoped, ok = agentScopedTables(projectDB, bypassOwner, bypassTenant); !ok {
 			// Cannot tell which tables are scoped: withhold every table.
 			scoped = nil
 		}

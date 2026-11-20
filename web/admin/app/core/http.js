@@ -54,8 +54,12 @@ async function request(method, url, body, opts = {}) {
 
   // A 401 from the login call itself is a wrong password, not an expired session:
   // fall through so the server's own message ("invalid credentials") reaches the form.
+  // Callers probing session validity (e.g. boot) pass skipAuthRedirect so they can
+  // transition cleanly without racing against expireSession().
   if (res.status === 401 && !url.includes('/auth/login')) {
-    expireSession();
+    if (!opts.skipAuthRedirect) {
+      expireSession();
+    }
     const err = new Error('Unauthorized');
     err.status = 401;
     throw err;

@@ -91,8 +91,9 @@ func (b *Bus) Unsubscribe(id uint64) {
 // buffer, and forwards to subscribers. Handlers run inline; they must be
 // non-blocking.
 func (b *Bus) Publish(event Event) {
-	event.ID = b.eventID.Add(1)
-	b.append(event)
+	// Assign event.ID and append to the ring buffer under the same lock so
+	// buffer entries are strictly monotonic by ID (preventing Since() gaps).
+	event.ID = b.assignAndAppend(event)
 
 	b.mu.RLock()
 	// Copy slices under read lock to avoid holding the lock during handler execution.
@@ -120,15 +121,19 @@ func (b *Bus) Publish(event Event) {
 	dispatch(global, "global event handler panic")
 }
 
-// append stores event in the ring buffer.
-func (b *Bus) append(event Event) {
+// assignAndAppend atomically assigns the next monotonic event ID and appends
+// the event to the ring buffer under bufMu.
+func (b *Bus) assignAndAppend(event Event) uint64 {
 	b.bufMu.Lock()
 	defer b.bufMu.Unlock()
+	id := b.eventID.Add(1)
+	event.ID = id
 	b.buffer[b.bufPos] = event
 	b.bufPos = (b.bufPos + 1) % len(b.buffer)
 	if b.bufN < len(b.buffer) {
 		b.bufN++
 	}
+	return id
 }
 
 // Since returns events with ID > since, in publish order. Empty slice if

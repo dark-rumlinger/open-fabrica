@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -253,9 +254,25 @@ func (r *Runner) runTool(projectID int, toolName string, args map[string]any) er
 	return nil
 }
 
+// isInternalNonTriggerEvent skips high-frequency engine/admin events that are
+// never valid user-configured trigger events, avoiding per-event goroutine and
+// SQLite query churn during builds and chat.
+func isInternalNonTriggerEvent(et events.EventType) bool {
+	s := string(et)
+	for _, prefix := range []string{
+		"engine.", "tool.", "project.", "question.", "secret.",
+		"schema.", "scheduled.", "settings.", "provider.", "chat.", "brain.",
+	} {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleEvent checks if any actions are subscribed to this event type.
 func (r *Runner) handleEvent(event events.Event) {
-	if event.ProjectID == 0 {
+	if event.ProjectID == 0 || isInternalNonTriggerEvent(event.Type) {
 		return
 	}
 

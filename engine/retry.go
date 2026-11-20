@@ -35,6 +35,9 @@ type StagePolicy struct {
 	// absorb minutes with nothing but a large duration_ms to show for it. Zero
 	// disables the ceiling.
 	MaxTotalWait time.Duration
+	// Acquire optionally acquires a concurrency slot per actual provider.Complete()
+	// attempt (released immediately on return, before any backoff sleep).
+	Acquire func(ctx context.Context, providerName, model string) (func(), error)
 }
 
 // callStats reports what one call actually did: provider attempts made, time
@@ -167,8 +170,22 @@ func (sp StagePolicy) callOnProvider(
 		if timeout > 0 {
 			callCtx, cancel = context.WithTimeout(ctx, timeout)
 		}
+		var release func()
+		if sp.Acquire != nil {
+			var aerr error
+			release, aerr = sp.Acquire(callCtx, provider.Name(), req.Model)
+			if aerr != nil {
+				if cancel != nil {
+					cancel()
+				}
+				return nil, stats, aerr
+			}
+		}
 		stats.Attempts++
 		resp, err := provider.Complete(callCtx, req)
+		if release != nil {
+			release()
+		}
 		if cancel != nil {
 			cancel()
 		}

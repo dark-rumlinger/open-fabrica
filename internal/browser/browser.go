@@ -14,6 +14,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -224,32 +225,36 @@ func LaunchBrowser(ctx context.Context, cfg BrowserConfig) (context.Context, con
 func launchBrowserAttempt(ctx context.Context, opts []chromedp.ExecAllocatorOption, timeout time.Duration) (context.Context, context.CancelFunc, time.Duration, error) {
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, opts...)
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
-	startCtx, startCancel := context.WithTimeout(browserCtx, timeout)
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(timeout, func() {
+		timedOut.Store(true)
+		cancelBrowser()
+	})
 	start := time.Now()
-	err := probeRun(startCtx)
+	err := probeRun(browserCtx)
 	elapsed := time.Since(start)
-	startCancel()
-	if err != nil {
+	stopped := timer.Stop()
+	if err != nil || !stopped || timedOut.Load() {
+		if timedOut.Load() || !stopped {
+			err = context.DeadlineExceeded
+		}
 		cancelBrowser()
 		cancelAlloc()
 		return nil, nil, elapsed, err
 	}
-	cancelBrowser()
-	// cancelAlloc tears down both the allocator and any contexts derived
-	// from it, so the caller only needs this single cancel.
-	return allocCtx, cancelAlloc, elapsed, nil
+	// Return the already-started browserCtx (instead of killing it and returning
+	// bare allocCtx) so callers open tabs on this process instead of cold-starting
+	// a second Chrome process back-to-back.
+	return browserCtx, func() { cancelBrowser(); cancelAlloc() }, elapsed, nil
 }
 
-// StartSharedBrowser starts one Chrome on an allocator context and returns a context
-// whose tabs all share that process, with a cancel that closes it.
-//
-// A context taken straight from an allocator has no browser yet: each chromedp.NewContext
-// on it launches its OWN Chrome on first use, inside whatever timeout that first Run
-// carries. Starting the browser once here, untimed, and deriving every tab from the
-// result (NewIsolatedTab) makes a tab cost a tab, not a process, and keeps a cold start
-// out of a probe's deadline. LaunchBrowser already proved Chrome starts, so this does not
-// wait on a clock of its own.
+// StartSharedBrowser returns a context whose tabs all share one Chrome process.
+// When alloc is already a started browser context (as returned by LaunchBrowser),
+// it returns it directly without spawning a second browser or dummy tab.
 func StartSharedBrowser(alloc context.Context) (context.Context, context.CancelFunc, error) {
+	if c := chromedp.FromContext(alloc); c != nil && c.Browser != nil {
+		return alloc, func() {}, nil
+	}
 	shared, cancel := chromedp.NewContext(alloc)
 	if err := chromedp.Run(shared); err != nil {
 		cancel()

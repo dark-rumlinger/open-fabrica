@@ -170,9 +170,11 @@ func (d *Dispatcher) handleEvent(event events.Event) {
 		}
 		for _, t := range targets {
 			deliveryID := uuid.NewString()
+			// Give the immediate delivery goroutine an initial 60s lease so the
+			// 10s sweepLoop cannot concurrently double-deliver the same row.
 			_, _ = projectDB.ExecWrite(
-				`INSERT INTO of_webhook_outbox (delivery_id, webhook_id, webhook_name, url, secret_encrypted, event_type, body)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO of_webhook_outbox (delivery_id, webhook_id, webhook_name, url, secret_encrypted, event_type, body, next_retry_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+60 seconds'))`,
 				deliveryID, t.id, t.name, t.url, t.secretEncrypted, eventType, string(payload),
 			)
 
@@ -326,7 +328,15 @@ func (d *Dispatcher) sweepProject(ctx context.Context, projectID int, pdb *db.Pr
 			}
 			secret = s
 		}
-		d.deliverOutbox(pdb, it.deliveryID, Target{ID: it.webhookID, Name: it.name, URL: it.url, Secret: secret}, projectID, it.eventType, []byte(it.body))
+		select {
+		case d.sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		func() {
+			defer func() { <-d.sem }()
+			d.deliverOutbox(pdb, it.deliveryID, Target{ID: it.webhookID, Name: it.name, URL: it.url, Secret: secret}, projectID, it.eventType, []byte(it.body))
+		}()
 	}
 }
 

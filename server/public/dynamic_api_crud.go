@@ -73,7 +73,7 @@ func (h *Handler) apiList(w http.ResponseWriter, r *http.Request, projectDB *sql
 		if !has(col) {
 			continue
 		}
-		if _, ok := ep.SecureCols[col]; ok {
+		if _, ok := lookupSecureCol(ep.SecureCols, col); ok {
 			continue
 		}
 		// Reject rather than skip: dropping the filter would widen the result.
@@ -242,7 +242,7 @@ func (h *Handler) apiInsert(w http.ResponseWriter, r *http.Request, projectDB *s
 		return
 	}
 
-	delete(body, "id")
+	deleteFold(body, "id")
 	restrictWritable(ep, body)
 	if !enforceRowValidation(w, projectDB, ep.TableName, body) {
 		return
@@ -250,8 +250,8 @@ func (h *Handler) apiInsert(w http.ResponseWriter, r *http.Request, projectDB *s
 
 	stampScope(ep, rc, body)
 
-	for col, kind := range ep.SecureCols {
-		if val, ok := body[col]; ok {
+	for col, val := range body {
+		if kind, ok := lookupSecureCol(ep.SecureCols, col); ok {
 			processed, err := security.ProcessSecureValue(kind, val, h.deps.Encryptor)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("error processing %s: %s", col, err))
@@ -390,7 +390,7 @@ func (h *Handler) apiUpdate(w http.ResponseWriter, r *http.Request, projectDB *s
 		return
 	}
 
-	delete(body, "id")
+	deleteFold(body, "id")
 	restrictWritable(ep, body)
 	if !enforceRowValidation(w, projectDB, ep.TableName, body) {
 		return
@@ -398,8 +398,8 @@ func (h *Handler) apiUpdate(w http.ResponseWriter, r *http.Request, projectDB *s
 
 	stripScope(ep, body)
 
-	for col, kind := range ep.SecureCols {
-		if val, ok := body[col]; ok {
+	for col, val := range body {
+		if kind, ok := lookupSecureCol(ep.SecureCols, col); ok {
 			processed, err := security.ProcessSecureValue(kind, val, h.deps.Encryptor)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("error processing %s: %s", col, err))

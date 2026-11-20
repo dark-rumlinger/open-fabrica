@@ -183,3 +183,47 @@ func TestCapabilities(t *testing.T) {
 		t.Errorf("unexpected capability flags: %+v", caps)
 	}
 }
+
+func TestGeminiImageModelsAndB64ResponseFormat(t *testing.T) {
+	var gotRespFmt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1beta/openai/models":
+			_, _ = io.WriteString(w, `{"data":[
+				{"id":"models/gemini-2.5-flash-image"},
+				{"id":"models/gemini-3-pro-image-preview"},
+				{"id":"models/imagen-4.0-generate-001"},
+				{"id":"models/gemini-4-neon"}
+			]}`)
+		case "/v1beta/openai/images/generations":
+			var req apiRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotRespFmt = req.ResponseFormat
+			_, _ = io.WriteString(w, `{"data":[{"b64_json":"iVBORw0KGgo="}]}`)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(imagegen.Options{Name: "gemini-images", APIKey: "k", BaseURL: srv.URL + "/v1beta/openai", HTTPClient: srv.Client()})
+	models, err := c.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, m := range models {
+		ids[m.ID] = true
+	}
+	if !ids["gemini-2.5-flash-image"] || !ids["gemini-3-pro-image-preview"] || !ids["imagen-4.0-generate-001"] {
+		t.Fatalf("expected Gemini/Imagen image models with models/ stripped, got %v", ids)
+	}
+	if ids["gemini-4-neon"] {
+		t.Fatalf("non-image model should be filtered out, got %v", ids)
+	}
+
+	if _, err := c.Generate(context.Background(), imagegen.GenerateRequest{Model: "gemini-2.5-flash-image", Prompt: "a sheepadoodle"}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if gotRespFmt != "b64_json" {
+		t.Fatalf("response_format = %q, want b64_json for non-gpt-image models", gotRespFmt)
+	}
+}

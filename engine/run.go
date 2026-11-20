@@ -74,8 +74,19 @@ func newRunID() string {
 	return fmt.Sprintf("run_%d_%d", time.Now().UnixMilli(), runSeq.Add(1))
 }
 
-// createRun inserts a fresh run starting at the given stage.
+// createRun closes any prior active (running/paused) run to preserve the
+// single-active-run invariant, then inserts a fresh run starting at stage.
 func createRun(pdb *db.ProjectDB, kind, stage, updateDescription, buildVersion, buildBuiltAt string) (*Run, error) {
+	if _, err := sqliteretry.Exec(pdb.Writer(),
+		`UPDATE of_runs
+		 SET status = ?, last_error = COALESCE(NULLIF(last_error, ''), 'superseded by new run'),
+		     completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+		     updated_at = CURRENT_TIMESTAMP
+		 WHERE status IN (?, ?)`,
+		RunStatusFailed, RunStatusRunning, RunStatusPaused); err != nil {
+		return nil, fmt.Errorf("superseding prior active run: %w", err)
+	}
+
 	r := &Run{
 		ID:                newRunID(),
 		Kind:              kind,

@@ -388,23 +388,7 @@ func collectManifestIcons(db dbh.Handle) []map[string]string {
 // savePWAAsset writes a PWA file to disk and records it in of_files as
 // a global-scope artifact.
 func savePWAAsset(ctx *tools.ToolContext, filename, contentType string, data []byte) error {
-	storagePath, err := store.WriteFileToDisk(ctx.DataDirOrDefault(), ctx.ProjectID, "assets", filename, data)
-	if err != nil {
-		return err
-	}
-	_, err = ctx.DB.Exec(
-		`INSERT INTO of_files (kind, path, storage, content_type, size, disk_path, scope, metadata, is_deleted, updated_at)
-		 VALUES ('file', ?, 'disk', ?, ?, ?, 'global', '{}', 0, CURRENT_TIMESTAMP)
-		 ON CONFLICT(kind, path) DO UPDATE SET
-		   storage = 'disk',
-		   body = '',
-		   content_type = excluded.content_type,
-		   size = excluded.size,
-		   disk_path = excluded.disk_path,
-		   scope = excluded.scope,
-		   updated_at = CURRENT_TIMESTAMP`,
-		filename, contentType, len(data), storagePath,
-	)
+	_, err := store.SaveDiskArtifact(ctx.DB, ctx.DataDirOrDefault(), ctx.ProjectID, "assets", filename, contentType, data, "{}")
 	return err
 }
 

@@ -31,7 +31,17 @@ func newProbeClient() *http.Client {
 // Each result is logged with an actionable hint and recorded in the status
 // registry the admin hosting-status endpoint reads.
 func (m *Manager) checkHTTPSHealth(delay time.Duration) {
-	time.Sleep(delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	if m.stopCtx != nil {
+		select {
+		case <-timer.C:
+		case <-m.stopCtx.Done():
+			return
+		}
+	} else {
+		<-timer.C
+	}
 
 	projects, err := models.ListPublishedProjects(m.db)
 	if err != nil {
@@ -40,6 +50,9 @@ func (m *Manager) checkHTTPSHealth(delay time.Duration) {
 
 	client := newProbeClient()
 	for _, project := range projects {
+		if m.stopCtx != nil && m.stopCtx.Err() != nil {
+			return
+		}
 		if project.Domain == nil || *project.Domain == "" {
 			continue
 		}

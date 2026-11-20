@@ -632,6 +632,10 @@ func (e *Engine) checkDueTasks() {
 }
 
 func (e *Engine) checkDueTasksForProject(pdb *db.ProjectDB, projectID int, now time.Time) {
+	// Initialize any newly created tasks (or tasks on projects started after boot)
+	// that still have next_run IS NULL so they become eligible for firing.
+	e.initializeNextRunForProject(pdb)
+
 	rows, err := sqliteretry.Query(pdb.Reader(),
 		`SELECT id, name, COALESCE(prompt,''), cron_expression, interval_seconds, COALESCE(native_action,'')
 		 FROM of_scheduled_tasks

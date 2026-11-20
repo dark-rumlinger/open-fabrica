@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"container/list"
 	"fmt"
 	"net"
 	"net/http"
@@ -21,16 +22,19 @@ const maxBuckets = 50000
 
 // bucket is a simple token bucket for a single IP.
 type bucket struct {
+	key       string
 	tokens    float64
 	lastCheck time.Time
+	elem      *list.Element
 }
 
-// RateLimiter is a per-IP token bucket rate limiter.
+// RateLimiter is a per-IP token bucket rate limiter with O(1) LRU eviction.
 type RateLimiter struct {
 	mu        sync.Mutex
 	buckets   map[string]*bucket
-	rate      float64 // tokens per second
-	burst     float64 // max tokens (bucket capacity)
+	lru       *list.List // front = most recently seen, back = oldest
+	rate      float64    // tokens per second
+	burst     float64    // max tokens (bucket capacity)
 	lastSweep time.Time
 }
 
@@ -39,6 +43,7 @@ type RateLimiter struct {
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	return &RateLimiter{
 		buckets:   make(map[string]*bucket),
+		lru:       list.New(),
 		rate:      rate,
 		burst:     float64(burst),
 		lastSweep: time.Now(),
@@ -67,16 +72,16 @@ func (rl *RateLimiter) allow(ip string) bool {
 
 	b, ok := rl.buckets[ip]
 	if !ok {
-		// Bound memory: at the ceiling, sweep now and, if still full, evict the
-		// least-recently-seen entry to make room for this IP.
+		// Bound memory in O(1): evict the least-recently-seen entry at the back
+		// of the LRU without running an O(N) full-map scan under the mutex.
 		if len(rl.buckets) >= maxBuckets {
-			rl.sweepLocked(now)
-			if len(rl.buckets) >= maxBuckets {
-				rl.evictOldestLocked()
-			}
+			rl.evictOldestLocked()
 		}
-		b = &bucket{tokens: rl.burst, lastCheck: now}
+		b = &bucket{key: ip, tokens: rl.burst, lastCheck: now}
+		b.elem = rl.lru.PushFront(b)
 		rl.buckets[ip] = b
+	} else {
+		rl.lru.MoveToFront(b.elem)
 	}
 
 	// Refill tokens based on elapsed time.
@@ -95,30 +100,29 @@ func (rl *RateLimiter) allow(ip string) bool {
 	return true
 }
 
-// sweepLocked removes entries idle beyond the retention window. Caller must
-// hold rl.mu.
+// sweepLocked removes entries idle beyond the retention window by walking from
+// the LRU tail and stopping at the first fresh entry. Caller must hold rl.mu.
 func (rl *RateLimiter) sweepLocked(now time.Time) {
-	for k, b := range rl.buckets {
-		if now.Sub(b.lastCheck) > 2*time.Minute {
-			delete(rl.buckets, k)
+	for e := rl.lru.Back(); e != nil; {
+		prev := e.Prev()
+		b := e.Value.(*bucket)
+		if now.Sub(b.lastCheck) <= 2*time.Minute {
+			break
 		}
+		rl.lru.Remove(e)
+		delete(rl.buckets, b.key)
+		e = prev
 	}
 	rl.lastSweep = now
 }
 
-// evictOldestLocked removes the single least-recently-seen bucket so a new IP
-// can be admitted at the cap. Caller must hold rl.mu.
+// evictOldestLocked removes the single least-recently-seen bucket in O(1).
+// Caller must hold rl.mu.
 func (rl *RateLimiter) evictOldestLocked() {
-	var oldestKey string
-	var oldest time.Time
-	first := true
-	for k, b := range rl.buckets {
-		if first || b.lastCheck.Before(oldest) {
-			oldestKey, oldest, first = k, b.lastCheck, false
-		}
-	}
-	if oldestKey != "" {
-		delete(rl.buckets, oldestKey)
+	if e := rl.lru.Back(); e != nil {
+		b := e.Value.(*bucket)
+		rl.lru.Remove(e)
+		delete(rl.buckets, b.key)
 	}
 }
 

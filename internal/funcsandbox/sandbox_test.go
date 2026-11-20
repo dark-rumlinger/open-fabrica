@@ -284,6 +284,32 @@ func TestTimeoutInterrupts(t *testing.T) {
 	}
 }
 
+func TestReturnGetterRespectsBudget(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "then getter",
+			code: `function handler(req, ctx){ var o = {}; Object.defineProperty(o, 'then', { get: function(){ while(true){} } }); return o; }`,
+		},
+		{
+			name: "export getter",
+			code: `function handler(req, ctx){ var o = {}; Object.defineProperty(o, 'body', { enumerable: true, get: function(){ while(true){} } }); return o; }`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := mustCompile(t, tc.code)
+			_, _, err := h.Run(req("GET"), Deps{Budget: 150 * time.Millisecond})
+			var to *Timeout
+			if !errors.As(err, &to) {
+				t.Fatalf("expected *Timeout for infinite %s, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
 // The budget must cover TOP-LEVEL code, not just the handler call: top-level
 // runs on every request and a loop there never reaches handler(), so the
 // interrupt armed around the handler call cannot save it. Un-interrupted, it

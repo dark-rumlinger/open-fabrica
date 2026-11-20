@@ -268,6 +268,16 @@ func parseWebhookStatus(providerType string, data map[string]any) (externalID, s
 			status = "failed"
 		case "checkout.session.expired":
 			status = "expired"
+		case "charge.refunded":
+			if pi := str(inner, "payment_intent"); pi != "" {
+				externalID = pi
+			}
+			status = "refunded"
+		case "charge.dispute.created":
+			if pi := str(inner, "payment_intent"); pi != "" {
+				externalID = pi
+			}
+			status = "chargeback"
 		}
 	case "paypal":
 		if resource, ok := data["resource"].(map[string]any); ok {

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -37,16 +36,12 @@ func validateReadOnlySelect(sqlQuery string) (string, string) {
 	return sqlguard.CheckReadOnlySelect(sqlQuery)
 }
 
-// queryIdentRef matches identifier-shaped tokens, used to spot a reference to a
-// blocked table or column wherever it appears in the SQL (quoted or not).
-var queryIdentRef = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
-
 // guardQueryTargets rejects SQL that reads tables the query endpoint never serves:
 // engine internals (sqlite_*, pragma_*), payment records, the project's user
-// tables, and any column that stores a password hash. A reference is matched by
-// name anywhere in the text, so aliasing or quoting cannot hide it. It also
-// returns the hash-column names so the caller can drop them from SELECT * output.
-func guardQueryTargets(projectDB *sql.DB, query string) (string, map[string]bool) {
+// tables, RLS-scoped tables the caller cannot bypass, and any secure (PASSWORD or
+// ENCRYPTED) column. It returns the secure-column set so the caller can drop them
+// from SELECT * output.
+func guardQueryTargets(projectDB *sql.DB, query string, bypassOwner, bypassTenant bool) (string, map[string]bool) {
 	const unavailable = "query guard unavailable, try again"
 	blocked := map[string]bool{"of_payments": true, "of_payment_config": true}
 	authTables, err := store.LoadAuthEndpointTables(projectDB)
@@ -56,51 +51,36 @@ func guardQueryTargets(projectDB *sql.DB, query string) (string, map[string]bool
 	for _, t := range authTables {
 		blocked[strings.ToLower(t)] = true
 	}
-	// A failed lookup must not let the query through unguarded.
-	hashTables, err := store.LoadHashTableNames(projectDB)
-	if err != nil {
-		return unavailable, nil
-	}
-	hashed, err := store.LoadHashColumnNames(projectDB)
-	if err != nil {
-		return unavailable, nil
-	}
-	toks := queryIdentRef.FindAllString(query, -1)
-	touchesHashTable, compound := false, false
-	for _, tok := range toks {
-		low := strings.ToLower(tok)
-		switch {
-		case strings.HasPrefix(low, "sqlite_") || strings.HasPrefix(low, "pragma_"):
-			return fmt.Sprintf("cannot reference engine table: %s", low), hashed
-		case blocked[low]:
-			return fmt.Sprintf("cannot reference protected table: %s", low), hashed
-		case hashed[low]:
-			return fmt.Sprintf("cannot reference secret column: %s", low), hashed
-		case queryMemoryHogs[low]:
-			return fmt.Sprintf("function not allowed: %s", low), hashed
+	if !bypassOwner || !bypassTenant {
+		ownerScoped, tenantScoped, err := store.ListScopedAPITablesByKind(projectDB)
+		if err != nil {
+			return unavailable, nil
 		}
-		touchesHashTable = touchesHashTable || hashTables[low]
-		compound = compound || queryCompoundWords[low]
+		if !bypassOwner {
+			for t := range ownerScoped {
+				blocked[t] = true
+			}
+		}
+		if !bypassTenant {
+			for t := range tenantScoped {
+				blocked[t] = true
+			}
+		}
 	}
-	// Hash columns are dropped from the result by NAME, which only holds while the
-	// result keeps its column names. A compound query takes its names from another
-	// branch (SELECT 1,2,3 UNION SELECT * FROM staff), and a CTE column list renames
-	// outright, so against a table that holds a hash such queries are refused.
-	if touchesHashTable && compound {
-		return "queries over a table with a password column must be a plain SELECT (no WITH, UNION, INTERSECT, EXCEPT or VALUES)", hashed
+	// A failed lookup must not let the query through unguarded.
+	secretTables, err := store.LoadSecureTableNames(projectDB)
+	if err != nil {
+		return unavailable, nil
 	}
-	return "", hashed
+	secretCols, err := store.LoadSecureColumnNames(projectDB)
+	if err != nil {
+		return unavailable, nil
+	}
+	if msg := sqlguard.CheckQueryTargets(query, blocked, secretCols, secretTables); msg != "" {
+		return msg, secretCols
+	}
+	return "", secretCols
 }
-
-// queryCompoundWords are the keywords after which a result column's name no longer
-// comes from the table it was read from.
-var queryCompoundWords = map[string]bool{"with": true, "union": true, "intersect": true, "except": true, "values": true}
-
-// queryMemoryHogs are SQLite functions that let one anonymous request allocate
-// hundreds of megabytes in a single value (randomblob(500000000)) or load code.
-// The row cap and the timeout do not bound a single oversized value, and the public
-// endpoint can be unauthenticated, so they are refused outright.
-var queryMemoryHogs = map[string]bool{"randomblob": true, "zeroblob": true, "load_extension": true}
 
 func (h *Handler) loadQueryEndpoint(projectDB *sql.DB, path string) (*store.QueryEndpoint, error) {
 	return store.LoadQueryEndpoint(projectDB, path)
@@ -120,12 +100,18 @@ func (h *Handler) apiQuery(w http.ResponseWriter, r *http.Request, project *mode
 		return
 	}
 
-	if ep.RequiresAuth {
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if _, ok := h.projectUserClaims(project.ID, token); !ok {
+	bypassOwner, bypassTenant := false, false
+	if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != "" && token != r.Header.Get("Authorization") {
+		if claims, ok := h.projectUserClaims(project.ID, token); ok {
+			bypassOwner = claims.Role == "admin"
+			bypassTenant = claims.TenantRole == "platform_admin"
+		} else if ep.RequiresAuth {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+	} else if ep.RequiresAuth {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
 	}
 
 	// Rate limit by IP. ClientIP only trusts X-Forwarded-For from a loopback
@@ -149,7 +135,7 @@ func (h *Handler) apiQuery(w http.ResponseWriter, r *http.Request, project *mode
 		return
 	}
 
-	msg, hashed := guardQueryTargets(projectDB, trimmed)
+	msg, secretCols := guardQueryTargets(projectDB, trimmed, bypassOwner, bypassTenant)
 	if msg != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
@@ -167,7 +153,7 @@ func (h *Handler) apiQuery(w http.ResponseWriter, r *http.Request, project *mode
 	defer cancel()
 
 	start := time.Now()
-	cols, out, truncated, err := store.ExecReadOnlyQuery(ctx, projectDB, finalSQL, hashed, limit)
+	cols, out, truncated, err := store.ExecReadOnlyQuery(ctx, projectDB, finalSQL, secretCols, limit)
 	if err != nil {
 		if errors.Is(err, store.ErrQueryScan) {
 			writeError(w, http.StatusInternalServerError, "query error")

@@ -411,7 +411,14 @@ func main() {
 		slog.Error("server error", "error", serveErr)
 	}
 
+	engineCancel()
 	gracefulShutdown(actionsCancel, drainActions, botService, tlsMgr, netHelpers, engineMgr, jobsMgr)
+
+	// Explicitly close databases and chat handler before exiting so an os.Exit(1)
+	// on serveErr never skips deferred DB cleanup.
+	chatHandler.Close()
+	projectDBMgr.CloseAll()
+	_ = database.Close()
 
 	// A listener that never came up (port in use, bad bind address) must not look
 	// like a clean stop, or restart-on-failure supervisors will not retry.

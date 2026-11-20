@@ -59,6 +59,12 @@ type Manager struct {
 	// reconcileStop closes when the periodic domain reconcile should exit.
 	reconcileStop chan struct{}
 
+	// stopCtx/stopCancel cancel background health probes on Stop().
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	bus        *events.Bus
+	subIDs     []uint64
+
 	// statuses records the last HTTPS probe result per domain; probing
 	// collapses concurrent on-demand probes for the same domain; lastStartErr
 	// keeps the humanized bind failure from the most recent Start attempt so
@@ -71,14 +77,17 @@ type Manager struct {
 // NewManager constructs a Manager without starting any listeners or issuing
 // certificates. Safe to call even on hosts where ports 80/443 are unavailable.
 func NewManager(cfg *config.Config, db *sql.DB, logger *slog.Logger) *Manager {
+	stopCtx, stopCancel := context.WithCancel(context.Background())
 	m := &Manager{
-		config:   cfg,
-		db:       db,
-		logger:   logger.With("component", "tlsproxy"),
-		managed:  make(map[string]struct{}),
-		since:    make(map[string]time.Time),
-		statuses: make(map[string]DomainStatus),
-		probing:  make(map[string]struct{}),
+		config:     cfg,
+		db:         db,
+		logger:     logger.With("component", "tlsproxy"),
+		managed:    make(map[string]struct{}),
+		since:      make(map[string]time.Time),
+		statuses:   make(map[string]DomainStatus),
+		probing:    make(map[string]struct{}),
+		stopCtx:    stopCtx,
+		stopCancel: stopCancel,
 	}
 	m.buildCertmagicConfig()
 	return m
@@ -321,23 +330,44 @@ func (m *Manager) Start() error {
 	return nil
 }
 
-// Stop gracefully shuts down both listeners. Idempotent.
+// Stop gracefully shuts down both listeners and background maintenance. Idempotent.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Latch the shutdown and end the reconcile loop before the early return: the
-	// loop runs even when the listeners never bound, and a tick landing during
-	// shutdown would reload against a closing database. The latch also stops a
-	// reconcile already inside Reload from seeing !running and helpfully
-	// re-binding the ports we are in the middle of closing.
+	// Latch the shutdown and end the reconcile loop before releasing the lock:
+	// the loop runs even when the listeners never bound, and a tick landing during
+	// shutdown would reload against a closing database.
 	m.stopped = true
+	if m.stopCancel != nil {
+		m.stopCancel()
+	}
 	if m.reconcileStop != nil {
 		close(m.reconcileStop)
 		m.reconcileStop = nil
 	}
+	bus := m.bus
+	subIDs := m.subIDs
+	m.bus = nil
+	m.subIDs = nil
 
-	if !m.running {
+	httpsSrv := m.httpsSrv
+	httpSrv := m.httpSrv
+	cache := m.cache
+	wasRunning := m.running
+	m.httpsSrv = nil
+	m.httpSrv = nil
+	m.cache = nil
+	m.running = false
+	m.mu.Unlock()
+
+	if bus != nil {
+		for _, id := range subIDs {
+			bus.Unsubscribe(id)
+		}
+	}
+	if cache != nil {
+		cache.Stop()
+	}
+	if !wasRunning {
 		return nil
 	}
 
@@ -346,20 +376,16 @@ func (m *Manager) Stop() error {
 	defer cancel()
 
 	var firstErr error
-	if m.httpsSrv != nil {
-		if err := m.httpsSrv.Shutdown(ctx); err != nil && firstErr == nil {
+	if httpsSrv != nil {
+		if err := httpsSrv.Shutdown(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if m.httpSrv != nil {
-		if err := m.httpSrv.Shutdown(ctx); err != nil && firstErr == nil {
+	if httpSrv != nil {
+		if err := httpSrv.Shutdown(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-
-	m.httpsSrv = nil
-	m.httpSrv = nil
-	m.running = false
 	return firstErr
 }
 
@@ -486,9 +512,14 @@ func (m *Manager) SubscribeToEvents(bus *events.Bus) {
 			}
 		})
 	}
-	bus.Subscribe(events.EventProjectCreated, handler)
-	bus.Subscribe(events.EventProjectUpdated, handler)
-	bus.Subscribe(events.EventProjectDeleted, handler)
+	m.mu.Lock()
+	m.bus = bus
+	m.subIDs = append(m.subIDs,
+		bus.Subscribe(events.EventProjectCreated, handler),
+		bus.Subscribe(events.EventProjectUpdated, handler),
+		bus.Subscribe(events.EventProjectDeleted, handler),
+	)
+	m.mu.Unlock()
 }
 
 // activeDomains queries the DB outside the manager lock.
@@ -510,11 +541,25 @@ func (m *Manager) activeDomainsLogging(logger *slog.Logger) ([]string, error) {
 var silentLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // HasActiveDomainsQuiet is HasActiveDomains for callers that run on every request
-// (the dashboard's status poll): same answer, but a domain with a configuration
-// problem is not logged again each time it is asked.
+// (the dashboard's status poll). It avoids synchronous DNS lookups so slow or
+// offline DNS cannot stall /admin/api/system/status.
 func (m *Manager) HasActiveDomainsQuiet() bool {
-	domains, err := m.activeDomainsLogging(silentLogger)
-	return err == nil && len(domains) > 0
+	m.mu.Lock()
+	hasManaged := len(m.managed) > 0
+	m.mu.Unlock()
+	if hasManaged {
+		return true
+	}
+	projects, err := models.ListPublishedProjects(m.db)
+	if err != nil {
+		return false
+	}
+	for _, p := range projects {
+		if p.Domain != nil && *p.Domain != "" && !isLocalOrIPDomain(*p.Domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasActiveDomains reports whether at least one published project has a valid public

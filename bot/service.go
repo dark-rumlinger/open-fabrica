@@ -194,11 +194,11 @@ func (s *BotService) ReloadTelegram(ctx context.Context) {
 // only appears after boot.
 func (s *BotService) subscribe() {
 	s.subOnce.Do(func() {
-		s.deps.Bus.Subscribe(events.EventEngineMessage, s.onBrainMessage)
-		s.deps.Bus.Subscribe(events.EventQuestionAsked, s.onQuestionAsked)
-		// These handlers send over the network. Bus.Publish runs handlers on the
-		// publisher's goroutine, so inline they would stall the engine worker (or a
-		// public webhook request) behind Telegram. Queued, they still go out in order.
+		// All outbound notification handlers run on the bounded FIFO notifyQueue
+		// worker so Bus.Publish never blocks on Telegram HTTP, messages arrive in
+		// order, and Stop() drains in-flight sends cleanly.
+		s.deps.Bus.Subscribe(events.EventEngineMessage, s.queued(s.onBrainMessage))
+		s.deps.Bus.Subscribe(events.EventQuestionAsked, s.queued(s.onQuestionAsked))
 		s.deps.Bus.Subscribe(events.EventEngineStageChange, s.queued(s.onStageChange))
 		s.deps.Bus.Subscribe(events.EventProjectPhaseChanged, s.queued(s.onPhaseChanged))
 		s.deps.Bus.Subscribe(events.EventEngineError, s.queued(s.onBrainError))
@@ -795,7 +795,9 @@ func (s *BotService) createProject(state *UserState, idea string) {
 // if the project can't be loaded. It does not send a message: callers render the
 // appropriate screen (chat header) themselves.
 func (s *BotService) switchProject(state *UserState, projectID int) string {
+	s.mu.Lock()
 	state.ActiveProjectID = projectID
+	s.mu.Unlock()
 	state.LastStatusMessageID = 0
 	state.LastStatusText = ""
 	SaveSession(s.deps.DB, state)
@@ -917,11 +919,16 @@ func (s *BotService) broadcastStatusTo(projectID int, render func(voice) string,
 			!state.LastStatusAt.IsZero() &&
 			time.Since(state.LastStatusAt) < statusCoalesceWindow &&
 			state.LastStatusText != text
+		editMsgID := state.LastStatusMessageID
+		state.Mu.Unlock()
 		if canEdit {
-			err := p.EditMessage(state.ChatID, state.LastStatusMessageID, text)
+			err := p.EditMessage(state.ChatID, editMsgID, text)
 			if err == nil {
-				state.LastStatusText = text
-				state.LastStatusAt = time.Now()
+				state.Mu.Lock()
+				if state.LastStatusMessageID == editMsgID {
+					state.LastStatusText = text
+					state.LastStatusAt = time.Now()
+				}
 				state.Mu.Unlock()
 				SaveSession(s.deps.DB, state)
 				continue
@@ -929,7 +936,6 @@ func (s *BotService) broadcastStatusTo(projectID int, render func(voice) string,
 			// Edit can fail if the message is gone or unchanged; fall through to a fresh send.
 			s.logger.Debug("status edit failed, posting fresh", "error", err)
 		}
-		state.Mu.Unlock()
 		id, err := p.SendMessage(state.ChatID, text)
 		if err != nil {
 			s.logger.Warn("status send failed", "error", err)

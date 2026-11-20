@@ -179,6 +179,7 @@ func (h *SystemHandler) EventStream(w http.ResponseWriter, r *http.Request) {
 			// Drop event if channel full to avoid blocking.
 		}
 	})
+	defer h.deps.Bus.Unsubscribe(subID)
 
 	// Send keepalive comment every 30 seconds.
 	ticker := time.NewTicker(30 * time.Second)
@@ -188,7 +189,6 @@ func (h *SystemHandler) EventStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
-			h.deps.Bus.Unsubscribe(subID)
 			return
 		case e := <-eventCh:
 			data, err := json.Marshal(e)
@@ -198,12 +198,18 @@ func (h *SystemHandler) EventStream(w http.ResponseWriter, r *http.Request) {
 			// id: line lets clients track the last-seen event for backfill on
 			// reconnect via /admin/api/brain/events?since=N.
 			if e.ID > 0 {
-				fmt.Fprintf(w, "id: %d\n", e.ID)
+				if _, err := fmt.Fprintf(w, "id: %d\n", e.ID); err != nil {
+					return
+				}
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, data)
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, data); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-ticker.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

@@ -76,7 +76,7 @@ async function boot() {
   }
 
   try {
-    const status = await get('/admin/api/system/status');
+    const status = await get('/admin/api/system/status', { skipAuthRedirect: true });
     state.set('systemStatus', status);
   } catch (err) {
     // Only a rejected token ends the session. A 5xx, a timeout or a dropped
@@ -304,7 +304,7 @@ async function refreshProjects() {
 
 async function refreshStatus() {
   try {
-    const status = await get('/admin/api/system/status');
+    const status = await get('/admin/api/system/status', { skipAuthRedirect: true });
     state.set('systemStatus', status);
   } catch {}
 }

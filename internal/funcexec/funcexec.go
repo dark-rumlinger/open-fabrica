@@ -11,13 +11,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"openfabrica/internal/actionexec"
 	"openfabrica/internal/funcsandbox"
+	"openfabrica/internal/lan"
 	"openfabrica/internal/netguard"
 	"openfabrica/internal/projectwrite"
 	"openfabrica/internal/sqlguard"
@@ -40,6 +40,10 @@ const (
 // and returns the text. It is what backs ctx.llm; callers build one with NewLLM.
 type LLMFunc func(prompt, system string, maxTokens int) (string, error)
 
+// LLMCtxFunc is the context-aware variant of LLMFunc so in-flight LLM calls
+// cancel when the handler's wall-clock budget expires or the HTTP client disconnects.
+type LLMCtxFunc func(ctx context.Context, prompt, system string, maxTokens int) (string, error)
+
 // Runtime carries the per-invocation capabilities the executor injects. Bundled
 // in a struct (rather than a growing positional arg list) so a new capability is
 // one field, not a signature change at every call site. LLM is optional - nil
@@ -49,6 +53,7 @@ type Runtime struct {
 	Writer *sql.DB
 	Enc    *security.Encryptor
 	LLM    LLMFunc
+	LLMCtx LLMCtxFunc
 	// ProjectID and GlobalDB back ctx.checkout: the checkout path loads the project's
 	// payment provider (a project or global connector) and checks for a user-flow replay.
 	ProjectID int
@@ -71,10 +76,19 @@ func RegisterCheckout(f CheckoutFunc) { checkoutImpl = f }
 // MQTTPublishFunc publishes a message to a project's MQTT broker from ctx.mqtt.publish.
 type MQTTPublishFunc func(projectID int, topic string, payload []byte, qos byte, retain bool) error
 
-var mqttPublishImpl MQTTPublishFunc
+// MQTTStatsFunc returns live broker stats (connected_clients, clients, subscriptions) for a project.
+type MQTTStatsFunc func(projectID int) (map[string]any, bool)
+
+var (
+	mqttPublishImpl MQTTPublishFunc
+	mqttStatsImpl   MQTTStatsFunc
+)
 
 // RegisterMQTTPublish installs the ctx.mqtt.publish implementation at server wiring time.
 func RegisterMQTTPublish(f MQTTPublishFunc) { mqttPublishImpl = f }
+
+// RegisterMQTTStats installs the live MQTT broker stats hook at server wiring time.
+func RegisterMQTTStats(f MQTTStatsFunc) { mqttStatsImpl = f }
 
 // PublishMQTT publishes to a project's live MQTT broker when wired (no-op when nil).
 func PublishMQTT(projectID int, topic string, payload []byte, qos byte, retain bool) error {
@@ -84,9 +98,13 @@ func PublishMQTT(projectID int, topic string, payload []byte, qos byte, retain b
 	return mqttPublishImpl(projectID, topic, payload, qos, retain)
 }
 
-// identifierRef matches one SQL identifier, used to test a query's names
-// against the project's PASSWORD columns at an identifier boundary.
-var identifierRef = regexp.MustCompile(`[A-Za-z_]\w*`)
+// MQTTStats returns live broker stats for projectID when wired and active.
+func MQTTStats(projectID int) (map[string]any, bool) {
+	if mqttStatsImpl == nil {
+		return nil, false
+	}
+	return mqttStatsImpl(projectID)
+}
 
 // Spec is a stored function's executable definition.
 type Spec struct {
@@ -96,14 +114,30 @@ type Spec struct {
 }
 
 // Execute compiles and runs a handler against req, then applies any declared
-// writes in one transaction. rt supplies the reader/writer handles, encryptor,
-// and LLM invoker (nil members degrade cleanly). Returns the handler's response.
+// writes in one transaction. Prefer ExecuteContext when a request context exists.
 func Execute(rt Runtime, spec Spec, req map[string]any) (*funcsandbox.Response, error) {
+	return ExecuteContext(context.Background(), rt, spec, req)
+}
+
+// ExecuteContext compiles and runs a handler under parent ctx bounded by spec.Timeout,
+// cancelling both JS execution and in-flight host I/O (ctx.query, ctx.fetch, ctx.llm)
+// when either the budget expires or the caller disconnects.
+func ExecuteContext(parent context.Context, rt Runtime, spec Spec, req map[string]any) (*funcsandbox.Response, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	budget := spec.Timeout
+	if budget <= 0 {
+		budget = funcsandbox.Budget
+	}
+	runCtx, cancel := context.WithTimeout(parent, budget)
+	defer cancel()
+
 	handler, err := funcsandbox.Prepare(spec.Code)
 	if err != nil {
 		return nil, err
 	}
-	resp, writes, err := handler.Run(req, deps(rt, spec))
+	resp, writes, err := handler.Run(req, deps(runCtx, rt, spec))
 	if err != nil {
 		return nil, err
 	}
@@ -114,12 +148,24 @@ func Execute(rt Runtime, spec Spec, req map[string]any) (*funcsandbox.Response, 
 }
 
 // deps builds the injected ctx capabilities for one invocation.
-func deps(rt Runtime, spec Spec) funcsandbox.Deps {
+func deps(runCtx context.Context, rt Runtime, spec Spec) funcsandbox.Deps {
 	// Resolved on the first ctx.query and reused for the rest of the
 	// invocation: a handler that never queries pays no read, and one that
 	// queries up to its cap pays exactly one.
-	hashedCols := sync.OnceValues(func() (map[string]bool, error) {
-		return store.LoadHashColumnNames(rt.Reader)
+	type secureProjection struct {
+		cols   map[string]bool
+		tables map[string]bool
+	}
+	secureProj := sync.OnceValues(func() (secureProjection, error) {
+		cols, err := store.LoadSecureColumnNames(rt.Reader)
+		if err != nil {
+			return secureProjection{}, err
+		}
+		tables, err := store.LoadSecureTableNames(rt.Reader)
+		if err != nil {
+			return secureProjection{}, err
+		}
+		return secureProjection{cols: cols, tables: tables}, nil
 	})
 	var checkout func(map[string]any) (map[string]any, error)
 	if checkoutImpl != nil {
@@ -136,38 +182,57 @@ func deps(rt Runtime, spec Spec) funcsandbox.Deps {
 			return mqttPublishImpl(rt.ProjectID, topic, []byte(payload), byte(qos), retain)
 		}
 	}
+	llmFn := rt.LLM
+	if rt.LLMCtx != nil {
+		llmFn = func(prompt, system string, maxTokens int) (string, error) {
+			return rt.LLMCtx(runCtx, prompt, system, maxTokens)
+		}
+	}
 	return funcsandbox.Deps{
+		Ctx:         runCtx,
 		NowMS:       time.Now().UnixMilli(),
 		Budget:      spec.Timeout,
-		LLM:         rt.LLM, // nil-safe: the sandbox throws "not available" when nil
+		LLM:         llmFn, // nil-safe: the sandbox throws "not available" when nil
 		Checkout:    checkout,
 		MQTTPublish: mqttPub,
+		LANWake: func(mac, broadcast string, port int) (string, int, error) {
+			return lan.Wake(mac, broadcast, port)
+		},
+		LANPing: func(host string, port int, timeoutMS int) (bool, int64, error) {
+			if timeoutMS <= 0 {
+				timeoutMS = 1000
+			}
+			if timeoutMS > 2000 {
+				timeoutMS = 2000
+			}
+			return lan.TCPPing(runCtx, host, port, time.Duration(timeoutMS)*time.Millisecond)
+		},
 
 		Query: func(query string, params []any) ([]map[string]any, error) {
 			// Fail closed, as the declared-write path does: without the
 			// projection there is no telling whether the query touches a
 			// secret. An unregistered table reports an empty set with no
 			// error, so an error here is a genuine database failure.
-			hashed, err := hashedCols()
+			proj, err := secureProj()
 			if err != nil {
 				return nil, fmt.Errorf("cannot read secure-column projection: %w", err)
 			}
-			trimmed, rejectErr := guardReadOnlySelect(query, hashed)
+			trimmed, rejectErr := guardReadOnlySelect(query, proj.cols, proj.tables)
 			if rejectErr != "" {
 				return nil, fmt.Errorf("%s", rejectErr)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+			ctx, cancel := context.WithTimeout(runCtx, queryTimeout)
 			defer cancel()
 			rows, err := runQuery(ctx, rt.Reader, trimmed, params)
 			if err != nil {
 				return nil, err
 			}
-			stripHashColumns(rows, hashed)
+			stripHashColumns(rows, proj.cols)
 			return rows, nil
 		},
 
 		Fetch: func(url string, opts funcsandbox.FetchOptions) (funcsandbox.FetchResult, error) {
-			return runFetch(url, opts)
+			return runFetch(runCtx, url, opts)
 		},
 
 		Secret: func(name string) (string, error) {
@@ -190,11 +255,19 @@ func deps(rt Runtime, spec Spec) funcsandbox.Deps {
 // the project's reader and writer, the secrets encryptor, ctx.llm on the project's
 // model under the unattended budget, and the global DB ctx.checkout needs.
 func NewRuntime(projectID int, reader, writer *sql.DB, llmDeps actionexec.CompleteDeps) Runtime {
+	llmCtx := NewLLMCtx(projectID, writer, llmDeps)
+	var llmFn LLMFunc
+	if llmCtx != nil {
+		llmFn = func(prompt, system string, maxTokens int) (string, error) {
+			return llmCtx(context.Background(), prompt, system, maxTokens)
+		}
+	}
 	return Runtime{
 		Reader:    reader,
 		Writer:    writer,
 		Enc:       llmDeps.Encryptor,
-		LLM:       NewLLM(projectID, writer, llmDeps),
+		LLM:       llmFn,
+		LLMCtx:    llmCtx,
 		ProjectID: projectID,
 		GlobalDB:  llmDeps.GlobalDB,
 	}
@@ -205,17 +278,28 @@ func NewRuntime(projectID int, reader, writer *sql.DB, llmDeps actionexec.Comple
 // budget, of_llm_calls row under source "function", retry policy). Returns nil when no
 // global DB is available.
 func NewLLM(projectID int, projectDB *sql.DB, d actionexec.CompleteDeps) LLMFunc {
-	if d.GlobalDB == nil {
+	llmCtx := NewLLMCtx(projectID, projectDB, d)
+	if llmCtx == nil {
 		return nil
 	}
 	return func(prompt, system string, maxTokens int) (string, error) {
+		return llmCtx(context.Background(), prompt, system, maxTokens)
+	}
+}
+
+// NewLLMCtx builds a context-aware ctx.llm invoker bound to the handler's run context.
+func NewLLMCtx(projectID int, projectDB *sql.DB, d actionexec.CompleteDeps) LLMCtxFunc {
+	if d.GlobalDB == nil {
+		return nil
+	}
+	return func(ctx context.Context, prompt, system string, maxTokens int) (string, error) {
 		if maxTokens <= 0 {
 			maxTokens = defaultLLMMax
 		}
 		if maxTokens > maxLLMMax {
 			maxTokens = maxLLMMax
 		}
-		out, err := actionexec.Complete(context.Background(), d, projectID, projectDB, "function", actionexec.CompleteRequest{
+		out, err := actionexec.Complete(ctx, d, projectID, projectDB, "function", actionexec.CompleteRequest{
 			Prompt: prompt, System: system, MaxTokens: maxTokens, Timeout: llmTimeout,
 		})
 		if err != nil {
@@ -227,16 +311,19 @@ func NewLLM(projectID int, projectDB *sql.DB, d actionexec.CompleteDeps) LLMFunc
 
 // QueryReadOnly runs one guarded read-only SELECT for callers OUTSIDE the
 // sandbox (the agent runtime's data-query tool), applying the exact same guard,
-// timeout, and PASSWORD-column stripping that ctx.query gives a function handler.
-// Routing both through this one path keeps the read surface from drifting into a
-// weaker variant. The returned error's message is safe to surface: it is either
-// a guard rejection telling the caller how to fix the SQL, or a database error.
+// timeout, and secure-column (PASSWORD/ENCRYPTED) stripping that ctx.query gives
+// a function handler. Routing both through this one path keeps the read surface
+// from drifting into a weaker variant.
 func QueryReadOnly(reader *sql.DB, query string, params []any) ([]map[string]any, error) {
-	hashed, err := store.LoadHashColumnNames(reader)
+	secretCols, err := store.LoadSecureColumnNames(reader)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read secure-column projection: %w", err)
 	}
-	trimmed, rejectErr := guardReadOnlySelect(query, hashed)
+	secretTables, err := store.LoadSecureTableNames(reader)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read secure-table projection: %w", err)
+	}
+	trimmed, rejectErr := guardReadOnlySelect(query, secretCols, secretTables)
 	if rejectErr != "" {
 		return nil, fmt.Errorf("%s", rejectErr)
 	}
@@ -246,15 +333,14 @@ func QueryReadOnly(reader *sql.DB, query string, params []any) ([]map[string]any
 	if err != nil {
 		return nil, err
 	}
-	stripHashColumns(rows, hashed)
+	stripHashColumns(rows, secretCols)
 	return rows, nil
 }
 
-// guardReadOnlySelect enforces "single SELECT, no system tables, no PASSWORD
-// columns" on handler SQL, delegating verb/stacked-statement checks to the shared
-// sqlguard so this surface can't drift into a weaker variant. Returns the trimmed
-// query and a non-empty message when rejected.
-func guardReadOnlySelect(query string, hashed map[string]bool) (string, string) {
+// guardReadOnlySelect enforces "single SELECT, no system/engine tables, no memory-hog
+// functions, no PASSWORD/ENCRYPTED columns, no compound queries over tables with
+// secure columns" on handler and agent SQL, delegating to the shared sqlguard.
+func guardReadOnlySelect(query string, secretCols, secretTables map[string]bool) (string, string) {
 	if len(query) > maxSQLTextBytes {
 		return "", "sql is too long"
 	}
@@ -262,26 +348,10 @@ func guardReadOnlySelect(query string, hashed map[string]bool) (string, string) 
 	if rejectErr != "" {
 		return "", rejectErr
 	}
-	if m := hashColumnRef(trimmed, hashed); m != "" {
-		return "", fmt.Sprintf("cannot reference PASSWORD column: %s", m)
+	if rejectErr := sqlguard.CheckQueryTargets(trimmed, nil, secretCols, secretTables); rejectErr != "" {
+		return "", rejectErr
 	}
 	return trimmed, ""
-}
-
-// hashColumnRef returns the first PASSWORD column the query names, or "". Naming
-// one is refused rather than filtered: a hash the query can address is a hash it
-// can test (aliases and WHERE comparisons defeat result-side checks).
-// Over-refusing costs a handler one rewrite; under-refusing leaks a credential.
-func hashColumnRef(query string, hashed map[string]bool) string {
-	if len(hashed) == 0 {
-		return ""
-	}
-	for _, ident := range identifierRef.FindAllString(query, -1) {
-		if hashed[strings.ToLower(ident)] {
-			return strings.ToLower(ident)
-		}
-	}
-	return ""
 }
 
 // stripHashColumns drops PASSWORD columns from query results. It covers the
@@ -344,13 +414,13 @@ func runQuery(ctx context.Context, reader *sql.DB, query string, params []any) (
 // validator, pinned-resolution client, and response cap that back ctx.fetch.
 // Routing both through runFetch keeps the outbound surface from drifting.
 func Fetch(url string, opts funcsandbox.FetchOptions) (funcsandbox.FetchResult, error) {
-	return runFetch(url, opts)
+	return runFetch(context.Background(), url, opts)
 }
 
 // runFetch performs one SSRF-guarded outbound request for ctx.fetch, reusing the
 // same validator + pinned-resolution client manage_http and the trigger runner
 // use, and bounding the response read.
-func runFetch(url string, opts funcsandbox.FetchOptions) (funcsandbox.FetchResult, error) {
+func runFetch(parent context.Context, url string, opts funcsandbox.FetchOptions) (funcsandbox.FetchResult, error) {
 	if err := netguard.ValidateExternalURL(url); err != nil {
 		return funcsandbox.FetchResult{}, err
 	}
@@ -358,7 +428,7 @@ func runFetch(url string, opts funcsandbox.FetchOptions) (funcsandbox.FetchResul
 	if method == "" {
 		method = http.MethodGet
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	ctx, cancel := context.WithTimeout(parent, fetchTimeout)
 	defer cancel()
 	var body io.Reader
 	if opts.Body != "" {
@@ -449,8 +519,25 @@ func secretAllowed(allowlistJSON, name string) bool {
 }
 
 func writeTouchesSecure(w funcsandbox.Write, secure map[string]string) bool {
+	if len(secure) == 0 {
+		return false
+	}
+	secLower := make(map[string]bool, len(secure))
+	for col := range secure {
+		secLower[strings.ToLower(col)] = true
+	}
 	for col := range w.Row {
-		if _, ok := secure[col]; ok {
+		if secLower[strings.ToLower(col)] {
+			return true
+		}
+	}
+	for col := range w.Where {
+		if secLower[strings.ToLower(col)] {
+			return true
+		}
+	}
+	for _, col := range w.Conflict {
+		if secLower[strings.ToLower(col)] {
 			return true
 		}
 	}

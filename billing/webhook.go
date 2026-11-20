@@ -158,9 +158,13 @@ func ReconcileWebhook(env WebhookEnv, body, signature string) (*WebhookOutcome, 
 	}
 
 	if isSub {
-		ch := subscriptionChange{externalID: subExtID, status: subStatus, renewal: isRenewalInvoice(providerType, webhookData)}
+		var eventCreated int64
+		if c, ok := webhookData["created"].(float64); ok && c > 0 {
+			eventCreated = int64(c)
+		}
+		ch := subscriptionChange{externalID: subExtID, status: subStatus, renewal: isRenewalInvoice(providerType, webhookData), eventCreated: eventCreated}
 		if isLink {
-			ch = subscriptionChange{externalID: link.subscriptionID, sessionID: link.sessionID, status: link.status}
+			ch = subscriptionChange{externalID: link.subscriptionID, sessionID: link.sessionID, status: link.status, eventCreated: eventCreated}
 		}
 		matched, shouldPublish, err := applySubscriptionChange(tx, ch, func() (time.Time, bool) {
 			end := parseRenewalPeriodEnd(providerType, webhookData)
@@ -170,6 +174,19 @@ func ReconcileWebhook(env WebhookEnv, body, signature string) (*WebhookOutcome, 
 			return nil, fmt.Errorf("updating subscription: %w", err)
 		}
 		if !matched {
+			// If an invoice.paid arrives before checkout.session.completed linked
+			// the Stripe sub_... id to the pending cs_... row, return a retryable
+			// error (rolling back the idempotency claim) so Stripe retries after
+			// checkout completion instead of dropping the activation with 200 OK.
+			if !isLink && providerType == "stripe" && subStatus == "active" {
+				var pending int
+				_ = tx.QueryRow(
+					`SELECT COUNT(*) FROM of_subscriptions WHERE status = 'pending' AND created_at >= datetime('now', '-1 hour')`,
+				).Scan(&pending)
+				if pending > 0 {
+					return nil, fmt.Errorf("subscription %s not yet linked to pending checkout session", ch.externalID)
+				}
+			}
 			log.Warn("webhook for unknown subscription ignored", "external_id", ch.externalID)
 			return &WebhookOutcome{Kind: WebhookIgnored, ExternalID: ch.externalID}, nil
 		}
@@ -182,12 +199,22 @@ func ReconcileWebhook(env WebhookEnv, body, signature string) (*WebhookOutcome, 
 		return &WebhookOutcome{Kind: WebhookSubscription, ExternalID: ch.externalID, Status: ch.status}, nil
 	}
 
-	// paid is terminal: a late or out-of-order event never moves a settled
-	// payment back.
-	res, err := tx.Exec(
-		"UPDATE of_payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE external_id = ? AND status NOT IN ('paid', 'refunded')",
-		newStatus, externalID,
-	)
+	// Explicit state-transition guard: paid may still advance to refunded or
+	// chargeback, while refunded/chargeback are terminal and a late pending/failed/
+	// expired event can never regress an already-settled payment.
+	var res sql.Result
+	switch strings.ToLower(strings.TrimSpace(newStatus)) {
+	case "refunded", "chargeback":
+		res, err = tx.Exec(
+			"UPDATE of_payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE external_id = ? AND status NOT IN ('refunded', 'chargeback')",
+			newStatus, externalID,
+		)
+	default:
+		res, err = tx.Exec(
+			"UPDATE of_payments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE external_id = ? AND status NOT IN ('paid', 'refunded', 'chargeback')",
+			newStatus, externalID,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("updating payment status: %w", err)
 	}

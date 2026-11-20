@@ -75,6 +75,10 @@ func RuntimeInstrumentationAction(authToken string) chromedp.Action {
 			if q, err := json.Marshal(authToken); err == nil {
 				inject = "try{localStorage.setItem('auth_token'," + string(q) + ");}catch(e){}\n" + inject
 			}
+		} else {
+			// Tabs on a shared Chrome process share localStorage; an anonymous pass
+			// must clear any auth_token left behind by an earlier signed-in tab.
+			inject = "try{localStorage.removeItem('auth_token');}catch(e){}\n" + inject
 		}
 		_, err := page.AddScriptToEvaluateOnNewDocument(inject).Do(ctx)
 		return err

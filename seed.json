@@ -72,6 +72,7 @@
       },
       "signup_url": "https://aistudio.google.com/app/apikey",
       "config": {
+        "embedding_model": "gemini-embedding-001",
         "models_shape": "gemini",
         "models_auth": {
           "scheme": "query",
@@ -179,6 +180,18 @@
         "required": true
       },
       "signup_url": "https://platform.openai.com/api-keys"
+    },
+    {
+      "vendor": "gemini-images",
+      "kind": "image",
+      "name": "Google Gemini Images",
+      "transport": "openai-image",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "auth": {
+        "env": "GEMINI_API_KEY",
+        "required": true
+      },
+      "signup_url": "https://aistudio.google.com/app/apikey"
     },
     {
       "vendor": "automatic1111",

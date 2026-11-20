@@ -332,7 +332,24 @@ func ArtifactSave(db dbh.Handle, a *Artifact, changedBy string) (int64, int, err
 	}
 	metaJSON := a.MetadataJSON()
 
-	_, err := db.Exec(`INSERT INTO of_files
+	// Wrap the multi-step upsert + versioned history + blob refcount + symbol
+	// index update in a single transaction when db supports Begin() so concurrent
+	// saves cannot race on version_number or drift of_snapshot_blobs.refcount.
+	execDB := db
+	var tx *sql.Tx
+	if _, alreadyTx := db.(txHandle); !alreadyTx {
+		if started, terr := db.Begin(); terr == nil {
+			tx = started
+			execDB = txHandle{started}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
+				}
+			}()
+		}
+	}
+
+	_, err := execDB.Exec(`INSERT INTO of_files
 		(kind, path, storage, body, disk_path, content_type, metadata, scope, size, status, is_deleted, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
 		ON CONFLICT(kind, path) DO UPDATE SET
@@ -353,11 +370,11 @@ func ArtifactSave(db dbh.Handle, a *Artifact, changedBy string) (int64, int, err
 	}
 
 	var id int64
-	_ = db.QueryRow(`SELECT id FROM of_files WHERE kind = ? AND path = ?`, a.Kind, a.Path).Scan(&id)
+	_ = execDB.QueryRow(`SELECT id FROM of_files WHERE kind = ? AND path = ?`, a.Kind, a.Path).Scan(&id)
 	a.ID = id
 
 	var nextVersion int
-	_ = db.QueryRow(`SELECT COALESCE(MAX(version_number), 0) + 1 FROM of_file_history WHERE kind = ? AND path = ?`,
+	_ = execDB.QueryRow(`SELECT COALESCE(MAX(version_number), 0) + 1 FROM of_file_history WHERE kind = ? AND path = ?`,
 		a.Kind, a.Path).Scan(&nextVersion)
 	if changedBy == "" {
 		changedBy = "brain"
@@ -371,20 +388,27 @@ func ArtifactSave(db dbh.Handle, a *Artifact, changedBy string) (int64, int, err
 	// already live on the filesystem), so body_hash stays empty for them.
 	var bodyHash string
 	if a.Storage == StorageInline && a.Body != "" {
-		bodyHash = putBlob(db, a.Body)
+		bodyHash = putBlob(execDB, a.Body)
 	}
-	bestEffortExec(db, "file history insert", `INSERT INTO of_file_history
+	bestEffortExec(execDB, "file history insert", `INSERT INTO of_file_history
 		(file_id, kind, path, version_number, changed_by, body_hash)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		historyFileID, a.Kind, a.Path, nextVersion, changedBy, bodyHash)
 	// Keep only the most-recent snapshots for this artifact; older rows retain
 	// attribution but release their blob reference.
-	pruneBodySnapshots(db, a.Kind, a.Path, MaxBodySnapshots)
+	pruneBodySnapshots(execDB, a.Kind, a.Path, MaxBodySnapshots)
+
+	if tx != nil {
+		if cerr := tx.Commit(); cerr != nil {
+			return 0, 0, fmt.Errorf("committing artifact save: %w", cerr)
+		}
+		tx = nil
+	}
 
 	// Refresh the symbol index for this artifact so resolve/where_used can point
-	// the model straight at file:line without a body read. Text inline artifacts
-	// only (disk blobs carry no body here); best-effort, an index failure must
-	// never fail the save.
+	// the model straight at file:line without a body read. Runs after tx.Commit
+	// because IndexArtifactSymbols opens its own transaction; best-effort, an
+	// index failure must never fail the save.
 	if a.Storage == StorageInline && isNewlineNormalizableArtifact(a.Kind, a.Path) {
 		if err := IndexArtifactSymbols(db, a.Kind, a.Path, a.Body, a.ContentType); err != nil {
 			slog.Warn("symbol index update failed", "kind", a.Kind, "path", a.Path, "err", err)
@@ -589,17 +613,34 @@ type ArtifactListOpts struct {
 // "disk" -> disk_path) with no fallback, and a disk_path must stay inside
 // projectDir. It is the one home for that containment check so it cannot drift or
 // be forgotten on one surface.
+// txHandle adapts *sql.Tx to dbh.Handle so internal multi-step store helpers
+// can execute inside a transaction without changing their dbh.Handle signatures.
+type txHandle struct{ *sql.Tx }
+
+func (txHandle) Begin() (*sql.Tx, error) { return nil, fmt.Errorf("nested transaction not supported") }
+func (txHandle) Stats() sql.DBStats      { return sql.DBStats{} }
+
+// ResolveArtifactDiskPath resolves and validates a disk artifact's path within
+// projectDir so callers can stream it directly via os.Open + http.ServeContent.
+func ResolveArtifactDiskPath(diskPath, projectDir string) (string, error) {
+	if diskPath == "" {
+		return "", fmt.Errorf("artifact has storage=disk but disk_path is empty")
+	}
+	resolved, ok := diskpath.Resolve(projectDir, diskPath)
+	if !ok {
+		return "", fmt.Errorf("disk_path escapes project directory")
+	}
+	return resolved, nil
+}
+
 func ReadArtifactBytes(storage, body, diskPath sql.NullString, projectDir string) ([]byte, error) {
 	switch storage.String {
 	case "inline", "":
 		return []byte(body.String), nil
 	case "disk":
-		if diskPath.String == "" {
-			return nil, fmt.Errorf("artifact has storage=disk but disk_path is empty")
-		}
-		resolved, ok := diskpath.Resolve(projectDir, diskPath.String)
-		if !ok {
-			return nil, fmt.Errorf("disk_path escapes project directory")
+		resolved, err := ResolveArtifactDiskPath(diskPath.String, projectDir)
+		if err != nil {
+			return nil, err
 		}
 		return os.ReadFile(resolved)
 	}

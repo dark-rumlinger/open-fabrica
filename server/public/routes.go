@@ -129,6 +129,7 @@ func RegisterRoutes(r chi.Router, deps *Deps) func() {
 
 	// MQTT-over-WebSocket broker endpoint for IoT devices and browser dashboards.
 	r.Get("/mqtt", h.ServeMQTT)
+	r.Get("/api/__mqtt/rollups", h.ServeMQTTRollups)
 
 	// Dynamic API endpoints (LLM-created), includes auth endpoints.
 	r.HandleFunc("/api/*", h.DynamicAPI)
@@ -136,5 +137,25 @@ func RegisterRoutes(r chi.Router, deps *Deps) func() {
 	// Catch-all: serve SSR pages by path.
 	r.Get("/*", h.ServePage)
 
-	return h.apiCache.Close
+	// Tear down live real-time connections, MQTT brokers, and caches whenever a
+	// project is deleted (whether from the admin UI or the Telegram bot).
+	var delSubID uint64
+	if deps.Bus != nil {
+		delSubID = deps.Bus.Subscribe(events.EventProjectDeleted, func(e events.Event) {
+			h.InvalidateProject(e.ProjectID)
+			if deps.WSHub != nil {
+				deps.WSHub.CloseProject(e.ProjectID)
+			}
+			if deps.MQTTHub != nil {
+				deps.MQTTHub.CloseProject(e.ProjectID)
+			}
+		})
+	}
+
+	return func() {
+		if delSubID != 0 && deps.Bus != nil {
+			deps.Bus.Unsubscribe(delSubID)
+		}
+		h.apiCache.Close()
+	}
 }

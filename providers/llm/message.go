@@ -55,6 +55,11 @@ type ToolCall struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"` // JSON string
+
+	// ExtraContent carries opaque provider-specific tool_call extensions
+	// (such as Gemini's `extra_content.google.thought_signature` on OpenAI-compat
+	// endpoints) that must be echoed back unmodified on subsequent turns.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 // ToolDef defines a tool that can be used by the model.

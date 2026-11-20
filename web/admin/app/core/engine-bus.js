@@ -78,6 +78,23 @@ dispatchers['page.saved'] = (data) => {
   });
 };
 
+for (const evt of [
+  'mqtt.publish',
+  'mqtt.client_connected',
+  'mqtt.client_disconnected',
+  'mqtt.device_stale',
+  'mqtt.device_recovered',
+]) {
+  dispatchers[evt] = (data) => {
+    state.set('mqttEvent', {
+      type: evt,
+      project_id: data.project_id,
+      payload: data.payload || {},
+      timestamp: data.timestamp || new Date().toISOString(),
+    });
+  };
+}
+
 function dispatch(data) {
   track(data);
   const fn = dispatchers[data?.type];

@@ -12,6 +12,7 @@ import (
 	"openfabrica/internal/replaymodel"
 	"openfabrica/providers/llm"
 	"openfabrica/security"
+	"openfabrica/tools/llmredact"
 )
 
 // CompleteDeps are the process-wide pieces a one-shot completion needs. Every field
@@ -45,8 +46,14 @@ func Complete(ctx context.Context, d CompleteDeps, projectID int, projectDB *sql
 		return "", fmt.Errorf("'prompt' is required")
 	}
 	// Fails open on a DB error, so a transient hiccup never blocks a legitimate call.
-	if d.BudgetFn != nil && projectDB != nil {
-		if st := llm.CheckSpend(projectDB, d.BudgetFn()); st.Exceeded {
+	// Always check even when d.BudgetFn is nil so per-project of_spend_limits
+	// (token budget or USD cap) are still enforced.
+	if projectDB != nil {
+		global := 0
+		if d.BudgetFn != nil {
+			global = d.BudgetFn()
+		}
+		if st := llm.CheckSpend(projectDB, global); st.Exceeded {
 			return "", fmt.Errorf("%s reached (%d tokens today); skipping until midnight UTC", st.Reason, st.TokensUsed)
 		}
 	}
@@ -60,7 +67,7 @@ func Complete(ctx context.Context, d CompleteDeps, projectID int, projectDB *sql
 		return "", err
 	}
 	if projectDB != nil {
-		lg := llm.NewDBLLMLogger(projectDB)
+		lg := llm.NewDBLLMLogger(projectDB, llm.WithRedactor(llmredact.New(projectDB, nil)))
 		defer lg.Close()
 		provider = llm.NewLoggedProvider(provider, lg, source, "", nil, nil)
 	}

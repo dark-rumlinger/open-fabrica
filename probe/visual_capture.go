@@ -64,9 +64,15 @@ func CapturePageScreenshots(ctx context.Context, db *sql.DB, baseURL, hostHeader
 
 	var out []PageScreenshot
 	for _, p := range pages {
+		if ctx.Err() != nil {
+			return out, nil
+		}
 		concrete := concreteProbePath(db, p)
 		targetURL := origin + concrete
 		for _, vp := range visualAuditViewports {
+			if ctx.Err() != nil {
+				return out, nil
+			}
 			png, err := captureViewportPNG(allocCtx, targetURL, authToken, vp)
 			if err != nil || len(png) == 0 {
 				continue

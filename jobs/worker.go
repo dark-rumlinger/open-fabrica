@@ -54,13 +54,19 @@ type Deps struct {
 	LLMHTTPClient *http.Client
 }
 
+type jobHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // Manager owns one Worker per active project, mirroring the engine's
 // per-project worker lifecycle.
 type Manager struct {
 	mu      sync.Mutex
+	closed  bool
 	deps    *Deps
 	rootCtx context.Context
-	workers map[int]context.CancelFunc
+	workers map[int]*jobHandle
 	client  *http.Client
 	wg      sync.WaitGroup
 	logger  *slog.Logger
@@ -72,7 +78,7 @@ func NewManager(deps *Deps, ctx context.Context) *Manager {
 	return &Manager{
 		deps:    deps,
 		rootCtx: ctx,
-		workers: make(map[int]context.CancelFunc),
+		workers: make(map[int]*jobHandle),
 		client:  netguard.SSRFSafeClient(),
 		logger:  slog.With("component", "jobs_manager"),
 	}
@@ -84,6 +90,9 @@ func (m *Manager) StartProject(projectID int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.closed {
+		return nil
+	}
 	if _, exists := m.workers[projectID]; exists {
 		return nil
 	}
@@ -111,11 +120,14 @@ func (m *Manager) StartProject(projectID int) error {
 		client:        client,
 		logger:        slog.With("component", "job_worker", "project_id", projectID),
 	}
-	m.workers[projectID] = cancel
+	handle := &jobHandle{cancel: cancel, done: make(chan struct{})}
+	m.workers[projectID] = handle
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer close(handle.done)
+		defer m.forget(projectID, handle)
 		// A panic in job polling/execution must not crash the process; recover
 		// and let this project's job worker exit (the next StartProject revives it).
 		safego.Run(fmt.Sprintf("job-worker[%d]", projectID), func() { w.Run(ctx) })
@@ -123,6 +135,14 @@ func (m *Manager) StartProject(projectID int) error {
 
 	m.logger.Info("job worker started", "project_id", projectID)
 	return nil
+}
+
+func (m *Manager) forget(projectID int, handle *jobHandle) {
+	m.mu.Lock()
+	if m.workers[projectID] == handle {
+		delete(m.workers, projectID)
+	}
+	m.mu.Unlock()
 }
 
 // HasWorker reports whether a job worker is running for the project.
@@ -133,18 +153,22 @@ func (m *Manager) HasWorker(projectID int) bool {
 	return ok
 }
 
-// StopProject cancels the job worker for a single project, if one is running.
-// Called before a project's database is torn down so the worker stops issuing
-// queries against it. Idempotent.
+// StopProject cancels the job worker for a single project and waits for it to
+// exit so the caller can safely tear down the project's database. Idempotent.
 func (m *Manager) StopProject(projectID int) {
 	m.mu.Lock()
-	cancel, ok := m.workers[projectID]
+	handle, ok := m.workers[projectID]
 	if ok {
 		delete(m.workers, projectID)
 	}
 	m.mu.Unlock()
 	if ok {
-		cancel()
+		handle.cancel()
+		select {
+		case <-handle.done:
+		case <-time.After(10 * time.Second):
+			m.logger.Warn("job worker did not stop within 10s", "project_id", projectID)
+		}
 		m.logger.Info("job worker stopped", "project_id", projectID)
 	}
 }
@@ -152,10 +176,11 @@ func (m *Manager) StopProject(projectID int) {
 // StopAll cancels every worker and waits up to 30s for them to drain.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
-	for _, cancel := range m.workers {
-		cancel()
+	m.closed = true
+	for _, handle := range m.workers {
+		handle.cancel()
 	}
-	m.workers = make(map[int]context.CancelFunc)
+	m.workers = make(map[int]*jobHandle)
 	m.mu.Unlock()
 
 	done := make(chan struct{})

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"openfabrica/security"
@@ -160,17 +161,42 @@ func RunCSVImport(writer *sql.DB, spec CSVImportSpec, nextArgs func(rowNum int) 
 
 	var stmt string
 	if spec.Mode == "upsert" && spec.UniqueColumn != "" {
+		stampLower := make(map[string]bool, len(spec.StampColumns))
+		stampList := make([]string, 0, len(spec.StampColumns))
+		for sc := range spec.StampColumns {
+			stampLower[strings.ToLower(sc)] = true
+			stampList = append(stampList, sc)
+		}
+		sort.Strings(stampList)
+
 		setClauses := make([]string, 0, len(spec.Columns))
 		for _, c := range spec.Columns {
 			// Skip the conflict key and the stamped RLS columns: an upsert must
 			// not rewrite an existing row's owner/tenant to the caller's.
-			if c == spec.UniqueColumn || spec.StampColumns[c] {
+			if strings.EqualFold(c, spec.UniqueColumn) || stampLower[strings.ToLower(c)] {
 				continue
 			}
 			setClauses = append(setClauses, security.QuoteIdent(c)+" = excluded."+security.QuoteIdent(c))
 		}
-		stmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT(%s) DO UPDATE SET %s",
-			security.QuoteIdent(spec.Table), cols, placeholders, security.QuoteIdent(spec.UniqueColumn), strings.Join(setClauses, ", "))
+		if len(setClauses) == 0 {
+			stmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT(%s) DO NOTHING",
+				security.QuoteIdent(spec.Table), cols, placeholders, security.QuoteIdent(spec.UniqueColumn))
+		} else {
+			whereSQL := ""
+			if len(stampList) > 0 {
+				// Enforce RLS on upsert conflicts: a colliding unique key must
+				// only update rows belonging to the caller's own owner/tenant.
+				conds := make([]string, 0, len(stampList))
+				qTable := security.QuoteIdent(spec.Table)
+				for _, sc := range stampList {
+					qCol := security.QuoteIdent(sc)
+					conds = append(conds, fmt.Sprintf("%s.%s = excluded.%s", qTable, qCol, qCol))
+				}
+				whereSQL = " WHERE " + strings.Join(conds, " AND ")
+			}
+			stmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT(%s) DO UPDATE SET %s%s",
+				security.QuoteIdent(spec.Table), cols, placeholders, security.QuoteIdent(spec.UniqueColumn), strings.Join(setClauses, ", "), whereSQL)
+		}
 	} else {
 		stmt = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", security.QuoteIdent(spec.Table), cols, placeholders)
 	}

@@ -598,8 +598,9 @@ func (h *AuthHandler) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Optionally configure the selected provider with an API key.
+	// Read through Reader() because tx already holds the single writer connection.
 	if req.ProviderID > 0 {
-		provider, pErr := models.GetProviderByID(h.deps.DB.DB, req.ProviderID)
+		provider, pErr := models.GetProviderByID(h.deps.DB.Reader(), req.ProviderID)
 		if pErr != nil {
 			h.deps.Logger.Warn("setup: provider not found", "id", req.ProviderID, "error", pErr)
 		} else {

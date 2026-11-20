@@ -439,6 +439,10 @@ func nameLimits(id string) (ctx, out int) {
 		// The Models API normally reports the window; 200k is the conservative
 		// baseline for when it does not (a proxy or an older API version).
 		return 200000, 0
+	case strings.HasPrefix(low, "gemini-"):
+		// Native /v1beta/models reports exact limits; 1M/64k is the baseline
+		// when Gemini 2.5/3/4 models are routed through a plain OpenAI proxy.
+		return 1048576, 65536
 	}
 	for _, f := range familyLimits {
 		if strings.HasPrefix(low, f.prefix) {
@@ -542,6 +546,9 @@ func openAISupportsVision(id string) bool {
 	}
 	if strings.HasPrefix(low, "glm-") {
 		return glmSupportsVision(low)
+	}
+	if strings.HasPrefix(low, "gemini-") {
+		return geminiSupportsVision(low)
 	}
 	return strings.HasPrefix(low, "gpt-5") ||
 		strings.HasPrefix(low, "gpt-6") ||

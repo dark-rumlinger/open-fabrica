@@ -103,11 +103,20 @@ func (c *llmCaller) call(ctx context.Context, p callParams) (*llm.CompletionResp
 		}
 	}
 
-	release, err := c.limiter.acquire(ctx, p.rp.ProviderID, p.rp.Model)
-	if err != nil {
-		return nil, hash, false, err
+	// Acquire concurrency slots per actual provider.Complete() attempt inside
+	// StagePolicy so slots are not held across multi-minute backoff sleeps and
+	// fallback providers get their own bucket instead of running unbounded.
+	policy := p.policy
+	if c.limiter != nil {
+		primaryName := p.rp.Provider.Name()
+		primaryID := p.rp.ProviderID
+		policy.Acquire = func(actx context.Context, provName, model string) (func(), error) {
+			if provName == primaryName {
+				return c.limiter.acquire(actx, primaryID, model)
+			}
+			return c.limiter.acquire(actx, 0, provName+":"+model)
+		}
 	}
-	defer release()
 
 	// CallLLM returns only the response, so the hook is wrapped to capture the
 	// alternate it hands back. Without this the row would name the resolved
@@ -128,7 +137,7 @@ func (c *llmCaller) call(ctx context.Context, p callParams) (*llm.CompletionResp
 	}
 
 	start := time.Now()
-	resp, stats, err := p.policy.CallLLM(ctx, c.logger, p.rp.Provider, p.req, p.timeout, hook)
+	resp, stats, err := policy.CallLLM(ctx, c.logger, p.rp.Provider, p.req, p.timeout, hook)
 	duration := time.Since(start).Milliseconds()
 
 	// Attribute to the alternate only when it actually answered. When both failed

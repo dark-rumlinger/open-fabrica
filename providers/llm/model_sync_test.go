@@ -68,6 +68,10 @@ func TestNameLimits(t *testing.T) {
 		{"qwen3-coder-plus", 1000000, 65536},
 		{"qwen3-coder-next", 262144, 65536},
 		{"qwen3-max-2026-01-23", 262144, 32768},
+		{"gemini-4-neon", 1048576, 65536},
+		{"gemini-4-argon", 1048576, 65536},
+		{"gemini-3.8-flash", 1048576, 65536},
+		{"gemini-2.5-pro", 1048576, 65536},
 	}
 	for _, c := range cases {
 		ctx, out := nameLimits(c.id)
@@ -78,8 +82,8 @@ func TestNameLimits(t *testing.T) {
 }
 
 func TestOpenAISupportsVision(t *testing.T) {
-	yes := []string{"gpt-6", "gpt-5.4", "gpt-4o", "o3", "glm-4.6v", "glm-5v-turbo"}
-	no := []string{"gpt-5-nano", "glm-5", "glm-4.7", "some-private-model"}
+	yes := []string{"gpt-6", "gpt-5.4", "gpt-4o", "o3", "glm-4.6v", "glm-5v-turbo", "gemini-4-neon", "gemini-3.8-flash", "gemini-2.5-pro"}
+	no := []string{"gpt-5-nano", "glm-5", "glm-4.7", "gemini-embedding-001", "some-private-model"}
 	for _, id := range yes {
 		if !openAISupportsVision(id) {
 			t.Errorf("%s: want vision", id)

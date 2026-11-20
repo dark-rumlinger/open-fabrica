@@ -39,34 +39,10 @@ func SaveBytesAsArtifact(ctx *tools.ToolContext, data []byte, contentType, filen
 		return "", fmt.Errorf("filename is required")
 	}
 
-	storagePath, err := store.WriteFileToDisk(ctx.DataDirOrDefault(), ctx.ProjectID, "assets", filename, data)
-	if err != nil {
-		return "", fmt.Errorf("writing to disk: %w", err)
-	}
-
 	if meta == nil {
 		meta = map[string]any{}
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	_, err = ctx.DB.Exec(
-		`INSERT INTO of_files (kind, path, storage, content_type, size, disk_path, scope, metadata, is_deleted, updated_at)
-		 VALUES ('file', ?, 'disk', ?, ?, ?, 'global', ?, 0, CURRENT_TIMESTAMP)
-		 ON CONFLICT(kind, path) DO UPDATE SET
-		   storage = 'disk',
-		   body = '',
-		   content_type = excluded.content_type,
-		   size = excluded.size,
-		   disk_path = excluded.disk_path,
-		   scope = excluded.scope,
-		   metadata = excluded.metadata,
-		   is_deleted = 0,
-		   deleted_at = NULL,
-		   updated_at = CURRENT_TIMESTAMP`,
-		filename, contentType, len(data), storagePath, string(metaJSON),
-	)
-	if err != nil {
-		return "", fmt.Errorf("recording artifact: %w", err)
-	}
-	return storagePath, nil
+	return store.SaveDiskArtifact(ctx.DB, ctx.DataDirOrDefault(), ctx.ProjectID, "assets", filename, contentType, data, string(metaJSON))
 }

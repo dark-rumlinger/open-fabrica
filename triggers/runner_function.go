@@ -54,9 +54,15 @@ func (r *Runner) executeRunFunction(projectDB *sql.DB, event events.Event, confi
 		"body":    event.Payload,
 		"user":    nil,
 	}
-	// projectDB is the project's writer connection (reads work on it too), so it
-	// backs both ctx.query and the declared-write transaction.
-	rt := funcexec.NewRuntime(event.ProjectID, projectDB, projectDB, r.completeDeps())
-	_, err = funcexec.Execute(rt, spec, req)
+	// Prefer the project's read pool for ctx.query so read-only queries don't
+	// contend with the single writer connection; fall back to projectDB in tests.
+	reader := projectDB
+	if r.projectDBMgr != nil {
+		if pdb := r.projectDBMgr.Get(event.ProjectID); pdb != nil {
+			reader = pdb.Reader()
+		}
+	}
+	rt := funcexec.NewRuntime(event.ProjectID, reader, projectDB, r.completeDeps())
+	_, err = funcexec.ExecuteContext(r.lifecycle(), rt, spec, req)
 	return err
 }

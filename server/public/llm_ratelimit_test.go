@@ -10,10 +10,12 @@ import (
 func TestEndpointRateLimitSweepsIdleKeys(t *testing.T) {
 	rl := newEndpointRateLimiter()
 	rl.Lock()
-	rl.counts = map[string][]time.Time{
-		"idle":   {time.Now().Add(-2 * time.Minute)},
-		"recent": {time.Now()},
-	}
+	idle := &endpointRateBucket{key: "idle", windowStart: time.Now().Add(-3 * time.Minute), lastSeen: time.Now().Add(-3 * time.Minute), currCount: 1}
+	recent := &endpointRateBucket{key: "recent", windowStart: time.Now(), lastSeen: time.Now(), currCount: 1}
+	recent.elem = rl.lru.PushFront(recent)
+	idle.elem = rl.lru.PushBack(idle)
+	rl.buckets["idle"] = idle
+	rl.buckets["recent"] = recent
 	rl.lastSweep = time.Time{}
 	rl.Unlock()
 
@@ -24,13 +26,13 @@ func TestEndpointRateLimitSweepsIdleKeys(t *testing.T) {
 
 	rl.Lock()
 	defer rl.Unlock()
-	if _, ok := rl.counts["idle"]; ok {
+	if _, ok := rl.buckets["idle"]; ok {
 		t.Error("idle key survived the sweep")
 	}
-	if _, ok := rl.counts["recent"]; !ok {
+	if _, ok := rl.buckets["recent"]; !ok {
 		t.Error("a key with a request inside the window was swept")
 	}
-	if _, ok := rl.counts["caller"]; !ok {
+	if _, ok := rl.buckets["caller"]; !ok {
 		t.Error("the calling key was not recorded")
 	}
 }

@@ -48,6 +48,7 @@ export const GROUPS = [
       { id: 'webhooks', label: t('tabs.eventHooks') },
       { id: 'webhooks-actions', label: t('tabs.automated') },
       { id: 'tasks', label: t('tabs.scheduled') },
+      { id: 'mqtt', label: t('tabs.mqtt') },
       { id: 'payments', label: t('tabs.payments') },
     ],
   },
