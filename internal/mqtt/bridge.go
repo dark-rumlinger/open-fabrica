@@ -127,9 +127,7 @@ func remapOutboundTopic(localPrefix, remotePrefix, localTopic string) string {
 		if !strings.HasSuffix(lp, "/") {
 			lp += "/"
 		}
-		if strings.HasPrefix(t, lp) {
-			t = strings.TrimPrefix(t, lp)
-		}
+		t = strings.TrimPrefix(t, lp)
 	}
 	if remotePrefix == "" {
 		return t

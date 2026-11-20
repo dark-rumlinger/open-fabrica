@@ -196,7 +196,7 @@ func (h *Handler) apiAgent(w http.ResponseWriter, r *http.Request, project *mode
 	// owns its own call logger, set up inside the goroutine rather than here where
 	// the request scope (and the deferred Close) ends first.
 	if r.URL.Query().Get("async") == "1" {
-		h.startAgentRunAsync(w, project, projectDB, ep, cfg, provider, messages, modelID, authUserID, authTenantID)
+		h.startAgentRunAsync(w, project, projectDB, ep, cfg, provider, messages, authUserID, authTenantID)
 		return
 	}
 
@@ -308,7 +308,7 @@ var agentAsyncSem = make(chan struct{}, maxConcurrentAsyncAg)
 // startAgentRunAsync records a run row, kicks off a detached goroutine to run the
 // agent, and answers 202 with the id to poll. The goroutine owns its own call
 // logger and a background context so it survives the request returning.
-func (h *Handler) startAgentRunAsync(w http.ResponseWriter, project *models.Project, projectDB *db.ProjectDB, ep *agentEndpointRow, cfg agentrt.Config, provider llm.Provider, messages []llm.Message, modelID string, userID, tenantID int) {
+func (h *Handler) startAgentRunAsync(w http.ResponseWriter, project *models.Project, projectDB *db.ProjectDB, ep *agentEndpointRow, cfg agentrt.Config, provider llm.Provider, messages []llm.Message, userID, tenantID int) {
 	select {
 	case agentAsyncSem <- struct{}{}:
 	default:

@@ -15,7 +15,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -536,9 +535,6 @@ func (m *Manager) activeDomainsLogging(logger *slog.Logger) ([]string, error) {
 	}
 	return filterValidDomains(projects, logger), nil
 }
-
-// silentLogger discards everything.
-var silentLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // HasActiveDomainsQuiet is HasActiveDomains for callers that run on every request
 // (the dashboard's status poll). It avoids synchronous DNS lookups so slow or

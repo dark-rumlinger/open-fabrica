@@ -44,7 +44,8 @@ linters:
         - fmt.Fprintln
     misspell:
       ignore-rules:
-        - DOUB # SQLite type-affinity substring match for DOUBLE, not a typo
+        - DOUB      # SQLite type-affinity substring match for DOUBLE, not a typo
+        - mosquitto # Eclipse Mosquitto MQTT broker, not a typo
     revive:
       # Run ONLY the argument-limit rule (specifying rules disables revive's
       # default rule set, so this stays in keeping with the lean-linter policy
